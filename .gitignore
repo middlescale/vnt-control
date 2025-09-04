@@ -1,0 +1,23 @@
+# Go build
+vnt-control
+*.exe
+*.out
+*.test
+
+# Dependency directories
+vendor/
+
+# Autocert cache
+cert-cache/
+
+# IDE/editor
+.vscode/
+.idea/
+*.swp
+
+# Logs
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
