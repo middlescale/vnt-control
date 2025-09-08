@@ -11,8 +11,9 @@ import (
 func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/status", handlers.StatusHandler)
+	mux.HandleFunc("/ws", handlers.WSHandler)
 
-	domain := "gateway.middlescale.net"
+	domain := "control.middlescale.net"
 	cacheDir := "./cert-cache" // 证书缓存目录
 
 	m := &autocert.Manager{
