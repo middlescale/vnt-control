@@ -1,0 +1,165 @@
+package protocol
+
+import (
+	"errors"
+	"net"
+)
+
+/*
+	0                                            15                                              31
+	0  1  2  3  4  5  6  7  8  9  0  1  2  3  4  5  6  7  8  9  0  1  2  3  4  5  6  7  8  9  0  1
+
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|e |s |x |u|   版本(4) |      协议(8)          |      上层协议(8)        | 初始ttl(4) | 生存时间(4) |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                                          源ip地址(32)                                         |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                                          目的ip地址(32)                                       |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                                           数据体                                              |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+注：e为是否加密标志，s为服务端通信包标志，x扩展标志，u未使用
+*/
+type Packet struct {
+	Ver       uint8       // 版本，4位
+	Proto     Protocol    // 协议，8位
+	AppProto  AppProtocol // 应用协议，8位
+	SourceTTL uint8       // 初始TTL，4位
+	TTL       uint8       // 生存时间，4位
+	SrcIP     net.IP      // 源IP地址，IPv4
+	DstIP     net.IP      // 目的IP地址，IPv4
+	Payload   []byte      // 数据体
+}
+
+const (
+	PacketHeaderSize = 12 // 没加密的头 12字节
+)
+
+type Protocol uint8
+
+const (
+	ProtocolService   Protocol = 1
+	ProtocolError     Protocol = 2
+	ProtocolControl   Protocol = 3
+	ProtocolIpTurn    Protocol = 4
+	ProtocolOtherTurn Protocol = 5
+	ProtocolUnknown   Protocol = 255
+)
+
+func ProtocolFromUint8(val uint8) Protocol {
+	switch val {
+	case 1:
+		return ProtocolService
+	case 2:
+		return ProtocolError
+	case 3:
+		return ProtocolControl
+	case 4:
+		return ProtocolIpTurn
+	case 5:
+		return ProtocolOtherTurn
+	default:
+		return ProtocolUnknown
+	}
+}
+
+func (p Protocol) ToUint8() uint8 {
+	return uint8(p)
+}
+
+type AppProtocol uint8
+
+const (
+	AppProtoRegistrationRequest     AppProtocol = 1
+	AppProtoRegistrationResponse    AppProtocol = 2
+	AppProtoPullDeviceList          AppProtocol = 3
+	AppProtoPushDeviceList          AppProtocol = 4
+	AppProtoHandshakeRequest        AppProtocol = 5
+	AppProtoHandshakeResponse       AppProtocol = 6
+	AppProtoSecretHandshakeRequest  AppProtocol = 7
+	AppProtoSecretHandshakeResponse AppProtocol = 8
+	AppProtoClientStatusInfo        AppProtocol = 9
+	AppProtoUnknown                 AppProtocol = 255
+)
+
+func AppProtocolFromUint8(val uint8) AppProtocol {
+	switch val {
+	case 1:
+		return AppProtoRegistrationRequest
+	case 2:
+		return AppProtoRegistrationResponse
+	case 3:
+		return AppProtoPullDeviceList
+	case 4:
+		return AppProtoPushDeviceList
+	case 5:
+		return AppProtoHandshakeRequest
+	case 6:
+		return AppProtoHandshakeResponse
+	case 7:
+		return AppProtoSecretHandshakeRequest
+	case 8:
+		return AppProtoSecretHandshakeResponse
+	case 9:
+		return AppProtoClientStatusInfo
+	default:
+		return AppProtoUnknown
+	}
+}
+
+func (p AppProtocol) ToUint8() uint8 {
+	return uint8(p)
+}
+
+var ErrInvalidPacket = errors.New("invalid packet")
+
+func NewPacket(ver, proto, appProto, sourceTTL, ttl uint8, srcIP, dstIP net.IP, payload []byte) *Packet {
+	return &Packet{
+		Ver:       ver,
+		Proto:     ProtocolFromUint8(proto),
+		AppProto:  AppProtocolFromUint8(appProto),
+		SourceTTL: sourceTTL,
+		TTL:       ttl,
+		SrcIP:     srcIP.To4(),
+		DstIP:     dstIP.To4(),
+		Payload:   payload,
+	}
+}
+
+func (p *Packet) Marshal() []byte {
+	buf := make([]byte, PacketHeaderSize+len(p.Payload))
+	buf[0] = (p.Ver & 0x0F) // 版本占4位
+	buf[1] = p.Proto.ToUint8()
+	buf[2] = p.AppProto.ToUint8()
+	buf[3] = ((p.SourceTTL & 0x0F) << 4) | (p.TTL & 0x0F) // SourceTTL和TTL各占4位
+
+	// 源IP地址
+	copy(buf[4:8], p.SrcIP.To4())
+	// 目的IP地址
+	copy(buf[8:12], p.DstIP.To4())
+
+	// 数据体
+	copy(buf[PacketHeaderSize:], p.Payload)
+
+	return buf
+}
+
+func Unmarshal(data []byte) (*Packet, error) {
+	if len(data) < PacketHeaderSize {
+		return nil, ErrInvalidPacket
+	}
+
+	p := &Packet{}
+	p.Ver = data[0] & 0x0F
+	p.Proto = ProtocolFromUint8(data[1])
+	p.AppProto = AppProtocolFromUint8(data[2])
+	p.SourceTTL = (data[3] >> 4) & 0x0F
+	p.TTL = data[3] & 0x0F
+	p.SrcIP = net.IPv4(data[4], data[5], data[6], data[7])
+	p.DstIP = net.IPv4(data[8], data[9], data[10], data[11])
+
+	p.Payload = make([]byte, len(data)-PacketHeaderSize)
+	copy(p.Payload, data[PacketHeaderSize:])
+
+	return p, nil
+}
