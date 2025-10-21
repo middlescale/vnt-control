@@ -1,0 +1,48 @@
+version: '3.8'
+
+services:
+  vnt-control:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    image: ghcr.io/middlescale/vnt-control
+    container_name: vnt-control
+    # QUIC typically uses UDP; expose UDP port here if you need host access.
+    ports:
+      - "4433:4433/udp"
+    volumes:
+      - ./test/certs:/certs:ro
+      - ./:/workspace:ro
+    working_dir: /workspace
+    environment:
+      - TLS_CERT=/certs/server.crt
+      - TLS_KEY=/certs/server.key
+      - CONFIG_PATH=/workspace/config/config.json
+    command: ["/usr/local/bin/vnt-control"]
+
+  # Optional: build your rust client here if you have its Dockerfile in a sibling folder.
+  rust-client:
+    # build:
+    #   context: ../rust-client
+    #   dockerfile: Dockerfile.client
+    image: alpine:3.18
+    container_name: rust-client
+    volumes:
+      - ./test/certs:/certs:ro
+      - ./:/workspace:ro
+    working_dir: /workspace
+    entrypoint: ["/bin/sh", "-c", "echo 'Placeholder rust-client container; replace with your client image or build'; sleep 3600"]
+
+  tester:
+    image: alpine:3.18
+    container_name: vnt-tester
+    depends_on:
+      - vnt-control
+      - rust-client
+    volumes:
+      - ./test/certs:/certs:ro
+      - ./:/workspace
+    working_dir: /workspace
+    entrypoint: ["/workspace/test/run-tests.sh"]
+
+volumes: {}

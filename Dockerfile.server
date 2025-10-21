@@ -1,0 +1,22 @@
+# Dockerfile.server - multi-stage build for vnt-control
+
+# Build stage
+FROM golang:1.23-alpine AS builder
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+# Build static-like binary (CGO disabled) for linux/amd64
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags='-s -w' -o /out/vnt-control ./
+
+# Final stage
+FROM alpine:3.18
+RUN apk add --no-cache ca-certificates
+COPY --from=builder /out/vnt-control /usr/local/bin/vnt-control
+# Optional directory for autocert cache
+RUN mkdir -p /var/lib/vnt-control && chown 1000:1000 /var/lib/vnt-control || true
+
+EXPOSE 4433/udp
+
+USER 1000
+ENTRYPOINT ["/usr/local/bin/vnt-control"]

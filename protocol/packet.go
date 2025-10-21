@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"errors"
+	"fmt"
 	"net"
 )
 
@@ -10,7 +11,7 @@ import (
 	0  1  2  3  4  5  6  7  8  9  0  1  2  3  4  5  6  7  8  9  0  1  2  3  4  5  6  7  8  9  0  1
 
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|e |s |x |u|   版本(4) |      协议(8)          |      上层协议(8)        | 初始ttl(4) | 生存时间(4) |
+|e |s |x |u|   版本(4) |      协议(8)          |      app协议(8)        | source_ttl(4) | ttl(4) |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 |                                          源ip地址(32)                                         |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
@@ -21,7 +22,7 @@ import (
 注：e为是否加密标志，s为服务端通信包标志，x扩展标志，u未使用
 */
 type Packet struct {
-	Ver       uint8       // 版本，4位
+	Ver       Version     // 版本，4位
 	Proto     Protocol    // 协议，8位
 	AppProto  AppProtocol // 应用协议，8位
 	SourceTTL uint8       // 初始TTL，4位
@@ -29,11 +30,33 @@ type Packet struct {
 	SrcIP     net.IP      // 源IP地址，IPv4
 	DstIP     net.IP      // 目的IP地址，IPv4
 	Payload   []byte      // 数据体
+	Gateway   bool
 }
 
 const (
 	PacketHeaderSize = 12 // 没加密的头 12字节
+	MAX_TTL          = 0b1111
 )
+
+type Version uint8
+
+const (
+	V2             Version = 2
+	VersionUnknown Version = 255
+)
+
+func VersionFromUint8(val uint8) Version {
+	switch val {
+	case 2:
+		return V2
+	default:
+		return VersionUnknown
+	}
+}
+
+func (v Version) ToUint8() uint8 {
+	return uint8(v)
+}
 
 type Protocol uint8
 
@@ -115,7 +138,7 @@ var ErrInvalidPacket = errors.New("invalid packet")
 
 func NewPacket(ver, proto, appProto, sourceTTL, ttl uint8, srcIP, dstIP net.IP, payload []byte) *Packet {
 	return &Packet{
-		Ver:       ver,
+		Ver:       VersionFromUint8(ver),
 		Proto:     ProtocolFromUint8(proto),
 		AppProto:  AppProtocolFromUint8(appProto),
 		SourceTTL: sourceTTL,
@@ -128,7 +151,7 @@ func NewPacket(ver, proto, appProto, sourceTTL, ttl uint8, srcIP, dstIP net.IP, 
 
 func (p *Packet) Marshal() []byte {
 	buf := make([]byte, PacketHeaderSize+len(p.Payload))
-	buf[0] = (p.Ver & 0x0F) // 版本占4位
+	buf[0] = (V2.ToUint8() & 0x0F) // 版本占4位
 	buf[1] = p.Proto.ToUint8()
 	buf[2] = p.AppProto.ToUint8()
 	buf[3] = ((p.SourceTTL & 0x0F) << 4) | (p.TTL & 0x0F) // SourceTTL和TTL各占4位
@@ -141,6 +164,12 @@ func (p *Packet) Marshal() []byte {
 	// 数据体
 	copy(buf[PacketHeaderSize:], p.Payload)
 
+	if p.Gateway {
+		buf[0] |= 0x40 // 0b0100
+	} else {
+		buf[0] &= 0xBF // 0b1011
+	}
+
 	return buf
 }
 
@@ -150,7 +179,7 @@ func Unmarshal(data []byte) (*Packet, error) {
 	}
 
 	p := &Packet{}
-	p.Ver = data[0] & 0x0F
+	p.Ver = VersionFromUint8(data[0] & 0x0F)
 	p.Proto = ProtocolFromUint8(data[1])
 	p.AppProto = AppProtocolFromUint8(data[2])
 	p.SourceTTL = (data[3] >> 4) & 0x0F
@@ -162,4 +191,22 @@ func Unmarshal(data []byte) (*Packet, error) {
 	copy(p.Payload, data[PacketHeaderSize:])
 
 	return p, nil
+}
+
+func (p *Packet) DebugString() string {
+	return "Packet{" +
+		"Ver=" + fmt.Sprintf("%d", p.Ver) + ", " +
+		"Proto=" + fmt.Sprintf("%d", p.Proto) + ", " +
+		"AppProto=" + fmt.Sprintf("%d", p.AppProto) + ", " +
+		"SourceTTL=" + fmt.Sprintf("%d", p.SourceTTL) + ", " +
+		"TTL=" + fmt.Sprintf("%d", p.TTL) + ", " +
+		"SrcIP=" + p.SrcIP.String() + ", " +
+		"DstIP=" + p.DstIP.String() + ", " +
+		"PayloadLen=" + fmt.Sprintf("%d", len(p.Payload)) +
+		", Gateway=" + fmt.Sprintf("%t", p.Gateway) +
+		"}"
+}
+
+func (p *Packet) SetGatewayFlag(isGateway bool) {
+	p.Gateway = isGateway
 }
