@@ -13,9 +13,16 @@ import (
 // netmask: IPv4 子网掩码
 // domain: 域名字符串
 type Config struct {
-	Gateway string `json:"gateway"`
-	Domain  string `json:"domain"`
-	Netmask string `json:"netmask"`
+	Gateway           net.IP `json:"gateway"`
+	Domain            string `json:"domain"`
+	Netmask           string `json:"netmask"`
+	ListenAddr        string `json:"listen_addr"`
+	AutoCertDomain    string `json:"autocert_domain"`
+	CertCacheDir      string `json:"cert_cache_dir"`
+	TLSCertPath       string `json:"tls_cert_path"`
+	TLSKeyPath        string `json:"tls_key_path"`
+	ClientCAPath      string `json:"client_ca_path"`
+	RequireClientCert bool   `json:"require_client_cert"`
 }
 
 func LoadConfig(path string) (*Config, error) {
@@ -38,7 +45,7 @@ func LoadConfig(path string) (*Config, error) {
 
 // Validate 校验配置字段格式
 func (c *Config) Validate() error {
-	gateway := net.ParseIP(c.Gateway)
+	gateway := c.Gateway
 	if gateway == nil || gateway.To4() == nil {
 		return errors.New("gateway 必须为合法 IPv4 地址")
 	}
