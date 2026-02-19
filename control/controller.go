@@ -1,7 +1,6 @@
 package control
 
 import (
-	"errors"
 	"fmt"
 	"net"
 	"strconv"
@@ -16,13 +15,14 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-type Control struct {
+type Controller struct {
 	nc  NetworkControl
 	cfg *config.Config
+	mu  sync.Mutex
 }
 
-func NewControl(cfg *config.Config) *Control {
-	return &Control{
+func NewController(cfg *config.Config) *Controller {
+	return &Controller{
 		nc: NetworkControl{
 			VirtualNetwork: *NewExpireMap[string, *NetworkInfo](7 * 24 * time.Hour),
 			IpSession:      *NewExpireMap[IpSessionKey, net.Addr](24 * time.Hour),
@@ -31,12 +31,12 @@ func NewControl(cfg *config.Config) *Control {
 	}
 }
 
-func (c *Control) Stop() {
+func (c *Controller) Stop() {
 	c.nc.VirtualNetwork.Stop()
 	c.nc.IpSession.Stop()
 }
 
-func (c *Control) HandleHandshakePacket(reqPacket *protocol.Packet) (*protocol.Packet, error) {
+func (c *Controller) HandleHandshakePacket(reqPacket *protocol.Packet) (*protocol.Packet, error) {
 	log.Debugf("收到客户端 HandshakeRequest Packet: %s", reqPacket.DebugString())
 	var req pb.HandshakeRequest
 	if err := proto.Unmarshal(reqPacket.Payload, &req); err != nil {
@@ -63,7 +63,8 @@ func (c *Control) HandleHandshakePacket(reqPacket *protocol.Packet) (*protocol.P
 		Proto:     protocol.ProtocolService,
 		AppProto:  protocol.AppProtoHandshakeResponse,
 		SourceTTL: protocol.MAX_TTL,
-		SrcIP:     net.IP(c.cfg.Gateway),
+		TTL:       protocol.MAX_TTL,
+		SrcIP:     reqPacket.DstIP,
 		DstIP:     reqPacket.SrcIP,
 		Gateway:   true,
 		Payload:   playload,
@@ -74,70 +75,107 @@ func (c *Control) HandleHandshakePacket(reqPacket *protocol.Packet) (*protocol.P
 	return rspPacket, nil
 }
 
-func (c *Control) HandleRegistrationPacket(request *protocol.Packet, remoteAddr net.Addr) (*protocol.Packet, error) {
+func (c *Controller) HandleRegistrationPacket(request *protocol.Packet, remoteAddr net.Addr) (*protocol.Packet, error) {
 	log.Debugf("收到客户端 RegistrationRequest Packet: %s", request.DebugString())
 	var registration pb.RegistrationRequest
 	if err := proto.Unmarshal(request.Payload, &registration); err != nil {
 		log.Errorf("RegistrationRequest unmarshal error: %v", err)
 		return nil, err
 	}
-
-	if registration.GetToken() == "" {
-		log.Errorf("RegistrationRequest missing token(domain name), ignoring: %+v", request)
-		return nil, errors.New("RegistrationRequest missing token(domain name)")
-	}
-	if registration.GetDeviceId() == "" || registration.GetName() == "" {
-		log.Errorf("RegistrationRequest missing device_id or name, ignoring: %+v", request)
-		return nil, errors.New("RegistrationRequest missing device_id or name")
+	if err := validateRegistrationRequest(&registration); err != nil {
+		log.Errorf("RegistrationRequest validate error: %v", err)
+		return nil, err
 	}
 
 	domain := registration.GetToken()
-	if domain != c.cfg.Domain {
+	if c.cfg.Domain != "" && domain != c.cfg.Domain {
 		return nil, fmt.Errorf("RegistrationRequest domain %s mismatch config domain %s", domain, c.cfg.Domain)
 	}
 
-	// 解析 remote address，区分 IPv4/IPv6 并提取 port（确保两者不会同时存在）
 	raddrStr := remoteAddr.String()
 	host, portStr, err := net.SplitHostPort(raddrStr)
 	if err != nil {
 		return nil, fmt.Errorf("Failed to parse remote address: %v", err)
 	}
-
-	// handling virtual network assignment
-	_, netInfoExist := c.nc.VirtualNetwork.Get(domain)
-	if !netInfoExist {
-		newNetInfo := NewNetworkInfo(domain, net.IPMask(c.cfg.Netmask), net.IP(c.cfg.Gateway))
-		c.nc.VirtualNetwork.Set(domain, newNetInfo)
+	port, err := strconv.Atoi(portStr)
+	if err != nil || port < 0 || port > 65535 {
+		return nil, fmt.Errorf("invalid remote port: %q", portStr)
 	}
-	if registration.GetVirtualIp() != 0 {
-		virtualIP := util.Uint32ToIP(registration.GetVirtualIp())
-		if c.cfg.Gateway.Equal(virtualIP) {
-			return nil, fmt.Errorf("Client requested virtual IP is gateway IP, ignoring assignment")
-		}
-	}
-
-	port, _ := strconv.Atoi(portStr)
 	pubPort := uint32(port)
 
 	registrationResp := &pb.RegistrationResponse{
 		PublicPort: pubPort,
 	}
-
 	if ip := net.ParseIP(host); ip != nil {
 		if ip4 := ip.To4(); ip4 != nil {
-			registrationResp.PublicIp = uint32(ip4[3]) | uint32(ip4[2])<<8 | uint32(ip4[1])<<16 | uint32(ip4[0])<<24
+			registrationResp.PublicIp = util.IpToUint32(ip4)
 		} else {
-			registrationResp.PublicIpv6 = []byte(ip.String())
+			registrationResp.PublicIpv6 = ip.To16()
 		}
 	}
-	registrationResp.VirtualGateway = util.IpToUint32(c.cfg.Gateway)
-	registrationResp.VirtualNetmask = util.IpToUint32(net.IP(c.cfg.Netmask))
-
-	ip := c.nc.generateIP(domain, c.cfg.Gateway, net.IPMask(c.cfg.Netmask))
-	if ip == nil {
-		return nil, fmt.Errorf("No available virtual IPs")
+	netmask, err := c.parseNetmask()
+	if err != nil {
+		return nil, err
 	}
-	registrationResp.VirtualIp = util.IpToUint32(ip)
+	registrationResp.VirtualGateway = util.IpToUint32(c.cfg.Gateway)
+	registrationResp.VirtualNetmask = util.MaskToUint32(netmask)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	netInfo, netInfoExist := c.nc.VirtualNetwork.Get(domain)
+	if !netInfoExist {
+		netInfo = NewNetworkInfo(domain, netmask, net.IP(c.cfg.Gateway))
+		c.nc.VirtualNetwork.Set(domain, netInfo)
+	}
+	oldIP := findClientIPByDeviceID(netInfo.Clients, registration.GetDeviceId())
+	requestedIP := registration.GetVirtualIp()
+	if requestedIP != 0 {
+		if err := validateRequestedIP(requestedIP, c.cfg.Gateway, netmask); err != nil {
+			return nil, err
+		}
+		if current, ok := netInfo.Clients[requestedIP]; ok && current.DeviceId != registration.GetDeviceId() {
+			if !registration.GetAllowIpChange() {
+				return nil, fmt.Errorf("virtual ip %s already in use", util.Uint32ToIP(requestedIP))
+			}
+			requestedIP = 0
+		}
+	}
+	virtualIP := requestedIP
+	if virtualIP == 0 {
+		if oldIP != 0 {
+			virtualIP = oldIP
+		} else {
+			ip := c.nc.generateIP(domain, c.cfg.Gateway, netmask)
+			if ip == nil {
+				return nil, fmt.Errorf("no available virtual ips")
+			}
+			virtualIP = util.IpToUint32(ip)
+		}
+	}
+	if oldIP != 0 && oldIP != virtualIP {
+		delete(netInfo.Clients, oldIP)
+		c.nc.IpSession.Delete(NewIpSessionKey(domain, util.Uint32ToIP(oldIP)))
+	}
+	clientInfo := netInfo.Clients[virtualIP]
+	now := time.Now().Unix()
+	clientInfo.DeviceId = registration.GetDeviceId()
+	clientInfo.Name = registration.GetName()
+	clientInfo.Version = registration.GetVersion()
+	clientInfo.Online = true
+	clientInfo.VirtualIp = virtualIP
+	clientInfo.Address = remoteAddr
+	clientInfo.ClientSecret = registration.GetClientSecret()
+	clientInfo.ClientSecretHash = append(clientInfo.ClientSecretHash[:0], registration.GetClientSecretHash()...)
+	clientInfo.Wireguard = false
+	clientInfo.LastJoin = now
+	clientInfo.LastSeen = now
+	netInfo.Clients[virtualIP] = clientInfo
+	c.nc.IpSession.Set(NewIpSessionKey(domain, util.Uint32ToIP(virtualIP)), remoteAddr)
+	netInfo.Epoch++
+	registrationResp.VirtualIp = virtualIP
+	registrationResp.Epoch = uint32(netInfo.Epoch)
+	registrationResp.DeviceInfoList = buildDeviceInfoList(netInfo.Clients, virtualIP)
 
 	respBytes, err := proto.Marshal(registrationResp)
 	if err != nil {
@@ -145,10 +183,15 @@ func (c *Control) HandleRegistrationPacket(request *protocol.Packet, remoteAddr 
 	}
 
 	respPacket := &protocol.Packet{
-		Ver:      protocol.V2,
-		Proto:    protocol.ProtocolService,
-		AppProto: protocol.AppProtoRegistrationResponse,
-		Payload:  respBytes,
+		Ver:       protocol.V2,
+		Proto:     protocol.ProtocolService,
+		AppProto:  protocol.AppProtoRegistrationResponse,
+		SourceTTL: protocol.MAX_TTL,
+		TTL:       protocol.MAX_TTL,
+		SrcIP:     request.DstIP,
+		DstIP:     request.SrcIP,
+		Gateway:   true,
+		Payload:   respBytes,
 	}
 
 	return respPacket, nil
@@ -178,6 +221,79 @@ func NewIpSessionKey(id string, ip net.IP) IpSessionKey {
 		ID: id,
 		IP: ip.String(),
 	}
+}
+
+func (c *Controller) parseNetmask() (net.IPMask, error) {
+	ip := net.ParseIP(c.cfg.Netmask)
+	if ip == nil || ip.To4() == nil {
+		return nil, fmt.Errorf("invalid netmask %q", c.cfg.Netmask)
+	}
+	return net.IPMask(ip.To4()), nil
+}
+
+func validateRegistrationRequest(reg *pb.RegistrationRequest) error {
+	if reg.GetToken() == "" || len(reg.GetToken()) > 128 {
+		return fmt.Errorf("token length error")
+	}
+	if reg.GetDeviceId() == "" || len(reg.GetDeviceId()) > 128 {
+		return fmt.Errorf("device_id length error")
+	}
+	if reg.GetName() == "" || len(reg.GetName()) > 128 {
+		return fmt.Errorf("name length error")
+	}
+	if len(reg.GetClientSecretHash()) > 128 {
+		return fmt.Errorf("client_secret_hash length error")
+	}
+	return nil
+}
+
+func validateRequestedIP(virtualIP uint32, gateway net.IP, netmask net.IPMask) error {
+	requested := util.Uint32ToIP(virtualIP)
+	if gateway.Equal(requested) {
+		return fmt.Errorf("client requested virtual ip is gateway ip")
+	}
+	networkIP := util.IpToUint32(gateway) & util.MaskToUint32(netmask)
+	mask := util.MaskToUint32(netmask)
+	broadcast := networkIP | ^mask
+	first := networkIP + 1
+	last := broadcast - 1
+	if virtualIP < first || virtualIP > last {
+		return fmt.Errorf("virtual ip %s out of network range", requested)
+	}
+	return nil
+}
+
+func findClientIPByDeviceID(clients map[uint32]ClientInfo, deviceID string) uint32 {
+	for ip, info := range clients {
+		if info.DeviceId == deviceID {
+			return ip
+		}
+	}
+	return 0
+}
+
+func buildDeviceInfoList(clients map[uint32]ClientInfo, selfIP uint32) []*pb.DeviceInfo {
+	deviceList := make([]*pb.DeviceInfo, 0, len(clients))
+	for ip, info := range clients {
+		if ip == selfIP {
+			continue
+		}
+		item := &pb.DeviceInfo{
+			Name:             info.Name,
+			VirtualIp:        ip,
+			ClientSecret:     info.ClientSecret,
+			Wireguard:        info.Wireguard,
+			ClientSecretHash: nil,
+		}
+		if info.Online {
+			item.DeviceStatus = 0
+			item.ClientSecretHash = append(item.ClientSecretHash, info.ClientSecretHash...)
+		} else {
+			item.DeviceStatus = 1
+		}
+		deviceList = append(deviceList, item)
+	}
+	return deviceList
 }
 
 func (nc *NetworkControl) generateIP(domain string, gateway net.IP, netmask net.IPMask) net.IP {

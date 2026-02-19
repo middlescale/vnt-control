@@ -68,6 +68,7 @@ func main() {
 		tlsConfig = &tls.Config{
 			Certificates: []tls.Certificate{cert},
 			MinVersion:   tls.VersionTLS13,
+			NextProtos:   []string{"vnt-control"},
 		}
 	} else {
 		domain := firstNonEmpty(os.Getenv("AUTOCERT_DOMAIN"), cfg.AutoCertDomain, cfg.Domain)
@@ -87,6 +88,7 @@ func main() {
 
 		tlsConfig = m.TLSConfig()
 		tlsConfig.MinVersion = tls.VersionTLS13
+		tlsConfig.NextProtos = []string{"vnt-control"}
 	}
 	if clientCAPath != "" {
 		clientCA, err := os.ReadFile(clientCAPath)
@@ -111,7 +113,7 @@ func main() {
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 	ctx, cancel := context.WithCancel(context.Background())
 
-	ctrl := control.NewControl(cfg)
+	ctrl := control.NewController(cfg)
 
 	go func() {
 		<-sigs

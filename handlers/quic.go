@@ -10,7 +10,7 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-func StartQuicServer(ctx context.Context, ctrl *control.Control, addr string, tlsConfig *tls.Config) {
+func StartQuicServer(ctx context.Context, ctrl *control.Controller, addr string, tlsConfig *tls.Config) {
 	listener, err := quic.ListenAddr(addr, tlsConfig, nil)
 	if err != nil {
 		log.Fatalf("QUIC listen error: %v", err)
@@ -33,7 +33,7 @@ func StartQuicServer(ctx context.Context, ctrl *control.Control, addr string, tl
 	}
 }
 
-func handleSession(ctrl *control.Control, conn *quic.Conn) {
+func handleSession(ctrl *control.Controller, conn *quic.Conn) {
 	stream, err := conn.AcceptStream(context.Background())
 	if err != nil {
 		log.Printf("Stream error: %v", err)

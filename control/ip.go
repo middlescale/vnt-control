@@ -28,6 +28,10 @@ type ClientInfo struct {
 	VirtualIp uint32 // 虚拟IP，IPv4大端表示
 	Address   net.Addr
 
+	ClientSecret     bool
+	ClientSecretHash []byte
+	Wireguard        bool
+
 	LastJoin int64 // Unix时间戳 (timestamp)
 	LastSeen int64 // Unix时间戳 (timestamp)
 

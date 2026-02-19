@@ -180,6 +180,7 @@ func Unmarshal(data []byte) (*Packet, error) {
 
 	p := &Packet{}
 	p.Ver = VersionFromUint8(data[0] & 0x0F)
+	p.Gateway = (data[0] & 0x40) != 0
 	p.Proto = ProtocolFromUint8(data[1])
 	p.AppProto = AppProtocolFromUint8(data[2])
 	p.SourceTTL = (data[3] >> 4) & 0x0F
