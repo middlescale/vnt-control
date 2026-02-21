@@ -128,30 +128,14 @@ func (c *Controller) HandleRegistrationPacket(request *protocol.Packet, remoteAd
 		netInfo = NewNetworkInfo(domain, netmask, net.IP(c.cfg.Gateway))
 		c.nc.VirtualNetwork.Set(domain, netInfo)
 	}
-	oldIP := findClientIPByDeviceID(netInfo.Clients, registration.GetDeviceId())
-	requestedIP := registration.GetVirtualIp()
-	if requestedIP != 0 {
-		if err := validateRequestedIP(requestedIP, c.cfg.Gateway, netmask); err != nil {
-			return nil, err
-		}
-		if current, ok := netInfo.Clients[requestedIP]; ok && current.DeviceId != registration.GetDeviceId() {
-			if !registration.GetAllowIpChange() {
-				return nil, fmt.Errorf("virtual ip %s already in use", util.Uint32ToIP(requestedIP))
-			}
-			requestedIP = 0
-		}
-	}
-	virtualIP := requestedIP
-	if virtualIP == 0 {
-		if oldIP != 0 {
-			virtualIP = oldIP
-		} else {
-			ip := c.nc.generateIP(domain, c.cfg.Gateway, netmask)
-			if ip == nil {
-				return nil, fmt.Errorf("no available virtual ips")
-			}
-			virtualIP = util.IpToUint32(ip)
-		}
+	virtualIP, oldIP, err := c.nc.generateIP(
+		netInfo,
+		registration.GetVirtualIp(),
+		registration.GetDeviceId(),
+		registration.GetAllowIpChange(),
+	)
+	if err != nil {
+		return nil, err
 	}
 	if oldIP != 0 && oldIP != virtualIP {
 		delete(netInfo.Clients, oldIP)
@@ -296,32 +280,57 @@ func buildDeviceInfoList(clients map[uint32]ClientInfo, selfIP uint32) []*pb.Dev
 	return deviceList
 }
 
-func (nc *NetworkControl) generateIP(domain string, gateway net.IP, netmask net.IPMask) net.IP {
-	networkIP := util.IpToUint32(gateway) & util.MaskToUint32(netmask)
-	mask := util.MaskToUint32(netmask)
+func (nc *NetworkControl) generateIP(
+	network *NetworkInfo,
+	requestedIP uint32,
+	deviceID string,
+	allowIPChange bool,
+) (virtualIP uint32, oldIP uint32, err error) {
+	oldIP = findClientIPByDeviceID(network.Clients, deviceID)
+	if requestedIP != 0 {
+		if err = validateRequestedIP(requestedIP, network.Gateway, network.Netmask); err != nil {
+			return 0, oldIP, err
+		}
+		if current, ok := network.Clients[requestedIP]; ok && current.DeviceId != deviceID {
+			if !allowIPChange {
+				return 0, oldIP, fmt.Errorf("virtual ip %s already in use", util.Uint32ToIP(requestedIP))
+			}
+			requestedIP = 0
+		}
+	}
+	if requestedIP != 0 {
+		return requestedIP, oldIP, nil
+	}
+	if oldIP != 0 {
+		return oldIP, oldIP, nil
+	}
+	networkIP := util.IpToUint32(network.Gateway) & util.MaskToUint32(network.Netmask)
+	mask := util.MaskToUint32(network.Netmask)
 	broadcast := networkIP | ^mask
-	gatewayIP := util.IpToUint32(gateway)
+	gatewayIP := util.IpToUint32(network.Gateway)
 
 	// first and last usable (exclude network and broadcast)
 	first := networkIP + 1
 	last := broadcast - 1
 	if first > last {
-		return nil
+		return 0, 0, fmt.Errorf("no available virtual ips")
 	}
-
 	for ip := first; ip <= last; ip++ {
 		if ip == gatewayIP {
 			continue
 		}
+		if _, occupied := network.Clients[ip]; occupied {
+			continue
+		}
 		candidate := util.Uint32ToIP(ip)
-		key := NewIpSessionKey(domain, candidate)
+		key := NewIpSessionKey(network.Group, candidate)
 		if _, occupied := nc.IpSession.Get(key); !occupied {
 			addr := &net.IPAddr{IP: candidate}
 			nc.IpSession.Set(key, addr)
-			return candidate
+			return ip, 0, nil
 		}
 	}
-	return nil
+	return 0, 0, fmt.Errorf("no available virtual ips")
 }
 
 // ExpireMap now accepts a key type K (must be comparable) and value type T.

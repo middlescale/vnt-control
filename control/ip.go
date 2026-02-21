@@ -3,16 +3,16 @@ package control
 import "net"
 
 type NetworkInfo struct {
-	Domain  string // Group
+	Group   string
 	Netmask net.IPMask
 	Gateway net.IP
 	Epoch   uint64
 	Clients map[uint32]ClientInfo
 }
 
-func NewNetworkInfo(domain string, netmask net.IPMask, gateway net.IP) *NetworkInfo {
+func NewNetworkInfo(group string, netmask net.IPMask, gateway net.IP) *NetworkInfo {
 	return &NetworkInfo{
-		Domain:  domain,
+		Group:   group,
 		Netmask: netmask,
 		Gateway: gateway,
 		Clients: make(map[uint32]ClientInfo), // key: virtual IP

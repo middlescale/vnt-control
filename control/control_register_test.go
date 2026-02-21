@@ -127,6 +127,16 @@ func mustRegister(t *testing.T, ctrl *Controller, req *pb.RegistrationRequest, r
 	if resp.GetVirtualNetmask() != util.IpToUint32(net.ParseIP("255.255.255.0")) {
 		t.Fatalf("unexpected virtual netmask: %d", resp.GetVirtualNetmask())
 	}
+	virtualIP := resp.GetVirtualIp()
+	virtualGateway := resp.GetVirtualGateway()
+	virtualNetmask := resp.GetVirtualNetmask()
+	if virtualIP&virtualNetmask != virtualGateway&virtualNetmask {
+		t.Fatalf("virtual ip %s is not in gateway/netmask network", util.Uint32ToIP(virtualIP))
+	}
+	broadcast := (virtualGateway & virtualNetmask) | ^virtualNetmask
+	if virtualIP == virtualGateway || virtualIP == broadcast {
+		t.Fatalf("virtual ip should not be gateway/broadcast: %s", util.Uint32ToIP(virtualIP))
+	}
 	return &resp
 }
 
