@@ -62,7 +62,6 @@ func handleSession(ctrl *control.Controller, conn *quic.Conn) {
 
 		// Protocol Service 和 Control 不需要上下文
 
-		// service
 		if packet.Proto == protocol.ProtocolService {
 			var respPacket *protocol.Packet
 			var err error
@@ -96,9 +95,21 @@ func handleSession(ctrl *control.Controller, conn *quic.Conn) {
 			if err != nil {
 				log.Errorf("Write HandshakeResponse error: %v", err)
 			}
-
+		} else if packet.Proto == protocol.ProtocolControl {
+			respPacket, err := ctrl.HandleControlPacket(packet)
+			if err != nil {
+				log.Errorf("HandleControlPacket error: %v", err)
+				continue
+			}
+			if respPacket == nil {
+				continue
+			}
+			_, err = stream.Write(respPacket.Marshal())
+			if err != nil {
+				log.Errorf("Write ControlResponse error: %v", err)
+			}
 		} else {
-			log.Infof("忽略非 Service Packet: %s", packet.DebugString())
+			log.Infof("忽略非 Service/Control Packet: %s", packet.DebugString())
 		}
 
 	}

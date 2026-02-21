@@ -181,6 +181,31 @@ func (c *Controller) HandleRegistrationPacket(request *protocol.Packet, remoteAd
 	return respPacket, nil
 }
 
+func (c *Controller) HandleControlPacket(request *protocol.Packet) (*protocol.Packet, error) {
+	switch protocol.ControlProtocol(request.AppProto) {
+	case protocol.ControlPing:
+		pingTime, _, err := protocol.ParsePingPayload(request.Payload)
+		if err != nil {
+			return nil, err
+		}
+		epoch := c.nc.TouchClientByIP(request.SrcIP)
+		payload := protocol.BuildPingPayload(pingTime, epoch)
+		return &protocol.Packet{
+			Ver:       protocol.V2,
+			Proto:     protocol.ProtocolControl,
+			AppProto:  protocol.AppProtocol(protocol.ControlPong),
+			SourceTTL: protocol.MAX_TTL,
+			TTL:       protocol.MAX_TTL,
+			SrcIP:     request.DstIP,
+			DstIP:     request.SrcIP,
+			Gateway:   true,
+			Payload:   payload,
+		}, nil
+	default:
+		return nil, fmt.Errorf("unsupported control protocol: %d", request.AppProto)
+	}
+}
+
 type NetworkControl struct {
 	//
 	VirtualNetwork ExpireMap[string, *NetworkInfo]
@@ -331,6 +356,22 @@ func (nc *NetworkControl) generateIP(
 		}
 	}
 	return 0, 0, fmt.Errorf("no available virtual ips")
+}
+
+func (nc *NetworkControl) TouchClientByIP(srcIP net.IP) uint16 {
+	ip := util.IpToUint32(srcIP)
+	nc.VirtualNetwork.mutex.Lock()
+	defer nc.VirtualNetwork.mutex.Unlock()
+	now := time.Now().Unix()
+	for _, network := range nc.VirtualNetwork.data {
+		if client, ok := network.Clients[ip]; ok {
+			client.Online = true
+			client.LastSeen = now
+			network.Clients[ip] = client
+			return uint16(network.Epoch)
+		}
+	}
+	return 0
 }
 
 // ExpireMap now accepts a key type K (must be comparable) and value type T.
