@@ -83,9 +83,21 @@ func handleSession(ctrl *control.Controller, conn *quic.Conn) {
 					log.Errorf("HandleRegistrationPacket error: %v", err)
 					continue
 				}
+			case protocol.AppProtoPullDeviceList:
+				respPacket, err = ctrl.HandlePullDeviceListPacket(packet)
+				if err != nil {
+					log.Errorf("HandlePullDeviceListPacket error: %v", err)
+					continue
+				}
+			case protocol.AppProtoClientStatusInfo:
+				err = ctrl.HandleClientStatusInfoPacket(packet)
+				if err != nil {
+					log.Errorf("HandleClientStatusInfoPacket error: %v", err)
+				}
+				continue
 
 			default:
-				log.Debugf("忽略非 handshake/register 类型 Packet: %d", packet.AppProto)
+				log.Debugf("忽略非 service处理类型 Packet: %d", packet.AppProto)
 				continue
 			}
 			if respPacket == nil {
@@ -96,7 +108,7 @@ func handleSession(ctrl *control.Controller, conn *quic.Conn) {
 				log.Errorf("Write HandshakeResponse error: %v", err)
 			}
 		} else if packet.Proto == protocol.ProtocolControl {
-			respPacket, err := ctrl.HandleControlPacket(packet)
+			respPacket, err := ctrl.HandleControlPacket(packet, conn.RemoteAddr())
 			if err != nil {
 				log.Errorf("HandleControlPacket error: %v", err)
 				continue

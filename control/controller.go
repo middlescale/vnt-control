@@ -181,7 +181,66 @@ func (c *Controller) HandleRegistrationPacket(request *protocol.Packet, remoteAd
 	return respPacket, nil
 }
 
-func (c *Controller) HandleControlPacket(request *protocol.Packet) (*protocol.Packet, error) {
+func (c *Controller) HandlePullDeviceListPacket(request *protocol.Packet) (*protocol.Packet, error) {
+	selfIP := util.IpToUint32(request.SrcIP)
+	deviceList, ok := c.nc.DeviceListByIP(selfIP)
+	if !ok {
+		return nil, fmt.Errorf("client %s not registered", request.SrcIP)
+	}
+	payload, err := proto.Marshal(deviceList)
+	if err != nil {
+		return nil, fmt.Errorf("DeviceList marshal error: %v", err)
+	}
+	return &protocol.Packet{
+		Ver:       protocol.V2,
+		Proto:     protocol.ProtocolService,
+		AppProto:  protocol.AppProtoPushDeviceList,
+		SourceTTL: protocol.MAX_TTL,
+		TTL:       protocol.MAX_TTL,
+		SrcIP:     request.DstIP,
+		DstIP:     request.SrcIP,
+		Gateway:   true,
+		Payload:   payload,
+	}, nil
+}
+
+func (c *Controller) HandleClientStatusInfoPacket(request *protocol.Packet) error {
+	var status pb.ClientStatusInfo
+	if err := proto.Unmarshal(request.Payload, &status); err != nil {
+		return fmt.Errorf("ClientStatusInfo unmarshal error: %v", err)
+	}
+	srcIP := util.IpToUint32(request.SrcIP)
+	if status.GetSource() != 0 && status.GetSource() != srcIP {
+		return fmt.Errorf("client status source mismatch: %d != %d", status.GetSource(), srcIP)
+	}
+	now := time.Now().Unix()
+	clientStatus := &ClientStatusInfo{
+		P2PList:    make([]net.IP, 0, len(status.GetP2PList())),
+		UpStream:   status.GetUpStream(),
+		DownStream: status.GetDownStream(),
+		IsCone:     status.GetNatType() == pb.PunchNatType_Cone,
+		UpdateTime: now,
+	}
+	for _, item := range status.GetP2PList() {
+		clientStatus.P2PList = append(clientStatus.P2PList, util.Uint32ToIP(item.GetNextIp()))
+	}
+	c.nc.VirtualNetwork.mutex.Lock()
+	defer c.nc.VirtualNetwork.mutex.Unlock()
+	for _, network := range c.nc.VirtualNetwork.data {
+		client, ok := network.Clients[srcIP]
+		if !ok {
+			continue
+		}
+		client.Online = true
+		client.LastSeen = now
+		client.ClientStatus = clientStatus
+		network.Clients[srcIP] = client
+		return nil
+	}
+	return fmt.Errorf("client %s not registered", request.SrcIP)
+}
+
+func (c *Controller) HandleControlPacket(request *protocol.Packet, remoteAddr net.Addr) (*protocol.Packet, error) {
 	switch protocol.ControlProtocol(request.AppProto) {
 	case protocol.ControlPing:
 		pingTime, _, err := protocol.ParsePingPayload(request.Payload)
@@ -194,6 +253,22 @@ func (c *Controller) HandleControlPacket(request *protocol.Packet) (*protocol.Pa
 			Ver:       protocol.V2,
 			Proto:     protocol.ProtocolControl,
 			AppProto:  protocol.AppProtocol(protocol.ControlPong),
+			SourceTTL: protocol.MAX_TTL,
+			TTL:       protocol.MAX_TTL,
+			SrcIP:     request.DstIP,
+			DstIP:     request.SrcIP,
+			Gateway:   true,
+			Payload:   payload,
+		}, nil
+	case protocol.ControlAddrRequest:
+		payload, err := protocol.BuildAddrPayloadByAddr(remoteAddr)
+		if err != nil {
+			return nil, err
+		}
+		return &protocol.Packet{
+			Ver:       protocol.V2,
+			Proto:     protocol.ProtocolControl,
+			AppProto:  protocol.AppProtocol(protocol.ControlAddrResponse),
 			SourceTTL: protocol.MAX_TTL,
 			TTL:       protocol.MAX_TTL,
 			SrcIP:     request.DstIP,
@@ -372,6 +447,48 @@ func (nc *NetworkControl) TouchClientByIP(srcIP net.IP) uint16 {
 		}
 	}
 	return 0
+}
+
+func (nc *NetworkControl) DeviceListByIP(selfIP uint32) (*pb.DeviceList, bool) {
+	nc.VirtualNetwork.mutex.RLock()
+	defer nc.VirtualNetwork.mutex.RUnlock()
+	for _, network := range nc.VirtualNetwork.data {
+		if _, ok := network.Clients[selfIP]; !ok {
+			continue
+		}
+		return &pb.DeviceList{
+			Epoch:          uint32(network.Epoch),
+			DeviceInfoList: buildDeviceInfoList(network.Clients, selfIP),
+		}, true
+	}
+	return nil, false
+}
+
+func (nc *NetworkControl) FindClientByVirtualIP(virtualIP uint32) (ClientInfo, bool) {
+	nc.VirtualNetwork.mutex.RLock()
+	defer nc.VirtualNetwork.mutex.RUnlock()
+	for _, network := range nc.VirtualNetwork.data {
+		client, ok := network.Clients[virtualIP]
+		if ok {
+			return client, true
+		}
+	}
+	return ClientInfo{}, false
+}
+
+func (nc *NetworkControl) UpdateClientByVirtualIP(virtualIP uint32, update func(*ClientInfo)) bool {
+	nc.VirtualNetwork.mutex.Lock()
+	defer nc.VirtualNetwork.mutex.Unlock()
+	for _, network := range nc.VirtualNetwork.data {
+		client, ok := network.Clients[virtualIP]
+		if !ok {
+			continue
+		}
+		update(&client)
+		network.Clients[virtualIP] = client
+		return true
+	}
+	return false
 }
 
 // ExpireMap now accepts a key type K (must be comparable) and value type T.
