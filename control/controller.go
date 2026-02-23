@@ -146,14 +146,16 @@ func (c *Controller) HandleRegistrationPacket(request *protocol.Packet, remoteAd
 	clientInfo.DeviceId = registration.GetDeviceId()
 	clientInfo.Name = registration.GetName()
 	clientInfo.Version = registration.GetVersion()
-	clientInfo.Online = true
+	clientInfo.ControlOnline = true
+	clientInfo.ControlLastSeen = now
+	clientInfo.DataPlaneReachable = false
+	clientInfo.DataPlaneLastSeen = 0
 	clientInfo.VirtualIp = virtualIP
 	clientInfo.Address = remoteAddr
 	clientInfo.ClientSecret = registration.GetClientSecret()
 	clientInfo.ClientSecretHash = append(clientInfo.ClientSecretHash[:0], registration.GetClientSecretHash()...)
 	clientInfo.Wireguard = false
 	clientInfo.LastJoin = now
-	clientInfo.LastSeen = now
 	netInfo.Clients[virtualIP] = clientInfo
 	c.nc.IpSession.Set(NewIpSessionKey(domain, util.Uint32ToIP(virtualIP)), remoteAddr)
 	netInfo.Epoch++
@@ -224,6 +226,7 @@ func (c *Controller) HandleClientStatusInfoPacket(request *protocol.Packet) erro
 	for _, item := range status.GetP2PList() {
 		clientStatus.P2PList = append(clientStatus.P2PList, util.Uint32ToIP(item.GetNextIp()))
 	}
+	reachable := len(clientStatus.P2PList) > 0
 	c.nc.VirtualNetwork.mutex.Lock()
 	defer c.nc.VirtualNetwork.mutex.Unlock()
 	for _, network := range c.nc.VirtualNetwork.data {
@@ -231,8 +234,12 @@ func (c *Controller) HandleClientStatusInfoPacket(request *protocol.Packet) erro
 		if !ok {
 			continue
 		}
-		client.Online = true
-		client.LastSeen = now
+		client.ControlOnline = true
+		client.ControlLastSeen = now
+		client.DataPlaneReachable = reachable
+		if reachable {
+			client.DataPlaneLastSeen = now
+		}
 		client.ClientStatus = clientStatus
 		network.Clients[srcIP] = client
 		return nil
@@ -369,7 +376,7 @@ func buildDeviceInfoList(clients map[uint32]ClientInfo, selfIP uint32) []*pb.Dev
 			Wireguard:        info.Wireguard,
 			ClientSecretHash: nil,
 		}
-		if info.Online {
+		if info.ControlOnline {
 			item.DeviceStatus = 0
 			item.ClientSecretHash = append(item.ClientSecretHash, info.ClientSecretHash...)
 		} else {
@@ -440,8 +447,8 @@ func (nc *NetworkControl) TouchClientByIP(srcIP net.IP) uint16 {
 	now := time.Now().Unix()
 	for _, network := range nc.VirtualNetwork.data {
 		if client, ok := network.Clients[ip]; ok {
-			client.Online = true
-			client.LastSeen = now
+			client.ControlOnline = true
+			client.ControlLastSeen = now
 			network.Clients[ip] = client
 			return uint16(network.Epoch)
 		}

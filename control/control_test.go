@@ -14,8 +14,8 @@ func TestHandleControlPacketPingPong(t *testing.T) {
 
 	resp := mustRegister(t, ctrl, newBaseRegisterReq("dev-a", "node-a"), &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1111})
 	ok := ctrl.nc.UpdateClientByVirtualIP(resp.GetVirtualIp(), func(client *ClientInfo) {
-		client.Online = false
-		client.LastSeen = 1
+		client.ControlOnline = false
+		client.ControlLastSeen = 1
 	})
 	if !ok {
 		t.Fatalf("client not found")
@@ -53,10 +53,10 @@ func TestHandleControlPacketPingPong(t *testing.T) {
 	if !ok {
 		t.Fatalf("client not found")
 	}
-	if !updated.Online {
+	if !updated.ControlOnline {
 		t.Fatalf("client should be marked online on ping")
 	}
-	if updated.LastSeen <= 1 {
+	if updated.ControlLastSeen <= 1 {
 		t.Fatalf("client last_seen was not refreshed")
 	}
 }

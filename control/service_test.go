@@ -260,6 +260,41 @@ func TestHandleClientStatusInfoPacket(t *testing.T) {
 	if client.ClientStatus == nil || !client.ClientStatus.IsCone || client.ClientStatus.UpStream != 10 || client.ClientStatus.DownStream != 20 {
 		t.Fatalf("unexpected client status: %+v", client.ClientStatus)
 	}
+	if !client.DataPlaneReachable {
+		t.Fatalf("data plane should be reachable when p2p list is non-empty")
+	}
+}
+
+func TestHandleClientStatusInfoPacketNoP2PRoute(t *testing.T) {
+	ctrl := newTestController()
+	defer ctrl.Stop()
+	resp := mustRegister(t, ctrl, newBaseRegisterReq("dev-a", "node-a"), &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1111})
+	status := &pb.ClientStatusInfo{
+		Source:     resp.GetVirtualIp(),
+		UpStream:   10,
+		DownStream: 20,
+		NatType:    pb.PunchNatType_Symmetric,
+	}
+	payload, err := proto.Marshal(status)
+	if err != nil {
+		t.Fatalf("marshal client status failed: %v", err)
+	}
+	err = ctrl.HandleClientStatusInfoPacket(&protocol.Packet{
+		Proto:    protocol.ProtocolService,
+		AppProto: protocol.AppProtoClientStatusInfo,
+		SrcIP:    util.Uint32ToIP(resp.GetVirtualIp()),
+		Payload:  payload,
+	})
+	if err != nil {
+		t.Fatalf("HandleClientStatusInfoPacket failed: %v", err)
+	}
+	client, ok := ctrl.nc.FindClientByVirtualIP(resp.GetVirtualIp())
+	if !ok {
+		t.Fatalf("client not found")
+	}
+	if client.DataPlaneReachable {
+		t.Fatalf("data plane should be unreachable when p2p list is empty")
+	}
 }
 
 func newTestController() *Controller {

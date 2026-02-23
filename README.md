@@ -7,13 +7,21 @@
 - `vnts` / `vnt-control`（Control Plane）：
   - 用户/设备认证
   - 注册与会话管理
-  - 在线状态、设备列表、NAT 信息等状态更新
+  - 控制面在线状态、设备列表、NAT 信息等状态更新
 - `gateway` 集群（Data Plane）：
   - 数据包转发与中继
   - 横向扩展与高可用
 - `vnt` 客户端：
   - 通过 QUIC 与控制面交互
   - 按控制面下发信息选择/切换数据路径
+
+## 在线状态语义（当前实现）
+
+- `ControlOnline`：表示客户端是否与控制面保持活跃（注册、控制 ping、状态上报都会刷新）。
+- `DataPlaneReachable`：表示数据面可达性（当前按 `ClientStatusInfo.p2p_list` 是否非空判定）。
+- `DeviceStatus` 当前按 `ControlOnline` 对外映射：在线为 `0`，离线为 `1`。
+
+> 说明：当前 `DataPlaneReachable` 语义是“P2P 可达”，尚未包含仅 relay/gateway 可达场景，后续会扩展。
 
 ## 目录结构
 
