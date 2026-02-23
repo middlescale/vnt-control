@@ -25,7 +25,8 @@ func NewController(cfg *config.Config) *Controller {
 	return &Controller{
 		nc: NetworkControl{
 			VirtualNetwork: *NewExpireMap[string, *NetworkInfo](7 * 24 * time.Hour),
-			IpSession:      *NewExpireMap[IpSessionKey, net.Addr](24 * time.Hour),
+			IPSessions:     *NewExpireMap[IpSessionKey, net.Addr](24 * time.Hour),
+			CipherSessions: *NewExpireMap[string, struct{}](24 * time.Hour),
 		},
 		cfg: cfg,
 	}
@@ -33,7 +34,8 @@ func NewController(cfg *config.Config) *Controller {
 
 func (c *Controller) Stop() {
 	c.nc.VirtualNetwork.Stop()
-	c.nc.IpSession.Stop()
+	c.nc.IPSessions.Stop()
+	c.nc.CipherSessions.Stop()
 }
 
 func (c *Controller) HandleHandshakePacket(reqPacket *protocol.Packet) (*protocol.Packet, error) {
@@ -139,7 +141,7 @@ func (c *Controller) HandleRegistrationPacket(request *protocol.Packet, remoteAd
 	}
 	if oldIP != 0 && oldIP != virtualIP {
 		delete(netInfo.Clients, oldIP)
-		c.nc.IpSession.Delete(NewIpSessionKey(domain, util.Uint32ToIP(oldIP)))
+		c.nc.IPSessions.Delete(NewIpSessionKey(domain, util.Uint32ToIP(oldIP)))
 	}
 	clientInfo := netInfo.Clients[virtualIP]
 	now := time.Now().Unix()
@@ -157,7 +159,8 @@ func (c *Controller) HandleRegistrationPacket(request *protocol.Packet, remoteAd
 	clientInfo.Wireguard = false
 	clientInfo.LastJoin = now
 	netInfo.Clients[virtualIP] = clientInfo
-	c.nc.IpSession.Set(NewIpSessionKey(domain, util.Uint32ToIP(virtualIP)), remoteAddr)
+	c.nc.IPSessions.Delete(NewIpSessionKey(domain, util.Uint32ToIP(virtualIP)))
+	c.nc.TouchCipherSession(remoteAddr)
 	netInfo.Epoch++
 	registrationResp.VirtualIp = virtualIP
 	registrationResp.Epoch = uint32(netInfo.Epoch)
@@ -292,10 +295,12 @@ type NetworkControl struct {
 	//
 	VirtualNetwork ExpireMap[string, *NetworkInfo]
 	// 用来做地址分配和回收
-	IpSession ExpireMap[IpSessionKey, net.Addr]
+	IPSessions ExpireMap[IpSessionKey, net.Addr]
+	// 链路上的加密会话上下文占位（按远端地址跟踪）
+	CipherSessions ExpireMap[string, struct{}]
 }
 
-// IpSessionKey is a comparable key for IpSession.
+// IpSessionKey is a comparable key for IPSessions.
 // Use string fields because net.IP (a []byte) is not comparable.
 type IpSessionKey struct {
 	ID string // domain
@@ -426,14 +431,23 @@ func (nc *NetworkControl) generateIP(
 		if ip == gatewayIP {
 			continue
 		}
-		if _, occupied := network.Clients[ip]; occupied {
-			continue
+		if client, occupied := network.Clients[ip]; occupied {
+			if !client.ControlOnline {
+				key := NewIpSessionKey(network.Group, util.Uint32ToIP(ip))
+				if _, reserved := nc.IPSessions.Get(key); !reserved {
+					delete(network.Clients, ip)
+				} else {
+					continue
+				}
+			} else {
+				continue
+			}
 		}
 		candidate := util.Uint32ToIP(ip)
 		key := NewIpSessionKey(network.Group, candidate)
-		if _, occupied := nc.IpSession.Get(key); !occupied {
+		if _, occupied := nc.IPSessions.Get(key); !occupied {
 			addr := &net.IPAddr{IP: candidate}
-			nc.IpSession.Set(key, addr)
+			nc.IPSessions.Set(key, addr)
 			return ip, 0, nil
 		}
 	}
@@ -454,6 +468,48 @@ func (nc *NetworkControl) TouchClientByIP(srcIP net.IP) uint16 {
 		}
 	}
 	return 0
+}
+
+func (c *Controller) TouchCipherSession(remoteAddr net.Addr) {
+	c.nc.TouchCipherSession(remoteAddr)
+}
+
+func (nc *NetworkControl) TouchCipherSession(remoteAddr net.Addr) {
+	if remoteAddr == nil {
+		return
+	}
+	nc.CipherSessions.Set(remoteAddr.String(), struct{}{})
+}
+
+func (c *Controller) LeaveByRemoteAddr(remoteAddr net.Addr) {
+	c.nc.LeaveByRemoteAddr(remoteAddr)
+}
+
+func (nc *NetworkControl) LeaveByRemoteAddr(remoteAddr net.Addr) {
+	if remoteAddr == nil {
+		return
+	}
+	addr := remoteAddr.String()
+	nc.CipherSessions.Delete(addr)
+	now := time.Now().Unix()
+	nc.VirtualNetwork.mutex.Lock()
+	defer nc.VirtualNetwork.mutex.Unlock()
+	for _, network := range nc.VirtualNetwork.data {
+		changed := false
+		for ip, client := range network.Clients {
+			if client.Address == nil || client.Address.String() != addr || !client.ControlOnline {
+				continue
+			}
+			client.ControlOnline = false
+			client.ControlLastSeen = now
+			network.Clients[ip] = client
+			nc.IPSessions.Set(NewIpSessionKey(network.Group, util.Uint32ToIP(ip)), remoteAddr)
+			changed = true
+		}
+		if changed {
+			network.Epoch++
+		}
+	}
 }
 
 func (nc *NetworkControl) DeviceListByIP(selfIP uint32) (*pb.DeviceList, bool) {

@@ -34,6 +34,8 @@ func StartQuicServer(ctx context.Context, ctrl *control.Controller, addr string,
 }
 
 func handleSession(ctrl *control.Controller, conn *quic.Conn) {
+	ctrl.TouchCipherSession(conn.RemoteAddr())
+	defer ctrl.LeaveByRemoteAddr(conn.RemoteAddr())
 	stream, err := conn.AcceptStream(context.Background())
 	if err != nil {
 		log.Printf("Stream error: %v", err)

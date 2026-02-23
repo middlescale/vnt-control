@@ -297,6 +297,34 @@ func TestHandleClientStatusInfoPacketNoP2PRoute(t *testing.T) {
 	}
 }
 
+func TestLeaveByRemoteAddrMarksControlOffline(t *testing.T) {
+	ctrl := newTestController()
+	defer ctrl.Stop()
+	remoteAddr := &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1111}
+	resp := mustRegister(t, ctrl, newBaseRegisterReq("dev-a", "node-a"), remoteAddr)
+	ctrl.LeaveByRemoteAddr(remoteAddr)
+	client, ok := ctrl.nc.FindClientByVirtualIP(resp.GetVirtualIp())
+	if !ok {
+		t.Fatalf("client not found")
+	}
+	if client.ControlOnline {
+		t.Fatalf("control should be offline after leave")
+	}
+}
+
+func TestGenerateIPReusesOfflineIPAfterSessionExpiry(t *testing.T) {
+	ctrl := newTestController()
+	defer ctrl.Stop()
+	remoteAddr := &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1111}
+	resp1 := mustRegister(t, ctrl, newBaseRegisterReq("dev-a", "node-a"), remoteAddr)
+	ctrl.LeaveByRemoteAddr(remoteAddr)
+	ctrl.nc.IPSessions.Delete(NewIpSessionKey("ms.net", util.Uint32ToIP(resp1.GetVirtualIp())))
+	resp2 := mustRegister(t, ctrl, newBaseRegisterReq("dev-b", "node-b"), &net.UDPAddr{IP: net.ParseIP("1.1.1.2"), Port: 2222})
+	if resp2.GetVirtualIp() != resp1.GetVirtualIp() {
+		t.Fatalf("expected reuse ip %v, got %v", resp1.GetVirtualIp(), resp2.GetVirtualIp())
+	}
+}
+
 func newTestController() *Controller {
 	return NewController(&config.Config{
 		Gateway: net.ParseIP("10.26.0.1"),
