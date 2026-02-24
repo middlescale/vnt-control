@@ -21,8 +21,9 @@ func TestHandleHandshakePacketSuccess(t *testing.T) {
 	defer ctrl.Stop()
 
 	req := &pb.HandshakeRequest{
-		Version: "test-client",
-		Secret:  true,
+		Version:      "test-client",
+		Secret:       true,
+		Capabilities: []string{"udp_endpoint_report_v1", "unknown_cap"},
 	}
 	payload, err := proto.Marshal(req)
 	if err != nil {
@@ -76,6 +77,9 @@ func TestHandleHandshakePacketSuccess(t *testing.T) {
 	}
 	if resp.GetSecret() {
 		t.Fatalf("expected secret=false")
+	}
+	if len(resp.GetCapabilities()) != 1 || resp.GetCapabilities()[0] != "udp_endpoint_report_v1" {
+		t.Fatalf("unexpected capabilities: %v", resp.GetCapabilities())
 	}
 }
 
@@ -232,10 +236,13 @@ func TestHandleClientStatusInfoPacket(t *testing.T) {
 	defer ctrl.Stop()
 	resp := mustRegister(t, ctrl, newBaseRegisterReq("dev-a", "node-a"), &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1111})
 	status := &pb.ClientStatusInfo{
-		Source:     resp.GetVirtualIp(),
-		UpStream:   10,
-		DownStream: 20,
-		NatType:    pb.PunchNatType_Cone,
+		Source:         resp.GetVirtualIp(),
+		UpStream:       10,
+		DownStream:     20,
+		NatType:        pb.PunchNatType_Cone,
+		PublicIpList:   []uint32{util.IpToUint32(net.ParseIP("8.8.8.8"))},
+		PublicUdpPorts: []uint32{54321},
+		LocalUdpPorts:  []uint32{12345},
 		P2PList: []*pb.RouteItem{
 			{NextIp: util.IpToUint32(net.ParseIP("10.26.0.3"))},
 		},
@@ -259,6 +266,15 @@ func TestHandleClientStatusInfoPacket(t *testing.T) {
 	}
 	if client.ClientStatus == nil || !client.ClientStatus.IsCone || client.ClientStatus.UpStream != 10 || client.ClientStatus.DownStream != 20 {
 		t.Fatalf("unexpected client status: %+v", client.ClientStatus)
+	}
+	if len(client.ClientStatus.PublicIPList) != 1 || !client.ClientStatus.PublicIPList[0].Equal(net.ParseIP("8.8.8.8")) {
+		t.Fatalf("unexpected public ip list: %+v", client.ClientStatus.PublicIPList)
+	}
+	if len(client.ClientStatus.PublicUDPPorts) != 1 || client.ClientStatus.PublicUDPPorts[0] != 54321 {
+		t.Fatalf("unexpected public udp ports: %+v", client.ClientStatus.PublicUDPPorts)
+	}
+	if len(client.ClientStatus.LocalUDPPorts) != 1 || client.ClientStatus.LocalUDPPorts[0] != 12345 {
+		t.Fatalf("unexpected local udp ports: %+v", client.ClientStatus.LocalUDPPorts)
 	}
 	if !client.DataPlaneReachable {
 		t.Fatalf("data plane should be reachable when p2p list is non-empty")

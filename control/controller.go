@@ -21,6 +21,10 @@ type Controller struct {
 	mu  sync.Mutex
 }
 
+var supportedHandshakeCapabilities = map[string]struct{}{
+	"udp_endpoint_report_v1": {},
+}
+
 func NewController(cfg *config.Config) *Controller {
 	return &Controller{
 		nc: NetworkControl{
@@ -51,8 +55,9 @@ func (c *Controller) HandleHandshakePacket(reqPacket *protocol.Packet) (*protoco
 	}
 
 	rsp := &pb.HandshakeResponse{
-		Version: "goversion-1.0.0",
-		Secret:  false,
+		Version:      "goversion-1.0.0",
+		Secret:       false,
+		Capabilities: negotiateHandshakeCapabilities(req.GetCapabilities()),
 	}
 	playload, err := proto.Marshal(rsp)
 	if err != nil {
@@ -220,14 +225,30 @@ func (c *Controller) HandleClientStatusInfoPacket(request *protocol.Packet) erro
 	}
 	now := time.Now().Unix()
 	clientStatus := &ClientStatusInfo{
-		P2PList:    make([]net.IP, 0, len(status.GetP2PList())),
-		UpStream:   status.GetUpStream(),
-		DownStream: status.GetDownStream(),
-		IsCone:     status.GetNatType() == pb.PunchNatType_Cone,
-		UpdateTime: now,
+		P2PList:        make([]net.IP, 0, len(status.GetP2PList())),
+		PublicIPList:   make([]net.IP, 0, len(status.GetPublicIpList())),
+		PublicUDPPorts: make([]uint16, 0, len(status.GetPublicUdpPorts())),
+		LocalUDPPorts:  make([]uint16, 0, len(status.GetLocalUdpPorts())),
+		UpStream:       status.GetUpStream(),
+		DownStream:     status.GetDownStream(),
+		IsCone:         status.GetNatType() == pb.PunchNatType_Cone,
+		UpdateTime:     now,
 	}
 	for _, item := range status.GetP2PList() {
 		clientStatus.P2PList = append(clientStatus.P2PList, util.Uint32ToIP(item.GetNextIp()))
+	}
+	for _, ip := range status.GetPublicIpList() {
+		clientStatus.PublicIPList = append(clientStatus.PublicIPList, util.Uint32ToIP(ip))
+	}
+	for _, port := range status.GetPublicUdpPorts() {
+		if port <= 65535 {
+			clientStatus.PublicUDPPorts = append(clientStatus.PublicUDPPorts, uint16(port))
+		}
+	}
+	for _, port := range status.GetLocalUdpPorts() {
+		if port <= 65535 {
+			clientStatus.LocalUDPPorts = append(clientStatus.LocalUDPPorts, uint16(port))
+		}
 	}
 	reachable := len(clientStatus.P2PList) > 0
 	c.nc.VirtualNetwork.mutex.Lock()
@@ -390,6 +411,19 @@ func buildDeviceInfoList(clients map[uint32]ClientInfo, selfIP uint32) []*pb.Dev
 		deviceList = append(deviceList, item)
 	}
 	return deviceList
+}
+
+func negotiateHandshakeCapabilities(requested []string) []string {
+	if len(requested) == 0 {
+		return nil
+	}
+	negotiated := make([]string, 0, len(requested))
+	for _, capability := range requested {
+		if _, ok := supportedHandshakeCapabilities[capability]; ok {
+			negotiated = append(negotiated, capability)
+		}
+	}
+	return negotiated
 }
 
 func (nc *NetworkControl) generateIP(
