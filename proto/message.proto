@@ -75,6 +75,64 @@ enum PunchNatType {
     Symmetric = 0;
     Cone = 1;
 }
+enum PunchResultCode {
+    PunchResultUnknown = 0;
+    PunchResultSuccess = 1;
+    PunchResultFailed = 2;
+    PunchResultTimeout = 3;
+    PunchResultCanceled = 4;
+}
+message PunchEndpoint {
+    fixed32 ip = 1;
+    uint32 port = 2;
+    bytes ipv6 = 3;
+    bool tcp = 4;
+}
+message PunchRequest {
+    uint64 session_id = 1;
+    fixed32 source = 2;
+    fixed32 target = 3;
+    PunchNatType source_nat_type = 4;
+    PunchNatType target_nat_type = 5;
+    repeated PunchEndpoint source_endpoints = 6;
+    repeated PunchEndpoint target_endpoints = 7;
+    uint32 attempt = 8;
+    uint32 timeout_ms = 9;
+    int64 deadline_unix_ms = 10;
+}
+message PunchAck {
+    uint64 session_id = 1;
+    fixed32 source = 2;
+    uint32 attempt = 3;
+    bool accepted = 4;
+    string reason = 5;
+}
+message PunchStart {
+    uint64 session_id = 1;
+    fixed32 source = 2;
+    fixed32 target = 3;
+    repeated PunchEndpoint peer_endpoints = 4;
+    uint32 attempt = 5;
+    uint32 timeout_ms = 6;
+    int64 deadline_unix_ms = 7;
+}
+message PunchResult {
+    uint64 session_id = 1;
+    fixed32 source = 2;
+    fixed32 target = 3;
+    uint32 attempt = 4;
+    PunchResultCode code = 5;
+    string reason = 6;
+    PunchEndpoint selected_endpoint = 7;
+}
+message PunchCancel {
+    uint64 session_id = 1;
+    fixed32 source = 2;
+    fixed32 target = 3;
+    uint32 attempt = 4;
+    uint32 reason_code = 5;
+    string reason = 6;
+}
 /// 向服务器上报客户端状态信息
 message ClientStatusInfo {
     fixed32 source = 1;

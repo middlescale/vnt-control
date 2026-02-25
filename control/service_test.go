@@ -23,7 +23,7 @@ func TestHandleHandshakePacketSuccess(t *testing.T) {
 	req := &pb.HandshakeRequest{
 		Version:      "test-client",
 		Secret:       true,
-		Capabilities: []string{"udp_endpoint_report_v1", "unknown_cap"},
+		Capabilities: []string{"udp_endpoint_report_v1", "punch_coord_v1", "unknown_cap"},
 	}
 	payload, err := proto.Marshal(req)
 	if err != nil {
@@ -78,7 +78,7 @@ func TestHandleHandshakePacketSuccess(t *testing.T) {
 	if resp.GetSecret() {
 		t.Fatalf("expected secret=false")
 	}
-	if len(resp.GetCapabilities()) != 1 || resp.GetCapabilities()[0] != "udp_endpoint_report_v1" {
+	if len(resp.GetCapabilities()) != 2 || resp.GetCapabilities()[0] != "udp_endpoint_report_v1" || resp.GetCapabilities()[1] != "punch_coord_v1" {
 		t.Fatalf("unexpected capabilities: %v", resp.GetCapabilities())
 	}
 }
@@ -102,6 +102,111 @@ func TestHandleHandshakePacketInvalidPayload(t *testing.T) {
 
 	if _, err := ctrl.HandleHandshakePacket(reqPacket); err == nil {
 		t.Fatalf("expected error for invalid payload")
+	}
+}
+
+func TestHandleHandshakePacketUnsupportedCapabilities(t *testing.T) {
+	ctrl := newTestController()
+	defer ctrl.Stop()
+	req := &pb.HandshakeRequest{
+		Version:      "test-client",
+		Secret:       false,
+		Capabilities: []string{"unknown_cap_a", "unknown_cap_b"},
+	}
+	payload, err := proto.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal handshake request failed: %v", err)
+	}
+	respPacket, err := ctrl.HandleHandshakePacket(&protocol.Packet{
+		Proto:    protocol.ProtocolService,
+		AppProto: protocol.AppProtoHandshakeRequest,
+		SrcIP:    net.ParseIP("10.26.0.2"),
+		DstIP:    net.ParseIP("0.0.0.1"),
+		Gateway:  true,
+		Payload:  payload,
+	})
+	if err != nil {
+		t.Fatalf("HandleHandshakePacket failed: %v", err)
+	}
+	var resp pb.HandshakeResponse
+	if err := proto.Unmarshal(respPacket.Payload, &resp); err != nil {
+		t.Fatalf("unmarshal handshake response failed: %v", err)
+	}
+	if len(resp.GetCapabilities()) != 0 {
+		t.Fatalf("expected empty negotiated capabilities, got: %v", resp.GetCapabilities())
+	}
+}
+
+func TestPunchCoordProtoContractRoundTrip(t *testing.T) {
+	req := &pb.PunchRequest{
+		SessionId:     1001,
+		Source:        util.IpToUint32(net.ParseIP("10.26.0.2")),
+		Target:        util.IpToUint32(net.ParseIP("10.26.0.3")),
+		SourceNatType: pb.PunchNatType_Cone,
+		TargetNatType: pb.PunchNatType_Symmetric,
+		SourceEndpoints: []*pb.PunchEndpoint{
+			{Ip: util.IpToUint32(net.ParseIP("1.1.1.1")), Port: 5000, Tcp: false},
+		},
+		TargetEndpoints: []*pb.PunchEndpoint{
+			{Ip: util.IpToUint32(net.ParseIP("2.2.2.2")), Port: 6000, Tcp: false},
+		},
+		Attempt:        1,
+		TimeoutMs:      2000,
+		DeadlineUnixMs: 10000,
+	}
+	buf, err := proto.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal punch request failed: %v", err)
+	}
+	var decoded pb.PunchRequest
+	if err := proto.Unmarshal(buf, &decoded); err != nil {
+		t.Fatalf("unmarshal punch request failed: %v", err)
+	}
+	if decoded.GetSessionId() != req.GetSessionId() || decoded.GetAttempt() != req.GetAttempt() || decoded.GetTimeoutMs() != req.GetTimeoutMs() || decoded.GetDeadlineUnixMs() != req.GetDeadlineUnixMs() || len(decoded.GetSourceEndpoints()) != 1 || len(decoded.GetTargetEndpoints()) != 1 {
+		t.Fatalf("unexpected decoded punch request: %+v", decoded)
+	}
+	if decoded.GetSourceNatType() != pb.PunchNatType_Cone || decoded.GetTargetNatType() != pb.PunchNatType_Symmetric {
+		t.Fatalf("unexpected decoded nat types: source=%v target=%v", decoded.GetSourceNatType(), decoded.GetTargetNatType())
+	}
+	ack := &pb.PunchAck{
+		SessionId: req.GetSessionId(),
+		Source:    req.GetTarget(),
+		Attempt:   req.GetAttempt(),
+		Accepted:  true,
+	}
+	ackBuf, err := proto.Marshal(ack)
+	if err != nil {
+		t.Fatalf("marshal punch ack failed: %v", err)
+	}
+	var ackDecoded pb.PunchAck
+	if err := proto.Unmarshal(ackBuf, &ackDecoded); err != nil {
+		t.Fatalf("unmarshal punch ack failed: %v", err)
+	}
+	if !ackDecoded.GetAccepted() || ackDecoded.GetSessionId() != req.GetSessionId() || ackDecoded.GetAttempt() != req.GetAttempt() {
+		t.Fatalf("unexpected decoded punch ack: %+v", ackDecoded)
+	}
+	result := &pb.PunchResult{
+		SessionId: req.GetSessionId(),
+		Source:    req.GetSource(),
+		Target:    req.GetTarget(),
+		Attempt:   req.GetAttempt(),
+		Code:      pb.PunchResultCode(99),
+		Reason:    "compat-enum",
+		SelectedEndpoint: &pb.PunchEndpoint{
+			Ip:   req.GetSourceEndpoints()[0].GetIp(),
+			Port: req.GetSourceEndpoints()[0].GetPort(),
+		},
+	}
+	resultBuf, err := proto.Marshal(result)
+	if err != nil {
+		t.Fatalf("marshal punch result failed: %v", err)
+	}
+	var resultDecoded pb.PunchResult
+	if err := proto.Unmarshal(resultBuf, &resultDecoded); err != nil {
+		t.Fatalf("unmarshal punch result failed: %v", err)
+	}
+	if resultDecoded.GetCode() != pb.PunchResultCode(99) || resultDecoded.GetSelectedEndpoint() == nil || resultDecoded.GetSelectedEndpoint().GetPort() != req.GetSourceEndpoints()[0].GetPort() {
+		t.Fatalf("unexpected decoded punch result: %+v", resultDecoded)
 	}
 }
 

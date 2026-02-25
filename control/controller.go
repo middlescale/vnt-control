@@ -23,6 +23,7 @@ type Controller struct {
 
 var supportedHandshakeCapabilities = map[string]struct{}{
 	"udp_endpoint_report_v1": {},
+	"punch_coord_v1":        {},
 }
 
 func NewController(cfg *config.Config) *Controller {
