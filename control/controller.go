@@ -21,6 +21,30 @@ type Controller struct {
 	mu  sync.Mutex
 }
 
+type PunchSessionState string
+
+const (
+	PunchSessionCreated    PunchSessionState = "created"
+	PunchSessionDispatch   PunchSessionState = "dispatching"
+	PunchSessionInProgress PunchSessionState = "in_progress"
+	PunchSessionSuccess    PunchSessionState = "success"
+	PunchSessionFailed     PunchSessionState = "failed"
+	PunchSessionTimeout    PunchSessionState = "timeout"
+	PunchSessionCanceled   PunchSessionState = "canceled"
+)
+
+type PunchSession struct {
+	SessionID   uint64
+	Source      uint32
+	Target      uint32
+	Attempt     uint32
+	State       PunchSessionState
+	RequestedAt int64
+	LastReason  string
+	Ack         map[uint32]bool
+	Results     map[uint32]*pb.PunchResult
+}
+
 var supportedHandshakeCapabilities = map[string]struct{}{
 	"udp_endpoint_report_v1": {},
 	"punch_coord_v1":        {},
@@ -32,6 +56,7 @@ func NewController(cfg *config.Config) *Controller {
 			VirtualNetwork: *NewExpireMap[string, *NetworkInfo](7 * 24 * time.Hour),
 			IPSessions:     *NewExpireMap[IpSessionKey, net.Addr](24 * time.Hour),
 			CipherSessions: *NewExpireMap[string, struct{}](24 * time.Hour),
+			PunchSessions:  *NewExpireMap[string, *PunchSession](10 * time.Minute),
 		},
 		cfg: cfg,
 	}
@@ -41,6 +66,7 @@ func (c *Controller) Stop() {
 	c.nc.VirtualNetwork.Stop()
 	c.nc.IPSessions.Stop()
 	c.nc.CipherSessions.Stop()
+	c.nc.PunchSessions.Stop()
 }
 
 func (c *Controller) HandleHandshakePacket(reqPacket *protocol.Packet) (*protocol.Packet, error) {
@@ -84,30 +110,35 @@ func (c *Controller) HandleHandshakePacket(reqPacket *protocol.Packet) (*protoco
 }
 
 func (c *Controller) HandleRegistrationPacket(request *protocol.Packet, remoteAddr net.Addr) (*protocol.Packet, error) {
+	respPacket, _, err := c.HandleRegistrationPacketWithVirtualIP(request, remoteAddr)
+	return respPacket, err
+}
+
+func (c *Controller) HandleRegistrationPacketWithVirtualIP(request *protocol.Packet, remoteAddr net.Addr) (*protocol.Packet, uint32, error) {
 	log.Debugf("收到客户端 RegistrationRequest Packet: %s", request.DebugString())
 	var registration pb.RegistrationRequest
 	if err := proto.Unmarshal(request.Payload, &registration); err != nil {
 		log.Errorf("RegistrationRequest unmarshal error: %v", err)
-		return nil, err
+		return nil, 0, err
 	}
 	if err := validateRegistrationRequest(&registration); err != nil {
 		log.Errorf("RegistrationRequest validate error: %v", err)
-		return nil, err
+		return nil, 0, err
 	}
 
 	domain := registration.GetToken()
 	if c.cfg.Domain != "" && domain != c.cfg.Domain {
-		return nil, fmt.Errorf("RegistrationRequest domain %s mismatch config domain %s", domain, c.cfg.Domain)
+		return nil, 0, fmt.Errorf("RegistrationRequest domain %s mismatch config domain %s", domain, c.cfg.Domain)
 	}
 
 	raddrStr := remoteAddr.String()
 	host, portStr, err := net.SplitHostPort(raddrStr)
 	if err != nil {
-		return nil, fmt.Errorf("Failed to parse remote address: %v", err)
+		return nil, 0, fmt.Errorf("Failed to parse remote address: %v", err)
 	}
 	port, err := strconv.Atoi(portStr)
 	if err != nil || port < 0 || port > 65535 {
-		return nil, fmt.Errorf("invalid remote port: %q", portStr)
+		return nil, 0, fmt.Errorf("invalid remote port: %q", portStr)
 	}
 	pubPort := uint32(port)
 
@@ -123,7 +154,7 @@ func (c *Controller) HandleRegistrationPacket(request *protocol.Packet, remoteAd
 	}
 	netmask, err := c.parseNetmask()
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	registrationResp.VirtualGateway = util.IpToUint32(c.cfg.Gateway)
 	registrationResp.VirtualNetmask = util.MaskToUint32(netmask)
@@ -143,7 +174,7 @@ func (c *Controller) HandleRegistrationPacket(request *protocol.Packet, remoteAd
 		registration.GetAllowIpChange(),
 	)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	if oldIP != 0 && oldIP != virtualIP {
 		delete(netInfo.Clients, oldIP)
@@ -174,7 +205,7 @@ func (c *Controller) HandleRegistrationPacket(request *protocol.Packet, remoteAd
 
 	respBytes, err := proto.Marshal(registrationResp)
 	if err != nil {
-		return nil, fmt.Errorf("RegistrationResponse marshal error: %v", err)
+		return nil, 0, fmt.Errorf("RegistrationResponse marshal error: %v", err)
 	}
 
 	respPacket := &protocol.Packet{
@@ -189,7 +220,7 @@ func (c *Controller) HandleRegistrationPacket(request *protocol.Packet, remoteAd
 		Payload:   respBytes,
 	}
 
-	return respPacket, nil
+	return respPacket, virtualIP, nil
 }
 
 func (c *Controller) HandlePullDeviceListPacket(request *protocol.Packet) (*protocol.Packet, error) {
@@ -272,6 +303,197 @@ func (c *Controller) HandleClientStatusInfoPacket(request *protocol.Packet) erro
 	return fmt.Errorf("client %s not registered", request.SrcIP)
 }
 
+func (c *Controller) HandlePunchRequestPacket(request *protocol.Packet) (*protocol.Packet, error) {
+	var req pb.PunchRequest
+	if err := proto.Unmarshal(request.Payload, &req); err != nil {
+		return nil, fmt.Errorf("PunchRequest unmarshal error: %v", err)
+	}
+	sourceIP := util.IpToUint32(request.SrcIP)
+	if req.GetSource() != 0 && req.GetSource() != sourceIP {
+		return nil, fmt.Errorf("punch request source mismatch: %d != %d", req.GetSource(), sourceIP)
+	}
+	if req.GetSessionId() == 0 || req.GetAttempt() == 0 {
+		return nil, fmt.Errorf("invalid punch request, session_id and attempt must be non-zero")
+	}
+	if _, ok := c.nc.FindClientByVirtualIP(req.GetTarget()); !ok {
+		return nil, fmt.Errorf("punch target %s not registered", util.Uint32ToIP(req.GetTarget()))
+	}
+	now := time.Now().Unix()
+	session := &PunchSession{
+		SessionID:   req.GetSessionId(),
+		Source:      sourceIP,
+		Target:      req.GetTarget(),
+		Attempt:     req.GetAttempt(),
+		State:       PunchSessionDispatch,
+		RequestedAt: now,
+		Ack:         map[uint32]bool{sourceIP: true},
+		Results:     make(map[uint32]*pb.PunchResult),
+	}
+	c.nc.PunchSessions.Set(punchSessionKey(req.GetSessionId(), req.GetAttempt()), session)
+	ack := &pb.PunchAck{
+		SessionId: req.GetSessionId(),
+		Source:    sourceIP,
+		Attempt:   req.GetAttempt(),
+		Accepted:  true,
+	}
+	payload, err := proto.Marshal(ack)
+	if err != nil {
+		return nil, fmt.Errorf("PunchAck marshal error: %v", err)
+	}
+	return &protocol.Packet{
+		Ver:       protocol.V2,
+		Proto:     protocol.ProtocolService,
+		AppProto:  protocol.AppProtoPunchAck,
+		SourceTTL: protocol.MAX_TTL,
+		TTL:       protocol.MAX_TTL,
+		SrcIP:     request.DstIP,
+		DstIP:     request.SrcIP,
+		Gateway:   true,
+		Payload:   payload,
+	}, nil
+}
+
+func (c *Controller) BuildPunchStartPackets(request *protocol.Packet) ([]*protocol.Packet, error) {
+	var req pb.PunchRequest
+	if err := proto.Unmarshal(request.Payload, &req); err != nil {
+		return nil, fmt.Errorf("PunchRequest unmarshal error: %v", err)
+	}
+	sourceIP := util.IpToUint32(request.SrcIP)
+	if req.GetSource() != 0 && req.GetSource() != sourceIP {
+		return nil, fmt.Errorf("punch request source mismatch: %d != %d", req.GetSource(), sourceIP)
+	}
+	if req.GetSessionId() == 0 || req.GetAttempt() == 0 {
+		return nil, fmt.Errorf("invalid punch request, session_id and attempt must be non-zero")
+	}
+	if _, ok := c.nc.FindClientByVirtualIP(sourceIP); !ok {
+		return nil, fmt.Errorf("punch source %s not registered", util.Uint32ToIP(sourceIP))
+	}
+	if _, ok := c.nc.FindClientByVirtualIP(req.GetTarget()); !ok {
+		return nil, fmt.Errorf("punch target %s not registered", util.Uint32ToIP(req.GetTarget()))
+	}
+	sourceStart := &pb.PunchStart{
+		SessionId:      req.GetSessionId(),
+		Source:         sourceIP,
+		Target:         req.GetTarget(),
+		PeerEndpoints:  req.GetTargetEndpoints(),
+		Attempt:        req.GetAttempt(),
+		TimeoutMs:      req.GetTimeoutMs(),
+		DeadlineUnixMs: req.GetDeadlineUnixMs(),
+	}
+	targetStart := &pb.PunchStart{
+		SessionId:      req.GetSessionId(),
+		Source:         req.GetTarget(),
+		Target:         sourceIP,
+		PeerEndpoints:  req.GetSourceEndpoints(),
+		Attempt:        req.GetAttempt(),
+		TimeoutMs:      req.GetTimeoutMs(),
+		DeadlineUnixMs: req.GetDeadlineUnixMs(),
+	}
+	sourcePayload, err := proto.Marshal(sourceStart)
+	if err != nil {
+		return nil, fmt.Errorf("PunchStart source marshal error: %v", err)
+	}
+	targetPayload, err := proto.Marshal(targetStart)
+	if err != nil {
+		return nil, fmt.Errorf("PunchStart target marshal error: %v", err)
+	}
+	return []*protocol.Packet{
+		{
+			Ver:       protocol.V2,
+			Proto:     protocol.ProtocolService,
+			AppProto:  protocol.AppProtoPunchStart,
+			SourceTTL: protocol.MAX_TTL,
+			TTL:       protocol.MAX_TTL,
+			SrcIP:     request.DstIP,
+			DstIP:     util.Uint32ToIP(sourceIP),
+			Gateway:   true,
+			Payload:   sourcePayload,
+		},
+		{
+			Ver:       protocol.V2,
+			Proto:     protocol.ProtocolService,
+			AppProto:  protocol.AppProtoPunchStart,
+			SourceTTL: protocol.MAX_TTL,
+			TTL:       protocol.MAX_TTL,
+			SrcIP:     request.DstIP,
+			DstIP:     util.Uint32ToIP(req.GetTarget()),
+			Gateway:   true,
+			Payload:   targetPayload,
+		},
+	}, nil
+}
+
+func (c *Controller) HandlePunchAckPacket(request *protocol.Packet) error {
+	var ack pb.PunchAck
+	if err := proto.Unmarshal(request.Payload, &ack); err != nil {
+		return fmt.Errorf("PunchAck unmarshal error: %v", err)
+	}
+	key := punchSessionKey(ack.GetSessionId(), ack.GetAttempt())
+	session, ok := c.nc.PunchSessions.Get(key)
+	if !ok {
+		return fmt.Errorf("punch session not found: %s", key)
+	}
+	source := util.IpToUint32(request.SrcIP)
+	if ack.GetSource() != 0 && ack.GetSource() != source {
+		return fmt.Errorf("punch ack source mismatch: %d != %d", ack.GetSource(), source)
+	}
+	session.Ack[source] = ack.GetAccepted()
+	if !ack.GetAccepted() {
+		session.State = PunchSessionFailed
+		session.LastReason = ack.GetReason()
+	} else if len(session.Ack) >= 2 {
+		session.State = PunchSessionInProgress
+	}
+	c.nc.PunchSessions.Set(key, session)
+	return nil
+}
+
+func (c *Controller) HandlePunchResultPacket(request *protocol.Packet) error {
+	var result pb.PunchResult
+	if err := proto.Unmarshal(request.Payload, &result); err != nil {
+		return fmt.Errorf("PunchResult unmarshal error: %v", err)
+	}
+	key := punchSessionKey(result.GetSessionId(), result.GetAttempt())
+	session, ok := c.nc.PunchSessions.Get(key)
+	if !ok {
+		return fmt.Errorf("punch session not found: %s", key)
+	}
+	source := util.IpToUint32(request.SrcIP)
+	if result.GetSource() != 0 && result.GetSource() != source {
+		return fmt.Errorf("punch result source mismatch: %d != %d", result.GetSource(), source)
+	}
+	session.Results[source] = &result
+	switch result.GetCode() {
+	case pb.PunchResultCode_PunchResultSuccess:
+		session.State = PunchSessionSuccess
+	case pb.PunchResultCode_PunchResultTimeout:
+		session.State = PunchSessionTimeout
+	case pb.PunchResultCode_PunchResultCanceled:
+		session.State = PunchSessionCanceled
+	default:
+		session.State = PunchSessionFailed
+	}
+	session.LastReason = result.GetReason()
+	c.nc.PunchSessions.Set(key, session)
+	return nil
+}
+
+func (c *Controller) HandlePunchCancelPacket(request *protocol.Packet) error {
+	var cancel pb.PunchCancel
+	if err := proto.Unmarshal(request.Payload, &cancel); err != nil {
+		return fmt.Errorf("PunchCancel unmarshal error: %v", err)
+	}
+	key := punchSessionKey(cancel.GetSessionId(), cancel.GetAttempt())
+	session, ok := c.nc.PunchSessions.Get(key)
+	if !ok {
+		return fmt.Errorf("punch session not found: %s", key)
+	}
+	session.State = PunchSessionCanceled
+	session.LastReason = cancel.GetReason()
+	c.nc.PunchSessions.Set(key, session)
+	return nil
+}
+
 func (c *Controller) HandleControlPacket(request *protocol.Packet, remoteAddr net.Addr) (*protocol.Packet, error) {
 	switch protocol.ControlProtocol(request.AppProto) {
 	case protocol.ControlPing:
@@ -313,6 +535,10 @@ func (c *Controller) HandleControlPacket(request *protocol.Packet, remoteAddr ne
 	}
 }
 
+func punchSessionKey(sessionID uint64, attempt uint32) string {
+	return fmt.Sprintf("%d:%d", sessionID, attempt)
+}
+
 type NetworkControl struct {
 	//
 	VirtualNetwork ExpireMap[string, *NetworkInfo]
@@ -320,6 +546,8 @@ type NetworkControl struct {
 	IPSessions ExpireMap[IpSessionKey, net.Addr]
 	// 链路上的加密会话上下文占位（按远端地址跟踪）
 	CipherSessions ExpireMap[string, struct{}]
+	// 打洞会话状态（session_id + attempt）
+	PunchSessions ExpireMap[string, *PunchSession]
 }
 
 // IpSessionKey is a comparable key for IPSessions.
@@ -587,6 +815,10 @@ func (nc *NetworkControl) UpdateClientByVirtualIP(virtualIP uint32, update func(
 		return true
 	}
 	return false
+}
+
+func (nc *NetworkControl) FindPunchSession(sessionID uint64, attempt uint32) (*PunchSession, bool) {
+	return nc.PunchSessions.Get(punchSessionKey(sessionID, attempt))
 }
 
 // ExpireMap now accepts a key type K (must be comparable) and value type T.

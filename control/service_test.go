@@ -210,6 +210,141 @@ func TestPunchCoordProtoContractRoundTrip(t *testing.T) {
 	}
 }
 
+func TestPunchSessionLifecycleHandlers(t *testing.T) {
+	ctrl := newTestController()
+	defer ctrl.Stop()
+	srcReg := mustRegister(t, ctrl, newBaseRegisterReq("dev-a", "node-a"), &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1111})
+	dstReg := mustRegister(t, ctrl, newBaseRegisterReq("dev-b", "node-b"), &net.UDPAddr{IP: net.ParseIP("1.1.1.2"), Port: 2222})
+	req := &pb.PunchRequest{
+		SessionId: 2001,
+		Source:    srcReg.GetVirtualIp(),
+		Target:    dstReg.GetVirtualIp(),
+		Attempt:   1,
+		SourceEndpoints: []*pb.PunchEndpoint{
+			{Ip: util.IpToUint32(net.ParseIP("8.8.8.8")), Port: 30001},
+		},
+		TargetEndpoints: []*pb.PunchEndpoint{
+			{Ip: util.IpToUint32(net.ParseIP("9.9.9.9")), Port: 30002},
+		},
+	}
+	reqPayload, err := proto.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal punch request failed: %v", err)
+	}
+	resp, err := ctrl.HandlePunchRequestPacket(&protocol.Packet{
+		Proto:    protocol.ProtocolService,
+		AppProto: protocol.AppProtoPunchRequest,
+		SrcIP:    util.Uint32ToIP(srcReg.GetVirtualIp()),
+		DstIP:    util.Uint32ToIP(srcReg.GetVirtualGateway()),
+		Gateway:  true,
+		Payload:  reqPayload,
+	})
+	if err != nil {
+		t.Fatalf("HandlePunchRequestPacket failed: %v", err)
+	}
+	if resp.AppProto != protocol.AppProtoPunchAck {
+		t.Fatalf("unexpected punch request response app proto: %v", resp.AppProto)
+	}
+	session, ok := ctrl.nc.FindPunchSession(req.GetSessionId(), req.GetAttempt())
+	if !ok || session.State != PunchSessionDispatch {
+		t.Fatalf("unexpected session after request: %+v", session)
+	}
+
+	ack := &pb.PunchAck{
+		SessionId: req.GetSessionId(),
+		Source:    dstReg.GetVirtualIp(),
+		Attempt:   req.GetAttempt(),
+		Accepted:  true,
+	}
+	ackPayload, err := proto.Marshal(ack)
+	if err != nil {
+		t.Fatalf("marshal punch ack failed: %v", err)
+	}
+	if err := ctrl.HandlePunchAckPacket(&protocol.Packet{
+		Proto:    protocol.ProtocolService,
+		AppProto: protocol.AppProtoPunchAck,
+		SrcIP:    util.Uint32ToIP(dstReg.GetVirtualIp()),
+		Payload:  ackPayload,
+	}); err != nil {
+		t.Fatalf("HandlePunchAckPacket failed: %v", err)
+	}
+	session, ok = ctrl.nc.FindPunchSession(req.GetSessionId(), req.GetAttempt())
+	if !ok || session.State != PunchSessionInProgress {
+		t.Fatalf("unexpected session after ack: %+v", session)
+	}
+
+	result := &pb.PunchResult{
+		SessionId: req.GetSessionId(),
+		Source:    dstReg.GetVirtualIp(),
+		Target:    srcReg.GetVirtualIp(),
+		Attempt:   req.GetAttempt(),
+		Code:      pb.PunchResultCode_PunchResultSuccess,
+		Reason:    "ok",
+	}
+	resultPayload, err := proto.Marshal(result)
+	if err != nil {
+		t.Fatalf("marshal punch result failed: %v", err)
+	}
+	if err := ctrl.HandlePunchResultPacket(&protocol.Packet{
+		Proto:    protocol.ProtocolService,
+		AppProto: protocol.AppProtoPunchResult,
+		SrcIP:    util.Uint32ToIP(dstReg.GetVirtualIp()),
+		Payload:  resultPayload,
+	}); err != nil {
+		t.Fatalf("HandlePunchResultPacket failed: %v", err)
+	}
+	session, ok = ctrl.nc.FindPunchSession(req.GetSessionId(), req.GetAttempt())
+	if !ok || session.State != PunchSessionSuccess {
+		t.Fatalf("unexpected session after result: %+v", session)
+	}
+}
+
+func TestBuildPunchStartPackets(t *testing.T) {
+	ctrl := newTestController()
+	defer ctrl.Stop()
+	srcReg := mustRegister(t, ctrl, newBaseRegisterReq("dev-a", "node-a"), &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1111})
+	dstReg := mustRegister(t, ctrl, newBaseRegisterReq("dev-b", "node-b"), &net.UDPAddr{IP: net.ParseIP("1.1.1.2"), Port: 2222})
+	req := &pb.PunchRequest{
+		SessionId: 3001,
+		Source:    srcReg.GetVirtualIp(),
+		Target:    dstReg.GetVirtualIp(),
+		Attempt:   1,
+		TimeoutMs: 2500,
+		SourceEndpoints: []*pb.PunchEndpoint{
+			{Ip: util.IpToUint32(net.ParseIP("8.8.8.8")), Port: 3333},
+		},
+		TargetEndpoints: []*pb.PunchEndpoint{
+			{Ip: util.IpToUint32(net.ParseIP("9.9.9.9")), Port: 4444},
+		},
+	}
+	payload, err := proto.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal punch request failed: %v", err)
+	}
+	packets, err := ctrl.BuildPunchStartPackets(&protocol.Packet{
+		Proto:    protocol.ProtocolService,
+		AppProto: protocol.AppProtoPunchRequest,
+		SrcIP:    util.Uint32ToIP(srcReg.GetVirtualIp()),
+		DstIP:    util.Uint32ToIP(srcReg.GetVirtualGateway()),
+		Gateway:  true,
+		Payload:  payload,
+	})
+	if err != nil {
+		t.Fatalf("BuildPunchStartPackets failed: %v", err)
+	}
+	if len(packets) != 2 {
+		t.Fatalf("expected 2 punch start packets, got %d", len(packets))
+	}
+	first := packets[0]
+	if first.AppProto != protocol.AppProtoPunchStart || !first.DstIP.Equal(util.Uint32ToIP(srcReg.GetVirtualIp())) {
+		t.Fatalf("unexpected first punch start packet: %+v", first)
+	}
+	second := packets[1]
+	if second.AppProto != protocol.AppProtoPunchStart || !second.DstIP.Equal(util.Uint32ToIP(dstReg.GetVirtualIp())) {
+		t.Fatalf("unexpected second punch start packet: %+v", second)
+	}
+}
+
 func TestHandleRegistrationPacketConflictAndAllowIpChange(t *testing.T) {
 	ctrl := newTestController()
 	defer ctrl.Stop()
