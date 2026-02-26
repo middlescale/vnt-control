@@ -168,6 +168,19 @@ func handleSession(ctrl *control.Controller, conn *quic.Conn) {
 				if err != nil {
 					log.Errorf("HandleClientStatusInfoPacket error: %v", err)
 				}
+				startPackets, err := ctrl.BuildPunchStartPacketsFromStatus(packet)
+				if err != nil {
+					log.Errorf("BuildPunchStartPacketsFromStatus error: %v", err)
+				} else {
+					for _, push := range startPackets {
+						if push == nil || push.DstIP == nil {
+							continue
+						}
+						if !quicStreams.writeToIP(ipToUint32(push.DstIP), push.Marshal()) {
+							log.Warnf("status-triggered PunchStart dispatch failed: %s", push.DstIP)
+						}
+					}
+				}
 				continue
 			case protocol.AppProtoPunchRequest:
 				respPacket, err = ctrl.HandlePunchRequestPacket(packet)

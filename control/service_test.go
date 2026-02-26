@@ -345,6 +345,62 @@ func TestBuildPunchStartPackets(t *testing.T) {
 	}
 }
 
+func TestBuildPunchStartPacketsFromStatus(t *testing.T) {
+	ctrl := newTestController()
+	defer ctrl.Stop()
+	srcReg := mustRegister(t, ctrl, newBaseRegisterReq("dev-a", "node-a"), &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1111})
+	dstReg := mustRegister(t, ctrl, newBaseRegisterReq("dev-b", "node-b"), &net.UDPAddr{IP: net.ParseIP("1.1.1.2"), Port: 2222})
+	srcStatus := &pb.ClientStatusInfo{
+		Source:         srcReg.GetVirtualIp(),
+		NatType:        pb.PunchNatType_Cone,
+		PublicIpList:   []uint32{util.IpToUint32(net.ParseIP("8.8.8.8"))},
+		PublicUdpPorts: []uint32{30001},
+	}
+	dstStatus := &pb.ClientStatusInfo{
+		Source:         dstReg.GetVirtualIp(),
+		NatType:        pb.PunchNatType_Cone,
+		PublicIpList:   []uint32{util.IpToUint32(net.ParseIP("9.9.9.9"))},
+		PublicUdpPorts: []uint32{30002},
+	}
+	srcPayload, err := proto.Marshal(srcStatus)
+	if err != nil {
+		t.Fatalf("marshal src status failed: %v", err)
+	}
+	dstPayload, err := proto.Marshal(dstStatus)
+	if err != nil {
+		t.Fatalf("marshal dst status failed: %v", err)
+	}
+	if err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(srcReg.GetVirtualIp()), Payload: srcPayload}); err != nil {
+		t.Fatalf("update src status failed: %v", err)
+	}
+	if err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(dstReg.GetVirtualIp()), Payload: dstPayload}); err != nil {
+		t.Fatalf("update dst status failed: %v", err)
+	}
+	startPackets, err := ctrl.BuildPunchStartPacketsFromStatus(&protocol.Packet{
+		Proto:   protocol.ProtocolService,
+		SrcIP:   util.Uint32ToIP(srcReg.GetVirtualIp()),
+		DstIP:   util.Uint32ToIP(srcReg.GetVirtualGateway()),
+		Gateway: true,
+	})
+	if err != nil {
+		t.Fatalf("BuildPunchStartPacketsFromStatus failed: %v", err)
+	}
+	if len(startPackets) != 2 {
+		t.Fatalf("expected 2 start packets, got %d", len(startPackets))
+	}
+	next, err := ctrl.BuildPunchStartPacketsFromStatus(&protocol.Packet{
+		Proto: protocol.ProtocolService,
+		SrcIP: util.Uint32ToIP(srcReg.GetVirtualIp()),
+		DstIP: util.Uint32ToIP(srcReg.GetVirtualGateway()),
+	})
+	if err != nil {
+		t.Fatalf("second BuildPunchStartPacketsFromStatus failed: %v", err)
+	}
+	if len(next) != 0 {
+		t.Fatalf("expected cooldown to suppress immediate re-trigger, got %d packets", len(next))
+	}
+}
+
 func TestHandleRegistrationPacketConflictAndAllowIpChange(t *testing.T) {
 	ctrl := newTestController()
 	defer ctrl.Stop()

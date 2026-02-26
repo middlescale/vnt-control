@@ -57,6 +57,7 @@ func NewController(cfg *config.Config) *Controller {
 			IPSessions:     *NewExpireMap[IpSessionKey, net.Addr](24 * time.Hour),
 			CipherSessions: *NewExpireMap[string, struct{}](24 * time.Hour),
 			PunchSessions:  *NewExpireMap[string, *PunchSession](10 * time.Minute),
+			PunchPairCooldown: *NewExpireMap[string, struct{}](20 * time.Second),
 		},
 		cfg: cfg,
 	}
@@ -67,6 +68,7 @@ func (c *Controller) Stop() {
 	c.nc.IPSessions.Stop()
 	c.nc.CipherSessions.Stop()
 	c.nc.PunchSessions.Stop()
+	c.nc.PunchPairCooldown.Stop()
 }
 
 func (c *Controller) HandleHandshakePacket(reqPacket *protocol.Packet) (*protocol.Packet, error) {
@@ -301,6 +303,99 @@ func (c *Controller) HandleClientStatusInfoPacket(request *protocol.Packet) erro
 		return nil
 	}
 	return fmt.Errorf("client %s not registered", request.SrcIP)
+}
+
+func (c *Controller) BuildPunchStartPacketsFromStatus(request *protocol.Packet) ([]*protocol.Packet, error) {
+	srcIP := util.IpToUint32(request.SrcIP)
+	c.nc.VirtualNetwork.mutex.RLock()
+	defer c.nc.VirtualNetwork.mutex.RUnlock()
+	for _, network := range c.nc.VirtualNetwork.data {
+		srcClient, ok := network.Clients[srcIP]
+		if !ok || !srcClient.ControlOnline || srcClient.ClientStatus == nil {
+			continue
+		}
+		for targetIP, targetClient := range network.Clients {
+			if targetIP == srcIP || !targetClient.ControlOnline || targetClient.ClientStatus == nil {
+				continue
+			}
+			pairKey := punchPairKey(srcIP, targetIP)
+			if _, cooling := c.nc.PunchPairCooldown.Get(pairKey); cooling {
+				return nil, nil
+			}
+			sourceEndpoints := buildPunchEndpoints(srcClient.ClientStatus)
+			targetEndpoints := buildPunchEndpoints(targetClient.ClientStatus)
+			if len(sourceEndpoints) == 0 || len(targetEndpoints) == 0 {
+				return nil, nil
+			}
+			sessionID := uint64(time.Now().UnixNano())
+			attempt := uint32(1)
+			now := time.Now()
+			session := &PunchSession{
+				SessionID:   sessionID,
+				Source:      srcIP,
+				Target:      targetIP,
+				Attempt:     attempt,
+				State:       PunchSessionDispatch,
+				RequestedAt: now.Unix(),
+				Ack:         make(map[uint32]bool),
+				Results:     make(map[uint32]*pb.PunchResult),
+			}
+			c.nc.PunchSessions.Set(punchSessionKey(sessionID, attempt), session)
+			c.nc.PunchPairCooldown.Set(pairKey, struct{}{})
+			deadline := now.Add(5 * time.Second).UnixMilli()
+			sourceStart := &pb.PunchStart{
+				SessionId:      sessionID,
+				Source:         srcIP,
+				Target:         targetIP,
+				PeerEndpoints:  targetEndpoints,
+				Attempt:        attempt,
+				TimeoutMs:      3000,
+				DeadlineUnixMs: deadline,
+			}
+			targetStart := &pb.PunchStart{
+				SessionId:      sessionID,
+				Source:         targetIP,
+				Target:         srcIP,
+				PeerEndpoints:  sourceEndpoints,
+				Attempt:        attempt,
+				TimeoutMs:      3000,
+				DeadlineUnixMs: deadline,
+			}
+			sourcePayload, err := proto.Marshal(sourceStart)
+			if err != nil {
+				return nil, fmt.Errorf("PunchStart source marshal error: %v", err)
+			}
+			targetPayload, err := proto.Marshal(targetStart)
+			if err != nil {
+				return nil, fmt.Errorf("PunchStart target marshal error: %v", err)
+			}
+			return []*protocol.Packet{
+				{
+					Ver:       protocol.V2,
+					Proto:     protocol.ProtocolService,
+					AppProto:  protocol.AppProtoPunchStart,
+					SourceTTL: protocol.MAX_TTL,
+					TTL:       protocol.MAX_TTL,
+					SrcIP:     request.DstIP,
+					DstIP:     util.Uint32ToIP(srcIP),
+					Gateway:   true,
+					Payload:   sourcePayload,
+				},
+				{
+					Ver:       protocol.V2,
+					Proto:     protocol.ProtocolService,
+					AppProto:  protocol.AppProtoPunchStart,
+					SourceTTL: protocol.MAX_TTL,
+					TTL:       protocol.MAX_TTL,
+					SrcIP:     request.DstIP,
+					DstIP:     util.Uint32ToIP(targetIP),
+					Gateway:   true,
+					Payload:   targetPayload,
+				},
+			}, nil
+		}
+	}
+	return nil, nil
 }
 
 func (c *Controller) HandlePunchRequestPacket(request *protocol.Packet) (*protocol.Packet, error) {
@@ -539,6 +634,38 @@ func punchSessionKey(sessionID uint64, attempt uint32) string {
 	return fmt.Sprintf("%d:%d", sessionID, attempt)
 }
 
+func punchPairKey(a, b uint32) string {
+	if a < b {
+		return fmt.Sprintf("%d-%d", a, b)
+	}
+	return fmt.Sprintf("%d-%d", b, a)
+}
+
+func buildPunchEndpoints(status *ClientStatusInfo) []*pb.PunchEndpoint {
+	if status == nil || len(status.PublicIPList) == 0 || len(status.PublicUDPPorts) == 0 {
+		return nil
+	}
+	endpoints := make([]*pb.PunchEndpoint, 0, len(status.PublicIPList)*len(status.PublicUDPPorts))
+	for _, ip := range status.PublicIPList {
+		ipv4 := ip.To4()
+		if ipv4 == nil {
+			continue
+		}
+		ipv4u := util.IpToUint32(ipv4)
+		for _, port := range status.PublicUDPPorts {
+			if port == 0 {
+				continue
+			}
+			endpoints = append(endpoints, &pb.PunchEndpoint{
+				Ip:   ipv4u,
+				Port: uint32(port),
+				Tcp:  false,
+			})
+		}
+	}
+	return endpoints
+}
+
 type NetworkControl struct {
 	//
 	VirtualNetwork ExpireMap[string, *NetworkInfo]
@@ -548,6 +675,8 @@ type NetworkControl struct {
 	CipherSessions ExpireMap[string, struct{}]
 	// 打洞会话状态（session_id + attempt）
 	PunchSessions ExpireMap[string, *PunchSession]
+	// 打洞触发冷却（pair key）
+	PunchPairCooldown ExpireMap[string, struct{}]
 }
 
 // IpSessionKey is a comparable key for IPSessions.
