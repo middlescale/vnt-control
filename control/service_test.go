@@ -3,6 +3,7 @@ package control
 import (
 	"net"
 	"testing"
+	"time"
 	"vnt-control/config"
 	"vnt-control/protocol"
 	"vnt-control/protocol/pb"
@@ -297,6 +298,9 @@ func TestPunchSessionLifecycleHandlers(t *testing.T) {
 	if !ok || session.State != PunchSessionSuccess {
 		t.Fatalf("unexpected session after result: %+v", session)
 	}
+	if session.RelayFallback {
+		t.Fatalf("success session should not require relay fallback")
+	}
 }
 
 func TestBuildPunchStartPackets(t *testing.T) {
@@ -398,6 +402,112 @@ func TestBuildPunchStartPacketsFromStatus(t *testing.T) {
 	}
 	if len(next) != 0 {
 		t.Fatalf("expected cooldown to suppress immediate re-trigger, got %d packets", len(next))
+	}
+}
+
+func TestReconcilePunchSessionsTimeoutMarksFallback(t *testing.T) {
+	ctrl := newTestController()
+	defer ctrl.Stop()
+	sessionID := uint64(9001)
+	attempt := uint32(1)
+	key := punchSessionKey(sessionID, attempt)
+	ctrl.nc.PunchSessions.Set(key, &PunchSession{
+		SessionID:       sessionID,
+		Source:          util.IpToUint32(net.ParseIP("10.26.0.2")),
+		Target:          util.IpToUint32(net.ParseIP("10.26.0.3")),
+		Attempt:         attempt,
+		DeadlineUnixMs:  time.Now().Add(-time.Second).UnixMilli(),
+		State:           PunchSessionInProgress,
+		RequestedAt:     time.Now().Unix(),
+		Ack:             map[uint32]bool{},
+		Results:         map[uint32]*pb.PunchResult{},
+		RelayFallback:   false,
+	})
+	ctrl.ReconcilePunchSessions(time.Now().UnixMilli())
+	session, ok := ctrl.nc.FindPunchSession(sessionID, attempt)
+	if !ok {
+		t.Fatalf("session not found")
+	}
+	if session.State != PunchSessionTimeout {
+		t.Fatalf("expected timeout state, got %s", session.State)
+	}
+	if !session.RelayFallback {
+		t.Fatalf("timeout session should require relay fallback")
+	}
+	pairKey := punchPairKey(session.Source, session.Target)
+	retry, ok := ctrl.nc.PunchPairRetry.Get(pairKey)
+	if !ok {
+		t.Fatalf("retry state not found after timeout")
+	}
+	if retry.Attempt != 1 {
+		t.Fatalf("unexpected retry attempt: %d", retry.Attempt)
+	}
+	if retry.NextAllowedUnixMs <= time.Now().UnixMilli() {
+		t.Fatalf("expected backoff window in future, got %d", retry.NextAllowedUnixMs)
+	}
+}
+
+func TestBuildPunchStartPacketsFromStatusHonorsRetryPolicy(t *testing.T) {
+	ctrl := newTestController()
+	defer ctrl.Stop()
+	srcReg := mustRegister(t, ctrl, newBaseRegisterReq("dev-a", "node-a"), &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1111})
+	dstReg := mustRegister(t, ctrl, newBaseRegisterReq("dev-b", "node-b"), &net.UDPAddr{IP: net.ParseIP("1.1.1.2"), Port: 2222})
+	srcStatus := &pb.ClientStatusInfo{
+		Source:         srcReg.GetVirtualIp(),
+		NatType:        pb.PunchNatType_Cone,
+		PublicIpList:   []uint32{util.IpToUint32(net.ParseIP("8.8.8.8"))},
+		PublicUdpPorts: []uint32{30001},
+	}
+	dstStatus := &pb.ClientStatusInfo{
+		Source:         dstReg.GetVirtualIp(),
+		NatType:        pb.PunchNatType_Cone,
+		PublicIpList:   []uint32{util.IpToUint32(net.ParseIP("9.9.9.9"))},
+		PublicUdpPorts: []uint32{30002},
+	}
+	srcPayload, err := proto.Marshal(srcStatus)
+	if err != nil {
+		t.Fatalf("marshal src status failed: %v", err)
+	}
+	dstPayload, err := proto.Marshal(dstStatus)
+	if err != nil {
+		t.Fatalf("marshal dst status failed: %v", err)
+	}
+	if err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(srcReg.GetVirtualIp()), Payload: srcPayload}); err != nil {
+		t.Fatalf("update src status failed: %v", err)
+	}
+	if err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(dstReg.GetVirtualIp()), Payload: dstPayload}); err != nil {
+		t.Fatalf("update dst status failed: %v", err)
+	}
+	pairKey := punchPairKey(srcReg.GetVirtualIp(), dstReg.GetVirtualIp())
+	ctrl.nc.PunchPairRetry.Set(pairKey, PunchRetryState{
+		Attempt:          maxPunchAttemptsPerPair,
+		NextAllowedUnixMs: 0,
+	})
+	packets, err := ctrl.BuildPunchStartPacketsFromStatus(&protocol.Packet{
+		Proto: protocol.ProtocolService,
+		SrcIP: util.Uint32ToIP(srcReg.GetVirtualIp()),
+		DstIP: util.Uint32ToIP(srcReg.GetVirtualGateway()),
+	})
+	if err != nil {
+		t.Fatalf("BuildPunchStartPacketsFromStatus failed: %v", err)
+	}
+	if len(packets) != 0 {
+		t.Fatalf("expected max retry suppression, got %d packets", len(packets))
+	}
+	ctrl.nc.PunchPairRetry.Set(pairKey, PunchRetryState{
+		Attempt:          1,
+		NextAllowedUnixMs: time.Now().Add(2 * time.Second).UnixMilli(),
+	})
+	packets, err = ctrl.BuildPunchStartPacketsFromStatus(&protocol.Packet{
+		Proto: protocol.ProtocolService,
+		SrcIP: util.Uint32ToIP(srcReg.GetVirtualIp()),
+		DstIP: util.Uint32ToIP(srcReg.GetVirtualGateway()),
+	})
+	if err != nil {
+		t.Fatalf("BuildPunchStartPacketsFromStatus failed: %v", err)
+	}
+	if len(packets) != 0 {
+		t.Fatalf("expected backoff suppression, got %d packets", len(packets))
 	}
 }
 

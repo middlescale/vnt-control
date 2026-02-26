@@ -21,6 +21,8 @@ type Controller struct {
 	mu  sync.Mutex
 }
 
+const maxPunchAttemptsPerPair = 3
+
 type PunchSessionState string
 
 const (
@@ -38,11 +40,18 @@ type PunchSession struct {
 	Source      uint32
 	Target      uint32
 	Attempt     uint32
+	DeadlineUnixMs int64
 	State       PunchSessionState
 	RequestedAt int64
 	LastReason  string
+	RelayFallback bool
 	Ack         map[uint32]bool
 	Results     map[uint32]*pb.PunchResult
+}
+
+type PunchRetryState struct {
+	Attempt          uint32
+	NextAllowedUnixMs int64
 }
 
 var supportedHandshakeCapabilities = map[string]struct{}{
@@ -58,6 +67,7 @@ func NewController(cfg *config.Config) *Controller {
 			CipherSessions: *NewExpireMap[string, struct{}](24 * time.Hour),
 			PunchSessions:  *NewExpireMap[string, *PunchSession](10 * time.Minute),
 			PunchPairCooldown: *NewExpireMap[string, struct{}](20 * time.Second),
+			PunchPairRetry: *NewExpireMap[string, PunchRetryState](30 * time.Minute),
 		},
 		cfg: cfg,
 	}
@@ -69,6 +79,7 @@ func (c *Controller) Stop() {
 	c.nc.CipherSessions.Stop()
 	c.nc.PunchSessions.Stop()
 	c.nc.PunchPairCooldown.Stop()
+	c.nc.PunchPairRetry.Stop()
 }
 
 func (c *Controller) HandleHandshakePacket(reqPacket *protocol.Packet) (*protocol.Packet, error) {
@@ -307,6 +318,8 @@ func (c *Controller) HandleClientStatusInfoPacket(request *protocol.Packet) erro
 
 func (c *Controller) BuildPunchStartPacketsFromStatus(request *protocol.Packet) ([]*protocol.Packet, error) {
 	srcIP := util.IpToUint32(request.SrcIP)
+	now := time.Now()
+	nowMs := now.UnixMilli()
 	c.nc.VirtualNetwork.mutex.RLock()
 	defer c.nc.VirtualNetwork.mutex.RUnlock()
 	for _, network := range c.nc.VirtualNetwork.data {
@@ -320,21 +333,34 @@ func (c *Controller) BuildPunchStartPacketsFromStatus(request *protocol.Packet) 
 			}
 			pairKey := punchPairKey(srcIP, targetIP)
 			if _, cooling := c.nc.PunchPairCooldown.Get(pairKey); cooling {
-				return nil, nil
+				continue
+			}
+			retryState, hasRetry := c.nc.PunchPairRetry.Get(pairKey)
+			if hasRetry {
+				if retryState.Attempt >= maxPunchAttemptsPerPair {
+					continue
+				}
+				if nowMs < retryState.NextAllowedUnixMs {
+					continue
+				}
 			}
 			sourceEndpoints := buildPunchEndpoints(srcClient.ClientStatus)
 			targetEndpoints := buildPunchEndpoints(targetClient.ClientStatus)
 			if len(sourceEndpoints) == 0 || len(targetEndpoints) == 0 {
-				return nil, nil
+				continue
 			}
 			sessionID := uint64(time.Now().UnixNano())
 			attempt := uint32(1)
-			now := time.Now()
+			if hasRetry {
+				attempt = retryState.Attempt + 1
+			}
+			deadline := now.Add(5 * time.Second).UnixMilli()
 			session := &PunchSession{
 				SessionID:   sessionID,
 				Source:      srcIP,
 				Target:      targetIP,
 				Attempt:     attempt,
+				DeadlineUnixMs: deadline,
 				State:       PunchSessionDispatch,
 				RequestedAt: now.Unix(),
 				Ack:         make(map[uint32]bool),
@@ -342,7 +368,6 @@ func (c *Controller) BuildPunchStartPacketsFromStatus(request *protocol.Packet) 
 			}
 			c.nc.PunchSessions.Set(punchSessionKey(sessionID, attempt), session)
 			c.nc.PunchPairCooldown.Set(pairKey, struct{}{})
-			deadline := now.Add(5 * time.Second).UnixMilli()
 			sourceStart := &pb.PunchStart{
 				SessionId:      sessionID,
 				Source:         srcIP,
@@ -419,10 +444,14 @@ func (c *Controller) HandlePunchRequestPacket(request *protocol.Packet) (*protoc
 		Source:      sourceIP,
 		Target:      req.GetTarget(),
 		Attempt:     req.GetAttempt(),
+		DeadlineUnixMs: req.GetDeadlineUnixMs(),
 		State:       PunchSessionDispatch,
 		RequestedAt: now,
 		Ack:         map[uint32]bool{sourceIP: true},
 		Results:     make(map[uint32]*pb.PunchResult),
+	}
+	if session.DeadlineUnixMs == 0 {
+		session.DeadlineUnixMs = time.Now().Add(5 * time.Second).UnixMilli()
 	}
 	c.nc.PunchSessions.Set(punchSessionKey(req.GetSessionId(), req.GetAttempt()), session)
 	ack := &pb.PunchAck{
@@ -533,9 +562,13 @@ func (c *Controller) HandlePunchAckPacket(request *protocol.Packet) error {
 		return fmt.Errorf("punch ack source mismatch: %d != %d", ack.GetSource(), source)
 	}
 	session.Ack[source] = ack.GetAccepted()
+	pairKey := punchPairKey(session.Source, session.Target)
 	if !ack.GetAccepted() {
 		session.State = PunchSessionFailed
 		session.LastReason = ack.GetReason()
+		session.RelayFallback = true
+		c.nc.PunchPairCooldown.Delete(pairKey)
+		c.updatePunchRetryState(pairKey, session.State)
 	} else if len(session.Ack) >= 2 {
 		session.State = PunchSessionInProgress
 	}
@@ -558,17 +591,24 @@ func (c *Controller) HandlePunchResultPacket(request *protocol.Packet) error {
 		return fmt.Errorf("punch result source mismatch: %d != %d", result.GetSource(), source)
 	}
 	session.Results[source] = &result
+	pairKey := punchPairKey(session.Source, session.Target)
 	switch result.GetCode() {
 	case pb.PunchResultCode_PunchResultSuccess:
 		session.State = PunchSessionSuccess
+		session.RelayFallback = false
 	case pb.PunchResultCode_PunchResultTimeout:
 		session.State = PunchSessionTimeout
+		session.RelayFallback = true
 	case pb.PunchResultCode_PunchResultCanceled:
 		session.State = PunchSessionCanceled
+		session.RelayFallback = true
 	default:
 		session.State = PunchSessionFailed
+		session.RelayFallback = true
 	}
 	session.LastReason = result.GetReason()
+	c.nc.PunchPairCooldown.Delete(pairKey)
+	c.updatePunchRetryState(pairKey, session.State)
 	c.nc.PunchSessions.Set(key, session)
 	return nil
 }
@@ -585,8 +625,34 @@ func (c *Controller) HandlePunchCancelPacket(request *protocol.Packet) error {
 	}
 	session.State = PunchSessionCanceled
 	session.LastReason = cancel.GetReason()
+	session.RelayFallback = true
+	pairKey := punchPairKey(session.Source, session.Target)
+	c.nc.PunchPairCooldown.Delete(pairKey)
+	c.updatePunchRetryState(pairKey, session.State)
 	c.nc.PunchSessions.Set(key, session)
 	return nil
+}
+
+func (c *Controller) ReconcilePunchSessions(nowUnixMs int64) {
+	c.nc.PunchSessions.mutex.Lock()
+	defer c.nc.PunchSessions.mutex.Unlock()
+	for key, session := range c.nc.PunchSessions.data {
+		if session == nil {
+			continue
+		}
+		if (session.State == PunchSessionDispatch || session.State == PunchSessionInProgress) &&
+			session.DeadlineUnixMs > 0 && nowUnixMs > session.DeadlineUnixMs {
+			session.State = PunchSessionTimeout
+			if session.LastReason == "" {
+				session.LastReason = "deadline exceeded"
+			}
+			session.RelayFallback = true
+			c.nc.PunchSessions.data[key] = session
+			pairKey := punchPairKey(session.Source, session.Target)
+			c.nc.PunchPairCooldown.Delete(pairKey)
+			c.updatePunchRetryState(pairKey, session.State)
+		}
+	}
 }
 
 func (c *Controller) HandleControlPacket(request *protocol.Packet, remoteAddr net.Addr) (*protocol.Packet, error) {
@@ -641,6 +707,33 @@ func punchPairKey(a, b uint32) string {
 	return fmt.Sprintf("%d-%d", b, a)
 }
 
+func retryBackoffDuration(attempt uint32) time.Duration {
+	if attempt == 0 {
+		return 0
+	}
+	shift := attempt
+	if shift > 5 {
+		shift = 5
+	}
+	d := time.Duration(1<<shift) * time.Second
+	if d > 30*time.Second {
+		return 30 * time.Second
+	}
+	return d
+}
+
+func (c *Controller) updatePunchRetryState(pairKey string, status PunchSessionState) {
+	switch status {
+	case PunchSessionSuccess:
+		c.nc.PunchPairRetry.Delete(pairKey)
+	case PunchSessionFailed, PunchSessionTimeout, PunchSessionCanceled:
+		state, _ := c.nc.PunchPairRetry.Get(pairKey)
+		state.Attempt++
+		state.NextAllowedUnixMs = time.Now().Add(retryBackoffDuration(state.Attempt)).UnixMilli()
+		c.nc.PunchPairRetry.Set(pairKey, state)
+	}
+}
+
 func buildPunchEndpoints(status *ClientStatusInfo) []*pb.PunchEndpoint {
 	if status == nil || len(status.PublicIPList) == 0 || len(status.PublicUDPPorts) == 0 {
 		return nil
@@ -677,6 +770,8 @@ type NetworkControl struct {
 	PunchSessions ExpireMap[string, *PunchSession]
 	// 打洞触发冷却（pair key）
 	PunchPairCooldown ExpireMap[string, struct{}]
+	// 打洞重试状态（pair key）
+	PunchPairRetry ExpireMap[string, PunchRetryState]
 }
 
 // IpSessionKey is a comparable key for IPSessions.

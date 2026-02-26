@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"net"
 	"sync"
+	"time"
 	"vnt-control/control"
 	"vnt-control/protocol"
 
@@ -113,6 +114,7 @@ func handleSession(ctrl *control.Controller, conn *quic.Conn) {
 	}
 	defer stream.Close()
 	buf := make([]byte, 4096)
+	lastSweepMs := int64(0)
 	for {
 		n, err := stream.Read(buf)
 		if err != nil {
@@ -124,6 +126,11 @@ func handleSession(ctrl *control.Controller, conn *quic.Conn) {
 		if err != nil {
 			log.Printf("Unmarshal packet error: %v", err)
 			continue
+		}
+		nowMs := time.Now().UnixMilli()
+		if nowMs-lastSweepMs >= 1000 {
+			ctrl.ReconcilePunchSessions(nowMs)
+			lastSweepMs = nowMs
 		}
 
 		// 目前只处理 Gateway数据，不转发
