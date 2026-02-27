@@ -179,12 +179,17 @@ func handleSession(ctrl *control.Controller, conn *quic.Conn) {
 				if err != nil {
 					log.Errorf("BuildPunchStartPacketsFromStatus error: %v", err)
 				} else {
+					if len(startPackets) > 0 {
+						log.Infof("status-triggered PunchStart packets: %d", len(startPackets))
+					}
 					for _, push := range startPackets {
 						if push == nil || push.DstIP == nil {
 							continue
 						}
 						if !quicStreams.writeToIP(ipToUint32(push.DstIP), push.Marshal()) {
 							log.Warnf("status-triggered PunchStart dispatch failed: %s", push.DstIP)
+						} else {
+							log.Infof("status-triggered PunchStart dispatched: %s", push.DstIP)
 						}
 					}
 				}
@@ -212,18 +217,14 @@ func handleSession(ctrl *control.Controller, conn *quic.Conn) {
 				err = ctrl.HandlePunchAckPacket(packet)
 				if err != nil {
 					log.Errorf("HandlePunchAckPacket error: %v", err)
+				} else {
+					log.Infof("PunchAck received from %s", packet.SrcIP)
 				}
 				continue
 			case protocol.AppProtoPunchResult:
 				err = ctrl.HandlePunchResultPacket(packet)
 				if err != nil {
 					log.Errorf("HandlePunchResultPacket error: %v", err)
-				}
-				continue
-			case protocol.AppProtoPunchCancel:
-				err = ctrl.HandlePunchCancelPacket(packet)
-				if err != nil {
-					log.Errorf("HandlePunchCancelPacket error: %v", err)
 				}
 				continue
 

@@ -600,33 +600,13 @@ func (c *Controller) HandlePunchResultPacket(request *protocol.Packet) error {
 		session.State = PunchSessionTimeout
 		session.RelayFallback = true
 	case pb.PunchResultCode_PunchResultCanceled:
-		session.State = PunchSessionCanceled
+		session.State = PunchSessionFailed
 		session.RelayFallback = true
 	default:
 		session.State = PunchSessionFailed
 		session.RelayFallback = true
 	}
 	session.LastReason = result.GetReason()
-	c.nc.PunchPairCooldown.Delete(pairKey)
-	c.updatePunchRetryState(pairKey, session.State)
-	c.nc.PunchSessions.Set(key, session)
-	return nil
-}
-
-func (c *Controller) HandlePunchCancelPacket(request *protocol.Packet) error {
-	var cancel pb.PunchCancel
-	if err := proto.Unmarshal(request.Payload, &cancel); err != nil {
-		return fmt.Errorf("PunchCancel unmarshal error: %v", err)
-	}
-	key := punchSessionKey(cancel.GetSessionId(), cancel.GetAttempt())
-	session, ok := c.nc.PunchSessions.Get(key)
-	if !ok {
-		return fmt.Errorf("punch session not found: %s", key)
-	}
-	session.State = PunchSessionCanceled
-	session.LastReason = cancel.GetReason()
-	session.RelayFallback = true
-	pairKey := punchPairKey(session.Source, session.Target)
 	c.nc.PunchPairCooldown.Delete(pairKey)
 	c.updatePunchRetryState(pairKey, session.State)
 	c.nc.PunchSessions.Set(key, session)

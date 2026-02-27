@@ -106,7 +106,6 @@ const (
 	AppProtoPunchAck                AppProtocol = 11
 	AppProtoPunchStart              AppProtocol = 12
 	AppProtoPunchResult             AppProtocol = 13
-	AppProtoPunchCancel             AppProtocol = 14
 	AppProtoUnknown                 AppProtocol = 255
 )
 
@@ -138,8 +137,6 @@ func AppProtocolFromUint8(val uint8) AppProtocol {
 		return AppProtoPunchStart
 	case 13:
 		return AppProtoPunchResult
-	case 14:
-		return AppProtoPunchCancel
 	default:
 		return AppProtoUnknown
 	}

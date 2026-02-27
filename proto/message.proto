@@ -125,14 +125,6 @@ message PunchResult {
     string reason = 6;
     PunchEndpoint selected_endpoint = 7;
 }
-message PunchCancel {
-    uint64 session_id = 1;
-    fixed32 source = 2;
-    fixed32 target = 3;
-    uint32 attempt = 4;
-    uint32 reason_code = 5;
-    string reason = 6;
-}
 /// 向服务器上报客户端状态信息
 message ClientStatusInfo {
     fixed32 source = 1;
