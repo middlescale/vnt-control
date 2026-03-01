@@ -3,6 +3,7 @@ package control
 import (
 	"fmt"
 	"net"
+	"os"
 	"strconv"
 	"sync"
 	"time"
@@ -17,6 +18,7 @@ import (
 
 type Controller struct {
 	nc  NetworkControl
+	um  *UserManager
 	cfg *config.Config
 	mu  sync.Mutex
 }
@@ -57,9 +59,11 @@ type PunchRetryState struct {
 var supportedHandshakeCapabilities = map[string]struct{}{
 	"udp_endpoint_report_v1": {},
 	"punch_coord_v1":        {},
+	"gateway_ticket_v1":     {},
 }
 
 func NewController(cfg *config.Config) *Controller {
+	um := newUserManagerFromStore()
 	return &Controller{
 		nc: NetworkControl{
 			VirtualNetwork: *NewExpireMap[string, *NetworkInfo](7 * 24 * time.Hour),
@@ -69,8 +73,22 @@ func NewController(cfg *config.Config) *Controller {
 			PunchPairCooldown: *NewExpireMap[string, struct{}](20 * time.Second),
 			PunchPairRetry: *NewExpireMap[string, PunchRetryState](30 * time.Minute),
 		},
+		um:  um,
 		cfg: cfg,
 	}
+}
+
+func newUserManagerFromStore() *UserManager {
+	path := os.Getenv("UM_STORE_JSON_PATH")
+	if path == "" {
+		path = "./data/um.json"
+	}
+	um, err := NewUserManagerWithStore(NewJSONUMStore(path))
+	if err != nil {
+		log.Warnf("load user manager from json failed (%s): %v; fallback to memory", path, err)
+		return NewUserManager()
+	}
+	return um
 }
 
 func (c *Controller) Stop() {

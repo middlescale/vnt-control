@@ -24,7 +24,7 @@ func TestHandleHandshakePacketSuccess(t *testing.T) {
 	req := &pb.HandshakeRequest{
 		Version:      "test-client",
 		Secret:       true,
-		Capabilities: []string{"udp_endpoint_report_v1", "punch_coord_v1", "unknown_cap"},
+		Capabilities: []string{"udp_endpoint_report_v1", "punch_coord_v1", "gateway_ticket_v1", "unknown_cap"},
 	}
 	payload, err := proto.Marshal(req)
 	if err != nil {
@@ -79,7 +79,7 @@ func TestHandleHandshakePacketSuccess(t *testing.T) {
 	if resp.GetSecret() {
 		t.Fatalf("expected secret=false")
 	}
-	if len(resp.GetCapabilities()) != 2 || resp.GetCapabilities()[0] != "udp_endpoint_report_v1" || resp.GetCapabilities()[1] != "punch_coord_v1" {
+	if len(resp.GetCapabilities()) != 3 || resp.GetCapabilities()[0] != "udp_endpoint_report_v1" || resp.GetCapabilities()[1] != "punch_coord_v1" || resp.GetCapabilities()[2] != "gateway_ticket_v1" {
 		t.Fatalf("unexpected capabilities: %v", resp.GetCapabilities())
 	}
 }
