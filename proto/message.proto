@@ -68,6 +68,19 @@ message GatewayConnectAck {
     uint32 negotiated_mtu = 4;
     uint32 keepalive_secs = 5;
 }
+message DeviceAuthRequest {
+    string user_id = 1;
+    string group = 2;
+    string device_id = 3;
+    string ticket = 4;
+}
+message DeviceAuthAck {
+    bool ok = 1;
+    string reason = 2;
+    string user_id = 3;
+    string group = 4;
+    string device_id = 5;
+}
 message DeviceInfo {
     string name = 1;
     fixed32 virtual_ip = 2;

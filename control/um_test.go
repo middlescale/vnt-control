@@ -107,3 +107,37 @@ func TestUserManagementRegenerateBasicPolicy(t *testing.T) {
 		t.Fatalf("expected updated_at move forward")
 	}
 }
+
+func TestIssueAndAuthDeviceTicket(t *testing.T) {
+	um := NewUserManager()
+	user, err := um.CreateUser("ticket-user")
+	if err != nil {
+		t.Fatalf("CreateUser failed: %v", err)
+	}
+	tk, err := um.IssueDeviceTicket(user.UserID, "g1", time.Minute)
+	if err != nil {
+		t.Fatalf("IssueDeviceTicket failed: %v", err)
+	}
+	if _, err = um.AuthDevice(user.UserID, "g1", "dev-1", tk.Ticket); err != nil {
+		t.Fatalf("AuthDevice failed: %v", err)
+	}
+	if !um.IsAuthedDevice("g1", "dev-1") {
+		t.Fatalf("device should be authed")
+	}
+	if _, err = um.AuthDevice(user.UserID, "g1", "dev-1", tk.Ticket); err == nil {
+		t.Fatalf("expected used ticket reject")
+	}
+}
+
+func TestIssueDeviceTicketExpiry(t *testing.T) {
+	um := NewUserManager()
+	user, _ := um.CreateUser("ticket-user-expire")
+	tk, err := um.IssueDeviceTicket(user.UserID, "g1", time.Millisecond)
+	if err != nil {
+		t.Fatalf("IssueDeviceTicket failed: %v", err)
+	}
+	time.Sleep(2 * time.Millisecond)
+	if _, err = um.AuthDevice(user.UserID, "g1", "dev-1", tk.Ticket); err == nil {
+		t.Fatalf("expected expired ticket reject")
+	}
+}

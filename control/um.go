@@ -46,6 +46,21 @@ type UMPolicy struct {
 	UpdatedAt               time.Time
 }
 
+type UMDeviceTicket struct {
+	Ticket    string
+	UserID    string
+	GroupName string
+	ExpireAt  time.Time
+	Used      bool
+}
+
+type UMAuthDevice struct {
+	UserID    string
+	GroupName string
+	DeviceID  string
+	AuthedAt  time.Time
+}
+
 type UserManager struct {
 	mu             sync.RWMutex
 	store          UMStore
@@ -55,6 +70,8 @@ type UserManager struct {
 	policies       map[string]UMPolicy
 	enrollments    map[string]UMEnrollment
 	deviceByPubKey map[string]UMDevice
+	authedDevices  map[string]UMAuthDevice
+	deviceTickets  map[string]UMDeviceTicket
 }
 
 func NewUserManager() *UserManager {
@@ -63,6 +80,8 @@ func NewUserManager() *UserManager {
 		policies:       make(map[string]UMPolicy),
 		enrollments:    make(map[string]UMEnrollment),
 		deviceByPubKey: make(map[string]UMDevice),
+		authedDevices:  make(map[string]UMAuthDevice),
+		deviceTickets:  make(map[string]UMDeviceTicket),
 	}
 	return m
 }
@@ -215,6 +234,89 @@ func (m *UserManager) GenerateBasicPolicy(userID string) (UMPolicy, error) {
 	return policy, nil
 }
 
+func (m *UserManager) IssueDeviceTicket(userID string, groupName string, ttl time.Duration) (UMDeviceTicket, error) {
+	if userID == "" {
+		return UMDeviceTicket{}, fmt.Errorf("user id is empty")
+	}
+	if groupName == "" {
+		return UMDeviceTicket{}, fmt.Errorf("group name is empty")
+	}
+	if ttl <= 0 {
+		return UMDeviceTicket{}, fmt.Errorf("invalid ttl")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.users[userID]; !ok {
+		return UMDeviceTicket{}, fmt.Errorf("user not found")
+	}
+	seq := m.enrollmentSeq.Add(1)
+	ticket := UMDeviceTicket{
+		Ticket:    fmt.Sprintf("dtk-%d-%d", time.Now().UnixNano(), seq),
+		UserID:    userID,
+		GroupName: groupName,
+		ExpireAt:  time.Now().Add(ttl),
+	}
+	m.deviceTickets[ticket.Ticket] = ticket
+	return ticket, nil
+}
+
+func (m *UserManager) AuthDevice(userID string, groupName string, deviceID string, ticket string) (UMAuthDevice, error) {
+	if userID == "" || groupName == "" || deviceID == "" || ticket == "" {
+		return UMAuthDevice{}, fmt.Errorf("user/group/device/ticket required")
+	}
+	now := time.Now()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	t, ok := m.deviceTickets[ticket]
+	if !ok {
+		return UMAuthDevice{}, fmt.Errorf("ticket not found")
+	}
+	if t.Used {
+		return UMAuthDevice{}, fmt.Errorf("ticket already used")
+	}
+	if now.After(t.ExpireAt) {
+		return UMAuthDevice{}, fmt.Errorf("ticket expired")
+	}
+	if t.UserID != userID || t.GroupName != groupName {
+		return UMAuthDevice{}, fmt.Errorf("ticket mismatch")
+	}
+	if _, ok := m.users[userID]; !ok {
+		return UMAuthDevice{}, fmt.Errorf("user not found")
+	}
+	record := UMAuthDevice{
+		UserID:    userID,
+		GroupName: groupName,
+		DeviceID:  deviceID,
+		AuthedAt:  now,
+	}
+	m.authedDevices[authedDeviceKey(groupName, deviceID)] = record
+	t.Used = true
+	m.deviceTickets[ticket] = t
+	if err := m.saveLocked(); err != nil {
+		return UMAuthDevice{}, err
+	}
+	return record, nil
+}
+
+func (m *UserManager) IsAuthedDevice(groupName string, deviceID string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	_, ok := m.authedDevices[authedDeviceKey(groupName, deviceID)]
+	return ok
+}
+
+func (m *UserManager) RequireTicketAuthForGroup(groupName string) bool {
+	now := time.Now()
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, t := range m.deviceTickets {
+		if t.GroupName == groupName && !t.Used && now.Before(t.ExpireAt) {
+			return true
+		}
+	}
+	return false
+}
+
 func toPubKeyHex(pubKey []byte, pubKeyAlg string) string {
 	sum := sha256.Sum256(append([]byte(pubKeyAlg+":"), pubKey...))
 	return hex.EncodeToString(sum[:])
@@ -229,12 +331,13 @@ func (m *UserManager) saveLocked() error {
 
 func (m *UserManager) snapshotLocked() UMSnapshot {
 	return UMSnapshot{
-		UserSeq:        m.userSeq.Load(),
-		EnrollmentSeq:  m.enrollmentSeq.Load(),
-		Users:          cloneUsers(m.users),
-		Policies:       clonePolicies(m.policies),
-		Enrollments:    cloneEnrollments(m.enrollments),
-		DeviceByPubKey: cloneDevices(m.deviceByPubKey),
+		UserSeq:          m.userSeq.Load(),
+		EnrollmentSeq:    m.enrollmentSeq.Load(),
+		Users:            cloneUsers(m.users),
+		Policies:         clonePolicies(m.policies),
+		Enrollments:      cloneEnrollments(m.enrollments),
+		DeviceByPubKey:   cloneDevices(m.deviceByPubKey),
+		CertifiedDevices: cloneAuthedDevices(m.authedDevices),
 	}
 }
 
@@ -252,6 +355,7 @@ func (m *UserManager) restore(snapshot UMSnapshot) {
 	}
 	m.enrollments = cloneEnrollments(snapshot.Enrollments)
 	m.deviceByPubKey = cloneDevices(snapshot.DeviceByPubKey)
+	m.authedDevices = cloneAuthedDevices(snapshot.CertifiedDevices)
 }
 
 func cloneUsers(src map[string]UMUser) map[string]UMUser {
@@ -284,6 +388,18 @@ func clonePolicies(src map[string]UMPolicy) map[string]UMPolicy {
 		dst[k] = v
 	}
 	return dst
+}
+
+func cloneAuthedDevices(src map[string]UMAuthDevice) map[string]UMAuthDevice {
+	dst := make(map[string]UMAuthDevice, len(src))
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
+}
+
+func authedDeviceKey(groupName string, deviceID string) string {
+	return groupName + "|" + deviceID
 }
 
 func (m *UserManager) generateBasicPolicyLocked(userID string) UMPolicy {

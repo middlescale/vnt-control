@@ -106,6 +106,8 @@ const (
 	AppProtoPunchAck                AppProtocol = 11
 	AppProtoPunchStart              AppProtocol = 12
 	AppProtoPunchResult             AppProtocol = 13
+	AppProtoDeviceAuthRequest       AppProtocol = 15
+	AppProtoDeviceAuthAck           AppProtocol = 16
 	AppProtoUnknown                 AppProtocol = 255
 )
 
@@ -137,6 +139,10 @@ func AppProtocolFromUint8(val uint8) AppProtocol {
 		return AppProtoPunchStart
 	case 13:
 		return AppProtoPunchResult
+	case 15:
+		return AppProtoDeviceAuthRequest
+	case 16:
+		return AppProtoDeviceAuthAck
 	default:
 		return AppProtoUnknown
 	}

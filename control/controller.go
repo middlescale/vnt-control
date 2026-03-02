@@ -38,40 +38,40 @@ const (
 )
 
 type PunchSession struct {
-	SessionID   uint64
-	Source      uint32
-	Target      uint32
-	Attempt     uint32
+	SessionID      uint64
+	Source         uint32
+	Target         uint32
+	Attempt        uint32
 	DeadlineUnixMs int64
-	State       PunchSessionState
-	RequestedAt int64
-	LastReason  string
-	RelayFallback bool
-	Ack         map[uint32]bool
-	Results     map[uint32]*pb.PunchResult
+	State          PunchSessionState
+	RequestedAt    int64
+	LastReason     string
+	RelayFallback  bool
+	Ack            map[uint32]bool
+	Results        map[uint32]*pb.PunchResult
 }
 
 type PunchRetryState struct {
-	Attempt          uint32
+	Attempt           uint32
 	NextAllowedUnixMs int64
 }
 
 var supportedHandshakeCapabilities = map[string]struct{}{
 	"udp_endpoint_report_v1": {},
-	"punch_coord_v1":        {},
-	"gateway_ticket_v1":     {},
+	"punch_coord_v1":         {},
+	"gateway_ticket_v1":      {},
 }
 
 func NewController(cfg *config.Config) *Controller {
 	um := newUserManagerFromStore()
 	return &Controller{
 		nc: NetworkControl{
-			VirtualNetwork: *NewExpireMap[string, *NetworkInfo](7 * 24 * time.Hour),
-			IPSessions:     *NewExpireMap[IpSessionKey, net.Addr](24 * time.Hour),
-			CipherSessions: *NewExpireMap[string, struct{}](24 * time.Hour),
-			PunchSessions:  *NewExpireMap[string, *PunchSession](10 * time.Minute),
+			VirtualNetwork:    *NewExpireMap[string, *NetworkInfo](7 * 24 * time.Hour),
+			IPSessions:        *NewExpireMap[IpSessionKey, net.Addr](24 * time.Hour),
+			CipherSessions:    *NewExpireMap[string, struct{}](24 * time.Hour),
+			PunchSessions:     *NewExpireMap[string, *PunchSession](10 * time.Minute),
 			PunchPairCooldown: *NewExpireMap[string, struct{}](20 * time.Second),
-			PunchPairRetry: *NewExpireMap[string, PunchRetryState](30 * time.Minute),
+			PunchPairRetry:    *NewExpireMap[string, PunchRetryState](30 * time.Minute),
 		},
 		um:  um,
 		cfg: cfg,
@@ -158,8 +158,12 @@ func (c *Controller) HandleRegistrationPacketWithVirtualIP(request *protocol.Pac
 	}
 
 	domain := registration.GetToken()
-	if c.cfg.Domain != "" && domain != c.cfg.Domain {
-		return nil, 0, fmt.Errorf("RegistrationRequest domain %s mismatch config domain %s", domain, c.cfg.Domain)
+	gateway, netmask, err := c.resolveGroupNetworkConfig(domain)
+	if err != nil {
+		return nil, 0, err
+	}
+	if !c.UMIsAuthedDevice(domain, registration.GetDeviceId()) {
+		return nil, 0, fmt.Errorf("device %s is not authed for group %s", registration.GetDeviceId(), domain)
 	}
 
 	raddrStr := remoteAddr.String()
@@ -183,11 +187,7 @@ func (c *Controller) HandleRegistrationPacketWithVirtualIP(request *protocol.Pac
 			registrationResp.PublicIpv6 = ip.To16()
 		}
 	}
-	netmask, err := c.parseNetmask()
-	if err != nil {
-		return nil, 0, err
-	}
-	registrationResp.VirtualGateway = util.IpToUint32(c.cfg.Gateway)
+	registrationResp.VirtualGateway = util.IpToUint32(gateway)
 	registrationResp.VirtualNetmask = util.MaskToUint32(netmask)
 
 	c.mu.Lock()
@@ -195,7 +195,7 @@ func (c *Controller) HandleRegistrationPacketWithVirtualIP(request *protocol.Pac
 
 	netInfo, netInfoExist := c.nc.VirtualNetwork.Get(domain)
 	if !netInfoExist {
-		netInfo = NewNetworkInfo(domain, netmask, net.IP(c.cfg.Gateway))
+		netInfo = NewNetworkInfo(domain, netmask, net.IP(gateway))
 		c.nc.VirtualNetwork.Set(domain, netInfo)
 	}
 	virtualIP, oldIP, err := c.nc.generateIP(
@@ -268,6 +268,58 @@ func (c *Controller) HandlePullDeviceListPacket(request *protocol.Packet) (*prot
 		Ver:       protocol.V2,
 		Proto:     protocol.ProtocolService,
 		AppProto:  protocol.AppProtoPushDeviceList,
+		SourceTTL: protocol.MAX_TTL,
+		TTL:       protocol.MAX_TTL,
+		SrcIP:     request.DstIP,
+		DstIP:     request.SrcIP,
+		Gateway:   true,
+		Payload:   payload,
+	}, nil
+}
+
+func (c *Controller) HandleDeviceAuthPacket(request *protocol.Packet) (*protocol.Packet, error) {
+	var req pb.DeviceAuthRequest
+	if err := proto.Unmarshal(request.Payload, &req); err != nil {
+		return nil, err
+	}
+	if _, err := c.UMAuthDevice(req.GetUserId(), req.GetGroup(), req.GetDeviceId(), req.GetTicket()); err != nil {
+		ack := &pb.DeviceAuthAck{
+			Ok:       false,
+			Reason:   err.Error(),
+			UserId:   req.GetUserId(),
+			Group:    req.GetGroup(),
+			DeviceId: req.GetDeviceId(),
+		}
+		payload, marshalErr := proto.Marshal(ack)
+		if marshalErr != nil {
+			return nil, marshalErr
+		}
+		return &protocol.Packet{
+			Ver:       protocol.V2,
+			Proto:     protocol.ProtocolService,
+			AppProto:  protocol.AppProtoDeviceAuthAck,
+			SourceTTL: protocol.MAX_TTL,
+			TTL:       protocol.MAX_TTL,
+			SrcIP:     request.DstIP,
+			DstIP:     request.SrcIP,
+			Gateway:   true,
+			Payload:   payload,
+		}, nil
+	}
+	ack := &pb.DeviceAuthAck{
+		Ok:       true,
+		UserId:   req.GetUserId(),
+		Group:    req.GetGroup(),
+		DeviceId: req.GetDeviceId(),
+	}
+	payload, err := proto.Marshal(ack)
+	if err != nil {
+		return nil, err
+	}
+	return &protocol.Packet{
+		Ver:       protocol.V2,
+		Proto:     protocol.ProtocolService,
+		AppProto:  protocol.AppProtoDeviceAuthAck,
 		SourceTTL: protocol.MAX_TTL,
 		TTL:       protocol.MAX_TTL,
 		SrcIP:     request.DstIP,
@@ -374,15 +426,15 @@ func (c *Controller) BuildPunchStartPacketsFromStatus(request *protocol.Packet) 
 			}
 			deadline := now.Add(5 * time.Second).UnixMilli()
 			session := &PunchSession{
-				SessionID:   sessionID,
-				Source:      srcIP,
-				Target:      targetIP,
-				Attempt:     attempt,
+				SessionID:      sessionID,
+				Source:         srcIP,
+				Target:         targetIP,
+				Attempt:        attempt,
 				DeadlineUnixMs: deadline,
-				State:       PunchSessionDispatch,
-				RequestedAt: now.Unix(),
-				Ack:         make(map[uint32]bool),
-				Results:     make(map[uint32]*pb.PunchResult),
+				State:          PunchSessionDispatch,
+				RequestedAt:    now.Unix(),
+				Ack:            make(map[uint32]bool),
+				Results:        make(map[uint32]*pb.PunchResult),
 			}
 			c.nc.PunchSessions.Set(punchSessionKey(sessionID, attempt), session)
 			c.nc.PunchPairCooldown.Set(pairKey, struct{}{})
@@ -458,15 +510,15 @@ func (c *Controller) HandlePunchRequestPacket(request *protocol.Packet) (*protoc
 	}
 	now := time.Now().Unix()
 	session := &PunchSession{
-		SessionID:   req.GetSessionId(),
-		Source:      sourceIP,
-		Target:      req.GetTarget(),
-		Attempt:     req.GetAttempt(),
+		SessionID:      req.GetSessionId(),
+		Source:         sourceIP,
+		Target:         req.GetTarget(),
+		Attempt:        req.GetAttempt(),
 		DeadlineUnixMs: req.GetDeadlineUnixMs(),
-		State:       PunchSessionDispatch,
-		RequestedAt: now,
-		Ack:         map[uint32]bool{sourceIP: true},
-		Results:     make(map[uint32]*pb.PunchResult),
+		State:          PunchSessionDispatch,
+		RequestedAt:    now,
+		Ack:            map[uint32]bool{sourceIP: true},
+		Results:        make(map[uint32]*pb.PunchResult),
 	}
 	if session.DeadlineUnixMs == 0 {
 		session.DeadlineUnixMs = time.Now().Add(5 * time.Second).UnixMilli()
@@ -791,12 +843,34 @@ func NewIpSessionKey(id string, ip net.IP) IpSessionKey {
 	}
 }
 
-func (c *Controller) parseNetmask() (net.IPMask, error) {
-	ip := net.ParseIP(c.cfg.Netmask)
+func parseNetmask(netmask string) (net.IPMask, error) {
+	ip := net.ParseIP(netmask)
 	if ip == nil || ip.To4() == nil {
-		return nil, fmt.Errorf("invalid netmask %q", c.cfg.Netmask)
+		return nil, fmt.Errorf("invalid netmask %q", netmask)
 	}
 	return net.IPMask(ip.To4()), nil
+}
+
+func (c *Controller) resolveGroupNetworkConfig(group string) (net.IP, net.IPMask, error) {
+	if len(c.cfg.Groups) > 0 {
+		gc, ok := c.cfg.Groups[group]
+		if !ok {
+			return nil, nil, fmt.Errorf("group %s not configured", group)
+		}
+		mask, err := parseNetmask(gc.Netmask)
+		if err != nil {
+			return nil, nil, err
+		}
+		return gc.Gateway, mask, nil
+	}
+	if c.cfg.Domain != "" && group != c.cfg.Domain {
+		return nil, nil, fmt.Errorf("RegistrationRequest domain %s mismatch config domain %s", group, c.cfg.Domain)
+	}
+	mask, err := parseNetmask(c.cfg.Netmask)
+	if err != nil {
+		return nil, nil, err
+	}
+	return c.cfg.Gateway, mask, nil
 }
 
 func validateRegistrationRequest(reg *pb.RegistrationRequest) error {

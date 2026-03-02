@@ -170,6 +170,12 @@ func handleSession(ctrl *control.Controller, conn *quic.Conn) {
 					log.Errorf("HandlePullDeviceListPacket error: %v", err)
 					continue
 				}
+			case protocol.AppProtoDeviceAuthRequest:
+				respPacket, err = ctrl.HandleDeviceAuthPacket(packet)
+				if err != nil {
+					log.Errorf("HandleDeviceAuthPacket error: %v", err)
+					continue
+				}
 			case protocol.AppProtoClientStatusInfo:
 				err = ctrl.HandleClientStatusInfoPacket(packet)
 				if err != nil {

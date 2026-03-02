@@ -42,6 +42,10 @@
   "gateway": "10.26.0.1",
   "domain": "ms.net",
   "netmask": "255.255.255.0",
+  "groups": {
+    "ms.net": { "gateway": "10.26.0.1", "netmask": "255.255.255.0" },
+    "dev.net": { "gateway": "10.27.0.1", "netmask": "255.255.255.0" }
+  },
   "listen_addr": ":4433",
   "cert_cache_dir": "./cert-cache"
 }
@@ -96,7 +100,10 @@ make proto   # 重新生成 proto Go 代码（需安装 protoc 与插件）
 
 ```bash
 ./vnt-admin --createUser user1
+./vnt-admin --issueDeviceTicket --userId <user_id> --group ms.net --ttlSeconds 300
 ```
+
+设备认证（auth device）由 `vnt-cli` 发起：客户端输入 `user_id/group/ticket` 发送到 `vnt-control`，认证成功后设备才可注册入网。
 
 可选参数：
 

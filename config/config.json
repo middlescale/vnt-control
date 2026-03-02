@@ -1,7 +1,14 @@
 {
-    "gateway": "10.26.0.1",
-    "domain": "ms.net",
-    "netmask": "255.255.255.0",
+    "groups": {
+        "ms.net": {
+            "gateway": "10.26.0.1",
+            "netmask": "255.255.255.0"
+        },
+        "dev.net": {
+            "gateway": "10.27.0.1",
+            "netmask": "255.255.255.0"
+        }
+    },
     "listen_addr": ":4433",
     "cert_cache_dir": "./cert-cache"
 }

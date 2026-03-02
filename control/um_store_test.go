@@ -108,3 +108,26 @@ func TestJSONUMStorePersistsMultiUserMultiDeviceLookup(t *testing.T) {
 		}
 	}
 }
+
+func TestJSONUMStorePersistsAuthedDevices(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "um-certified.json")
+	um, err := NewUserManagerWithStore(NewJSONUMStore(path))
+	if err != nil {
+		t.Fatalf("NewUserManagerWithStore failed: %v", err)
+	}
+	user, _ := um.CreateUser("u")
+	tk, err := um.IssueDeviceTicket(user.UserID, "g1", time.Minute)
+	if err != nil {
+		t.Fatalf("IssueDeviceTicket failed: %v", err)
+	}
+	if _, err := um.AuthDevice(user.UserID, "g1", "dev-1", tk.Ticket); err != nil {
+		t.Fatalf("AuthDevice failed: %v", err)
+	}
+	umReloaded, err := NewUserManagerWithStore(NewJSONUMStore(path))
+	if err != nil {
+		t.Fatalf("reload failed: %v", err)
+	}
+	if !umReloaded.IsAuthedDevice("g1", "dev-1") {
+		t.Fatalf("expected authed device persisted")
+	}
+}

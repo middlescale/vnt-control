@@ -1,6 +1,7 @@
 package control
 
 import (
+	"fmt"
 	"net"
 	"testing"
 	"time"
@@ -412,16 +413,16 @@ func TestReconcilePunchSessionsTimeoutMarksFallback(t *testing.T) {
 	attempt := uint32(1)
 	key := punchSessionKey(sessionID, attempt)
 	ctrl.nc.PunchSessions.Set(key, &PunchSession{
-		SessionID:       sessionID,
-		Source:          util.IpToUint32(net.ParseIP("10.26.0.2")),
-		Target:          util.IpToUint32(net.ParseIP("10.26.0.3")),
-		Attempt:         attempt,
-		DeadlineUnixMs:  time.Now().Add(-time.Second).UnixMilli(),
-		State:           PunchSessionInProgress,
-		RequestedAt:     time.Now().Unix(),
-		Ack:             map[uint32]bool{},
-		Results:         map[uint32]*pb.PunchResult{},
-		RelayFallback:   false,
+		SessionID:      sessionID,
+		Source:         util.IpToUint32(net.ParseIP("10.26.0.2")),
+		Target:         util.IpToUint32(net.ParseIP("10.26.0.3")),
+		Attempt:        attempt,
+		DeadlineUnixMs: time.Now().Add(-time.Second).UnixMilli(),
+		State:          PunchSessionInProgress,
+		RequestedAt:    time.Now().Unix(),
+		Ack:            map[uint32]bool{},
+		Results:        map[uint32]*pb.PunchResult{},
+		RelayFallback:  false,
 	})
 	ctrl.ReconcilePunchSessions(time.Now().UnixMilli())
 	session, ok := ctrl.nc.FindPunchSession(sessionID, attempt)
@@ -480,7 +481,7 @@ func TestBuildPunchStartPacketsFromStatusHonorsRetryPolicy(t *testing.T) {
 	}
 	pairKey := punchPairKey(srcReg.GetVirtualIp(), dstReg.GetVirtualIp())
 	ctrl.nc.PunchPairRetry.Set(pairKey, PunchRetryState{
-		Attempt:          maxPunchAttemptsPerPair,
+		Attempt:           maxPunchAttemptsPerPair,
 		NextAllowedUnixMs: 0,
 	})
 	packets, err := ctrl.BuildPunchStartPacketsFromStatus(&protocol.Packet{
@@ -495,7 +496,7 @@ func TestBuildPunchStartPacketsFromStatusHonorsRetryPolicy(t *testing.T) {
 		t.Fatalf("expected max retry suppression, got %d packets", len(packets))
 	}
 	ctrl.nc.PunchPairRetry.Set(pairKey, PunchRetryState{
-		Attempt:          1,
+		Attempt:           1,
 		NextAllowedUnixMs: time.Now().Add(2 * time.Second).UnixMilli(),
 	})
 	packets, err = ctrl.BuildPunchStartPacketsFromStatus(&protocol.Packet{
@@ -747,6 +748,75 @@ func TestGenerateIPReusesOfflineIPAfterSessionExpiry(t *testing.T) {
 	}
 }
 
+func TestRegistrationRequiresAuthedDeviceWhenTicketIssued(t *testing.T) {
+	ctrl := newTestController()
+	defer ctrl.Stop()
+	deviceID := fmt.Sprintf("dev-preauth-%d", time.Now().UnixNano())
+	user, err := ctrl.UMCreateUser("alice")
+	if err != nil {
+		t.Fatalf("UMCreateUser failed: %v", err)
+	}
+	tk, err := ctrl.UMIssueDeviceTicket(user.UserID, "ms.net", time.Minute)
+	if err != nil {
+		t.Fatalf("UMIssueDeviceTicket failed: %v", err)
+	}
+	req := newBaseRegisterReq(deviceID, "node-a")
+	_, err = ctrl.HandleRegistrationPacket(newRegistrationPacket(t, req), &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1111})
+	if err == nil {
+		t.Fatalf("expected registration rejected before certification")
+	}
+	if _, err := ctrl.UMAuthDevice(user.UserID, "ms.net", deviceID, tk.Ticket); err != nil {
+		t.Fatalf("UMAuthDevice failed: %v", err)
+	}
+	_ = mustRegister(t, ctrl, req, &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1111})
+}
+
+func TestHandleDeviceAuthPacket(t *testing.T) {
+	ctrl := newTestController()
+	defer ctrl.Stop()
+	user, err := ctrl.UMCreateUser("alice")
+	if err != nil {
+		t.Fatalf("UMCreateUser failed: %v", err)
+	}
+	tk, err := ctrl.UMIssueDeviceTicket(user.UserID, "ms.net", time.Minute)
+	if err != nil {
+		t.Fatalf("UMIssueDeviceTicket failed: %v", err)
+	}
+	req := &pb.DeviceAuthRequest{UserId: user.UserID, Group: "ms.net", DeviceId: "dev-x", Ticket: tk.Ticket}
+	b, _ := proto.Marshal(req)
+	packet := &protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoDeviceAuthRequest, SrcIP: net.ParseIP("10.0.0.2"), DstIP: net.ParseIP("0.0.0.1"), Gateway: true, Payload: b}
+	resp, err := ctrl.HandleDeviceAuthPacket(packet)
+	if err != nil {
+		t.Fatalf("HandleDeviceAuthPacket failed: %v", err)
+	}
+	var ack pb.DeviceAuthAck
+	if err := proto.Unmarshal(resp.Payload, &ack); err != nil {
+		t.Fatalf("unmarshal ack failed: %v", err)
+	}
+	if !ack.GetOk() || !ctrl.UMIsAuthedDevice("ms.net", "dev-x") {
+		t.Fatalf("expected auth success, ack=%+v", ack)
+	}
+}
+
+func TestRegistrationUsesConfiguredGroupNetwork(t *testing.T) {
+	ctrl := NewController(&config.Config{
+		Groups: map[string]config.GroupConfig{
+			"g1.net": {Gateway: net.ParseIP("10.26.1.1"), Netmask: "255.255.255.0"},
+			"g2.net": {Gateway: net.ParseIP("10.27.0.1"), Netmask: "255.255.0.0"},
+		},
+	})
+	defer ctrl.Stop()
+	req := newBaseRegisterReq("dev-g1-a", "node-g1-a")
+	req.Token = "g1.net"
+	resp := mustRegister(t, ctrl, req, &net.UDPAddr{IP: net.ParseIP("1.1.1.10"), Port: 1112})
+	if resp.GetVirtualGateway() != util.IpToUint32(net.ParseIP("10.26.1.1")) {
+		t.Fatalf("unexpected g1 gateway: %s", util.Uint32ToIP(resp.GetVirtualGateway()))
+	}
+	if resp.GetVirtualNetmask() != util.IpToUint32(net.ParseIP("255.255.255.0")) {
+		t.Fatalf("unexpected g1 netmask: %s", util.Uint32ToIP(resp.GetVirtualNetmask()))
+	}
+}
+
 func newTestController() *Controller {
 	return NewController(&config.Config{
 		Gateway: net.ParseIP("10.26.0.1"),
@@ -757,6 +827,7 @@ func newTestController() *Controller {
 
 func mustRegister(t *testing.T, ctrl *Controller, req *pb.RegistrationRequest, remoteAddr net.Addr) *pb.RegistrationResponse {
 	t.Helper()
+	ensureAuthed(t, ctrl, req.GetToken(), req.GetDeviceId())
 	respPacket, err := ctrl.HandleRegistrationPacket(newRegistrationPacket(t, req), remoteAddr)
 	if err != nil {
 		t.Fatalf("HandleRegistrationPacket failed: %v", err)
@@ -765,10 +836,14 @@ func mustRegister(t *testing.T, ctrl *Controller, req *pb.RegistrationRequest, r
 	if err := proto.Unmarshal(respPacket.Payload, &resp); err != nil {
 		t.Fatalf("unmarshal registration response failed: %v", err)
 	}
-	if resp.GetVirtualGateway() != util.IpToUint32(net.ParseIP("10.26.0.1")) {
+	gw, mask, err := ctrl.resolveGroupNetworkConfig(req.GetToken())
+	if err != nil {
+		t.Fatalf("resolveGroupNetworkConfig failed: %v", err)
+	}
+	if resp.GetVirtualGateway() != util.IpToUint32(gw) {
 		t.Fatalf("unexpected virtual gateway: %d", resp.GetVirtualGateway())
 	}
-	if resp.GetVirtualNetmask() != util.IpToUint32(net.ParseIP("255.255.255.0")) {
+	if resp.GetVirtualNetmask() != util.MaskToUint32(mask) {
 		t.Fatalf("unexpected virtual netmask: %d", resp.GetVirtualNetmask())
 	}
 	virtualIP := resp.GetVirtualIp()
@@ -782,6 +857,24 @@ func mustRegister(t *testing.T, ctrl *Controller, req *pb.RegistrationRequest, r
 		t.Fatalf("virtual ip should not be gateway/broadcast: %s", util.Uint32ToIP(virtualIP))
 	}
 	return &resp
+}
+
+func ensureAuthed(t *testing.T, ctrl *Controller, group, deviceID string) {
+	t.Helper()
+	if ctrl.UMIsAuthedDevice(group, deviceID) {
+		return
+	}
+	user, err := ctrl.UMCreateUser(fmt.Sprintf("user-%s-%s", group, deviceID))
+	if err != nil {
+		t.Fatalf("UMCreateUser failed: %v", err)
+	}
+	tk, err := ctrl.UMIssueDeviceTicket(user.UserID, group, time.Minute)
+	if err != nil {
+		t.Fatalf("UMIssueDeviceTicket failed: %v", err)
+	}
+	if _, err = ctrl.UMAuthDevice(user.UserID, group, deviceID, tk.Ticket); err != nil {
+		t.Fatalf("UMAuthDevice failed: %v", err)
+	}
 }
 
 func newRegistrationPacket(t *testing.T, req *pb.RegistrationRequest) *protocol.Packet {

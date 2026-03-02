@@ -7,21 +7,27 @@ import (
 	"net"
 	"os"
 	"strings"
+	"time"
 	"vnt-control/control"
 
 	log "github.com/sirupsen/logrus"
 )
 
 type adminRequest struct {
-	Action string `json:"action"`
-	Name   string `json:"name,omitempty"`
+	Action     string `json:"action"`
+	Name       string `json:"name,omitempty"`
+	UserID     string `json:"user_id,omitempty"`
+	Group      string `json:"group,omitempty"`
+	TTLSeconds int64  `json:"ttl_seconds,omitempty"`
 }
 
 type adminResponse struct {
-	OK     bool   `json:"ok"`
-	UserID string `json:"user_id,omitempty"`
-	Name   string `json:"name,omitempty"`
-	Error  string `json:"error,omitempty"`
+	OK           bool   `json:"ok"`
+	UserID       string `json:"user_id,omitempty"`
+	Name         string `json:"name,omitempty"`
+	Ticket       string `json:"ticket,omitempty"`
+	ExpireAtUnix int64  `json:"expire_at_unix,omitempty"`
+	Error        string `json:"error,omitempty"`
 }
 
 func StartAdminUnixServer(ctx context.Context, ctrl *control.Controller, socketPath string) error {
@@ -76,6 +82,17 @@ func handleAdminConn(ctrl *control.Controller, conn net.Conn) {
 			return
 		}
 		_ = json.NewEncoder(conn).Encode(adminResponse{OK: true, UserID: user.UserID, Name: user.Name})
+	case "issue_device_ticket":
+		ttl := req.TTLSeconds
+		if ttl <= 0 {
+			ttl = 600
+		}
+		t, err := ctrl.UMIssueDeviceTicket(strings.TrimSpace(req.UserID), strings.TrimSpace(req.Group), time.Duration(ttl)*time.Second)
+		if err != nil {
+			_ = json.NewEncoder(conn).Encode(adminResponse{OK: false, Error: err.Error()})
+			return
+		}
+		_ = json.NewEncoder(conn).Encode(adminResponse{OK: true, Ticket: t.Ticket, ExpireAtUnix: t.ExpireAt.Unix()})
 	default:
 		_ = json.NewEncoder(conn).Encode(adminResponse{OK: false, Error: "unsupported action"})
 	}

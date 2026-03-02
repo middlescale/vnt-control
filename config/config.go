@@ -13,16 +13,22 @@ import (
 // netmask: IPv4 子网掩码
 // domain: 域名字符串
 type Config struct {
-	Gateway           net.IP `json:"gateway"`
-	Domain            string `json:"domain"`
-	Netmask           string `json:"netmask"`
-	ListenAddr        string `json:"listen_addr"`
-	AutoCertDomain    string `json:"autocert_domain"`
-	CertCacheDir      string `json:"cert_cache_dir"`
-	TLSCertPath       string `json:"tls_cert_path"`
-	TLSKeyPath        string `json:"tls_key_path"`
-	ClientCAPath      string `json:"client_ca_path"`
-	RequireClientCert bool   `json:"require_client_cert"`
+	Gateway           net.IP                 `json:"gateway"`
+	Domain            string                 `json:"domain"`
+	Netmask           string                 `json:"netmask"`
+	Groups            map[string]GroupConfig `json:"groups"`
+	ListenAddr        string                 `json:"listen_addr"`
+	AutoCertDomain    string                 `json:"autocert_domain"`
+	CertCacheDir      string                 `json:"cert_cache_dir"`
+	TLSCertPath       string                 `json:"tls_cert_path"`
+	TLSKeyPath        string                 `json:"tls_key_path"`
+	ClientCAPath      string                 `json:"client_ca_path"`
+	RequireClientCert bool                   `json:"require_client_cert"`
+}
+
+type GroupConfig struct {
+	Gateway net.IP `json:"gateway"`
+	Netmask string `json:"netmask"`
 }
 
 func LoadConfig(path string) (*Config, error) {
@@ -45,19 +51,46 @@ func LoadConfig(path string) (*Config, error) {
 
 // Validate 校验配置字段格式
 func (c *Config) Validate() error {
-	gateway := c.Gateway
+	// 域名校验（简单正则，支持主流域名）
+	domainRe := regexp.MustCompile(`^(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}$`)
+	if len(c.Groups) == 0 {
+		if err := validateGatewayAndNetmask(c.Gateway, c.Netmask); err != nil {
+			return err
+		}
+		if !domainRe.MatchString(c.Domain) {
+			return errors.New("domain 必须为合法域名")
+		}
+		return nil
+	}
+	for group, gc := range c.Groups {
+		if !domainRe.MatchString(group) {
+			return errors.New("groups 的 key 必须为合法域名")
+		}
+		if err := validateGatewayAndNetmask(gc.Gateway, gc.Netmask); err != nil {
+			return err
+		}
+	}
+	if c.Domain != "" {
+		if !domainRe.MatchString(c.Domain) {
+			return errors.New("domain 必须为合法域名")
+		}
+		if err := validateGatewayAndNetmask(c.Gateway, c.Netmask); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateGatewayAndNetmask(gateway net.IP, netmaskStr string) error {
 	if gateway == nil || gateway.To4() == nil {
 		return errors.New("gateway 必须为合法 IPv4 地址")
 	}
-	// 检查是否为广播地址（最后一段为255）
 	if gateway.To4()[3] == 255 {
 		return errors.New("gateway 不能为广播地址")
 	}
-	// 检查是否为组播地址（224.0.0.0/4）
 	if gateway.To4()[0] >= 224 && gateway.To4()[0] <= 239 {
 		return errors.New("gateway 不能为组播地址")
 	}
-	// 检查是否为公网地址（排除常见私有网段）
 	priv := false
 	b := gateway.To4()
 	switch {
@@ -71,31 +104,22 @@ func (c *Config) Validate() error {
 	if !priv {
 		return errors.New("gateway 不能为公网地址")
 	}
-
-	netmask := net.ParseIP(c.Netmask)
+	netmask := net.ParseIP(netmaskStr)
 	if netmask == nil || netmask.To4() == nil {
 		return errors.New("netmask 必须为合法 IPv4 地址")
 	}
-	// 校验 netmask 是否为标准掩码
 	mask := netmask.To4()
 	val := uint32(mask[0])<<24 | uint32(mask[1])<<16 | uint32(mask[2])<<8 | uint32(mask[3])
 	if val == 0 || val == 0xFFFFFFFF {
 		return errors.New("netmask 不能为全0或全255")
 	}
-	// 检查是否为连续的1后跟连续的0
-	var foundZero bool = false
+	foundZero := false
 	for i := 31; i >= 0; i-- {
 		if (val & (1 << uint(i))) == 0 {
 			foundZero = true
 		} else if foundZero {
 			return errors.New("netmask 必须为连续的1后跟连续的0")
 		}
-	}
-
-	// 域名校验（简单正则，支持主流域名）
-	domainRe := regexp.MustCompile(`^(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}$`)
-	if !domainRe.MatchString(c.Domain) {
-		return errors.New("domain 必须为合法域名")
 	}
 	return nil
 }

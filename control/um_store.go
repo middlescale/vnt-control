@@ -14,12 +14,13 @@ type UMStore interface {
 }
 
 type UMSnapshot struct {
-	UserSeq        uint64                  `json:"user_seq"`
-	EnrollmentSeq  uint64                  `json:"enrollment_seq"`
-	Users          map[string]UMUser       `json:"users"`
-	Policies       map[string]UMPolicy     `json:"policies"`
-	Enrollments    map[string]UMEnrollment `json:"enrollments"`
-	DeviceByPubKey map[string]UMDevice     `json:"device_by_pub_key"`
+	UserSeq          uint64                  `json:"user_seq"`
+	EnrollmentSeq    uint64                  `json:"enrollment_seq"`
+	Users            map[string]UMUser       `json:"users"`
+	Policies         map[string]UMPolicy     `json:"policies"`
+	Enrollments      map[string]UMEnrollment `json:"enrollments"`
+	DeviceByPubKey   map[string]UMDevice     `json:"device_by_pub_key"`
+	CertifiedDevices map[string]UMAuthDevice `json:"certified_devices"`
 }
 
 type JSONUMStore struct {
