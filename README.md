@@ -64,6 +64,7 @@
 - `TLS_CLIENT_CA`
 - `TLS_REQUIRE_CLIENT_CERT`
 - `LOG_LEVEL`
+- `ADMIN_SOCKET_PATH`（管理员命令本地 Unix Domain Socket 路径，默认 `/tmp/vnt-control-admin.sock`）
 
 ## 使用 Makefile 编译与运行
 
@@ -81,6 +82,25 @@ make run     # 运行已编译二进制
 make clean   # 删除二进制
 make proto   # 重新生成 proto Go 代码（需安装 protoc 与插件）
 ```
+
+会同时生成：
+
+- `./vnt-control`
+- `./vnt-admin`
+
+## 管理员命令（vnt-admin）
+
+`vnt-admin` 通过本机 Unix Domain Socket 调用控制端管理接口（默认 `/tmp/vnt-control-admin.sock`）。
+
+示例：
+
+```bash
+./vnt-admin --createUser user1
+```
+
+可选参数：
+
+- `--socket <path>`：指定 socket 路径（也可用环境变量 `VNT_ADMIN_SOCKET`）。
 
 ## 验证
 

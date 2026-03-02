@@ -115,6 +115,11 @@ func main() {
 
 	ctrl := control.NewController(cfg)
 
+	adminSocket := firstNonEmpty(os.Getenv("ADMIN_SOCKET_PATH"), "/tmp/vnt-control-admin.sock")
+	if err := handlers.StartAdminUnixServer(ctx, ctrl, adminSocket); err != nil {
+		log.Fatalf("start admin unix socket failed: %v", err)
+	}
+
 	go func() {
 		<-sigs
 		cancel()

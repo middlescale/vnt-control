@@ -1,4 +1,5 @@
 APP_NAME=vnt-control
+ADMIN_APP_NAME=vnt-admin
 GO_FILES=$(shell find . -name '*.go' -not -path "./vendor/*")
 PROTO_DIR=proto
 PROTO_FILES=$(wildcard $(PROTO_DIR)/*.proto)
@@ -10,12 +11,14 @@ all: build
 
 build:
 	go build -o $(APP_NAME) main.go
+	go build -o $(ADMIN_APP_NAME) ./cmd/vnt-admin
 
 run:
 	./$(APP_NAME)
 
 clean:
 	rm -f $(APP_NAME)
+	rm -f $(ADMIN_APP_NAME)
 
 cert:
 	@echo "证书由 autocert 自动管理，无需手动生成。"
