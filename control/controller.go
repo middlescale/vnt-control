@@ -1,6 +1,8 @@
 package control
 
 import (
+	"crypto/rand"
+	"encoding/base64"
 	"fmt"
 	"net"
 	"os"
@@ -22,6 +24,30 @@ type Controller struct {
 	um  *UserManager
 	cfg *config.Config
 	mu  sync.Mutex
+
+	gatewayMu    sync.RWMutex
+	gatewayNodes map[string]GatewayNodeInfo
+	gatewayAllow map[string]string
+	gatewaySeen  map[string]GatewayNodeInfo
+}
+
+type GatewayNodeInfo struct {
+	GatewayID          string
+	Endpoint           string
+	WireGuardPublicKey string
+	Capabilities       []string
+	UpdatedAt          time.Time
+}
+
+type GatewayAdminView struct {
+	GatewayID          string   `json:"gateway_id"`
+	Endpoint           string   `json:"endpoint"`
+	Approved           bool     `json:"approved"`
+	Default            bool     `json:"default"`
+	Reported           bool     `json:"reported"`
+	WireGuardPublicKey string   `json:"wg_pub_key,omitempty"`
+	Capabilities       []string `json:"capabilities,omitempty"`
+	UpdatedAtUnix      int64    `json:"updated_at_unix,omitempty"`
 }
 
 const maxPunchAttemptsPerPair = 3
@@ -64,6 +90,9 @@ var supportedHandshakeCapabilities = map[string]struct{}{
 }
 
 func NewController(cfg *config.Config) *Controller {
+	if strings.TrimSpace(cfg.DefaultGateway) == "" {
+		cfg.DefaultGateway = "gateway.middlescale.net:433"
+	}
 	um := newUserManagerFromStore()
 	return &Controller{
 		nc: NetworkControl{
@@ -74,8 +103,11 @@ func NewController(cfg *config.Config) *Controller {
 			PunchPairCooldown: *NewExpireMap[string, struct{}](20 * time.Second),
 			PunchPairRetry:    *NewExpireMap[string, PunchRetryState](30 * time.Minute),
 		},
-		um:  um,
-		cfg: cfg,
+		um:           um,
+		cfg:          cfg,
+		gatewayNodes: make(map[string]GatewayNodeInfo),
+		gatewayAllow: make(map[string]string),
+		gatewaySeen:  make(map[string]GatewayNodeInfo),
 	}
 }
 
@@ -190,6 +222,7 @@ func (c *Controller) HandleRegistrationPacketWithVirtualIP(request *protocol.Pac
 	}
 	registrationResp.VirtualGateway = util.IpToUint32(gateway)
 	registrationResp.VirtualNetmask = util.MaskToUint32(netmask)
+	registrationResp.GatewayAccessGrant = c.buildGatewayAccessGrant()
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -888,6 +921,247 @@ func (c *Controller) resolveGroupNetworkConfig(group string) (net.IP, net.IPMask
 		return nil, nil, err
 	}
 	return c.cfg.Gateway, mask, nil
+}
+
+func (c *Controller) HandleGatewayReportPacket(packet *protocol.Packet) (*protocol.Packet, error) {
+	var req pb.GatewayReportRequest
+	if err := proto.Unmarshal(packet.Payload, &req); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(req.GetGatewayId()) == "" {
+		return nil, fmt.Errorf("gateway_id is required")
+	}
+	if strings.TrimSpace(req.GetEndpoint()) == "" {
+		return nil, fmt.Errorf("endpoint is required")
+	}
+	if strings.TrimSpace(req.GetWireguardPublicKey()) == "" {
+		return nil, fmt.Errorf("wireguard_public_key is required")
+	}
+	c.recordGatewaySeen(GatewayNodeInfo{
+		GatewayID:          req.GetGatewayId(),
+		Endpoint:           req.GetEndpoint(),
+		WireGuardPublicKey: req.GetWireguardPublicKey(),
+		Capabilities:       append([]string{}, req.GetCapabilities()...),
+		UpdatedAt:          time.Now(),
+	})
+	now := time.Now()
+	if !c.isGatewayAllowed(req.GetGatewayId(), req.GetEndpoint()) {
+		return c.buildGatewayReportAck(packet, &pb.GatewayReportAck{
+			Ok:           false,
+			Reason:       "gateway not approved",
+			GatewayId:    req.GetGatewayId(),
+			ExpireUnixMs: now.Add(2 * time.Minute).UnixMilli(),
+		})
+	}
+	c.RegisterGatewayNode(req.GetGatewayId(), req.GetEndpoint(), req.GetWireguardPublicKey(), req.GetCapabilities())
+
+	ack := &pb.GatewayReportAck{
+		Ok:           true,
+		Reason:       "ok",
+		GatewayId:    req.GetGatewayId(),
+		ExpireUnixMs: now.Add(2 * time.Minute).UnixMilli(),
+	}
+	return c.buildGatewayReportAck(packet, ack)
+}
+
+func (c *Controller) buildGatewayReportAck(packet *protocol.Packet, ack *pb.GatewayReportAck) (*protocol.Packet, error) {
+	payload, err := proto.Marshal(ack)
+	if err != nil {
+		return nil, err
+	}
+	return &protocol.Packet{
+		Ver:       protocol.V2,
+		Proto:     protocol.ProtocolService,
+		AppProto:  protocol.AppProtoGatewayReportAck,
+		SourceTTL: protocol.MAX_TTL,
+		TTL:       protocol.MAX_TTL,
+		SrcIP:     packet.DstIP,
+		DstIP:     packet.SrcIP,
+		Gateway:   true,
+		Payload:   payload,
+	}, nil
+}
+
+func (c *Controller) ApproveGatewayNode(gatewayID, endpoint string) {
+	c.gatewayMu.Lock()
+	c.gatewayAllow[gatewayID] = endpoint
+	c.gatewayMu.Unlock()
+}
+
+func (c *Controller) ApproveGatewayNodeByID(gatewayID string) error {
+	c.gatewayMu.Lock()
+	defer c.gatewayMu.Unlock()
+	gatewayID = strings.TrimSpace(gatewayID)
+	if gatewayID == "" {
+		return fmt.Errorf("gateway_id is required")
+	}
+	defaultEndpoint := strings.TrimSpace(c.cfg.DefaultGateway)
+	if gatewayID == defaultGatewayServerName(defaultEndpoint) {
+		return nil
+	}
+	if endpoint, ok := c.gatewayAllow[gatewayID]; ok && strings.TrimSpace(endpoint) != "" {
+		return nil
+	}
+	seen, ok := c.gatewaySeen[gatewayID]
+	if !ok || strings.TrimSpace(seen.Endpoint) == "" {
+		return fmt.Errorf("gateway %s has no pending report", gatewayID)
+	}
+	c.gatewayAllow[gatewayID] = seen.Endpoint
+	return nil
+}
+
+func (c *Controller) ListGateways() []GatewayAdminView {
+	c.gatewayMu.RLock()
+	defer c.gatewayMu.RUnlock()
+	byID := map[string]GatewayAdminView{}
+	defaultEndpoint := strings.TrimSpace(c.cfg.DefaultGateway)
+	if defaultEndpoint != "" {
+		defaultID := defaultGatewayServerName(defaultEndpoint)
+		byID[defaultID] = GatewayAdminView{
+			GatewayID: defaultID,
+			Endpoint:  defaultEndpoint,
+			Approved:  true,
+			Default:   true,
+		}
+	}
+	for gatewayID, endpoint := range c.gatewayAllow {
+		if strings.TrimSpace(endpoint) == defaultEndpoint {
+			continue
+		}
+		byID[gatewayID] = GatewayAdminView{
+			GatewayID: gatewayID,
+			Endpoint:  endpoint,
+			Approved:  true,
+		}
+	}
+	for gatewayID, seen := range c.gatewaySeen {
+		item, ok := byID[gatewayID]
+		if !ok {
+			item = GatewayAdminView{
+				GatewayID: gatewayID,
+				Endpoint:  seen.Endpoint,
+			}
+		}
+		item.Reported = true
+		item.WireGuardPublicKey = seen.WireGuardPublicKey
+		item.Capabilities = append([]string{}, seen.Capabilities...)
+		item.UpdatedAtUnix = seen.UpdatedAt.Unix()
+		byID[gatewayID] = item
+	}
+	if defaultEndpoint != "" {
+		defaultID := defaultGatewayServerName(defaultEndpoint)
+		item := byID[defaultID]
+		if !item.Reported {
+			for _, seen := range c.gatewaySeen {
+				if strings.TrimSpace(seen.Endpoint) == defaultEndpoint {
+					item.Reported = true
+					item.WireGuardPublicKey = seen.WireGuardPublicKey
+					item.Capabilities = append([]string{}, seen.Capabilities...)
+					item.UpdatedAtUnix = seen.UpdatedAt.Unix()
+					break
+				}
+			}
+		}
+		byID[defaultID] = item
+	}
+	for gatewayID, item := range byID {
+		if node, ok := c.gatewayNodes[gatewayID]; ok && strings.TrimSpace(node.Endpoint) == strings.TrimSpace(item.Endpoint) {
+			item.Reported = true
+			item.WireGuardPublicKey = node.WireGuardPublicKey
+			item.Capabilities = append([]string{}, node.Capabilities...)
+			item.UpdatedAtUnix = node.UpdatedAt.Unix()
+			byID[gatewayID] = item
+		}
+	}
+	result := make([]GatewayAdminView, 0, len(byID))
+	for _, item := range byID {
+		result = append(result, item)
+	}
+	return result
+}
+
+func (c *Controller) isGatewayAllowed(gatewayID, endpoint string) bool {
+	c.gatewayMu.RLock()
+	defer c.gatewayMu.RUnlock()
+	if endpoint == strings.TrimSpace(c.cfg.DefaultGateway) {
+		return true
+	}
+	allowedEndpoint, ok := c.gatewayAllow[gatewayID]
+	return ok && strings.TrimSpace(allowedEndpoint) == strings.TrimSpace(endpoint)
+}
+
+func (c *Controller) RegisterGatewayNode(gatewayID, endpoint, wireGuardPublicKey string, capabilities []string) {
+	c.gatewayMu.Lock()
+	c.gatewayAllow[gatewayID] = endpoint
+	c.gatewayNodes[gatewayID] = GatewayNodeInfo{
+		GatewayID:          gatewayID,
+		Endpoint:           endpoint,
+		WireGuardPublicKey: wireGuardPublicKey,
+		Capabilities:       append([]string{}, capabilities...),
+		UpdatedAt:          time.Now(),
+	}
+	delete(c.gatewaySeen, gatewayID)
+	c.gatewayMu.Unlock()
+}
+
+func (c *Controller) recordGatewaySeen(info GatewayNodeInfo) {
+	c.gatewayMu.Lock()
+	c.gatewaySeen[info.GatewayID] = info
+	c.gatewayMu.Unlock()
+}
+
+func (c *Controller) buildGatewayAccessGrant() *pb.GatewayAccessGrant {
+	c.gatewayMu.RLock()
+	defer c.gatewayMu.RUnlock()
+	var picked *GatewayNodeInfo
+	for _, node := range c.gatewayNodes {
+		n := node
+		picked = &n
+		break
+	}
+	if picked == nil {
+		defaultEndpoint := strings.TrimSpace(c.cfg.DefaultGateway)
+		if defaultEndpoint == "" {
+			return nil
+		}
+		picked = &GatewayNodeInfo{
+			GatewayID: defaultGatewayServerName(defaultEndpoint),
+			Endpoint:  defaultEndpoint,
+		}
+	}
+	ticket := newGatewayTicket()
+	expire := time.Now().Add(2 * time.Minute)
+	return &pb.GatewayAccessGrant{
+		GatewayAddrs:        []string{"quic://" + picked.Endpoint},
+		GatewayServerName:   picked.GatewayID,
+		Ticket:              ticket,
+		TicketExpireUnixMs:  expire.UnixMilli(),
+		SessionId:           uint64(time.Now().UnixNano()),
+		PolicyRev:           1,
+		WireguardEndpoint:   picked.Endpoint,
+		WireguardPublicKey:  picked.WireGuardPublicKey,
+		GatewayCapabilities: append([]string{}, picked.Capabilities...),
+	}
+}
+
+func defaultGatewayServerName(endpoint string) string {
+	host := endpoint
+	if h, _, err := net.SplitHostPort(endpoint); err == nil {
+		host = h
+	}
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return "gateway.middlescale.net"
+	}
+	return host
+}
+
+func newGatewayTicket() string {
+	buf := make([]byte, 18)
+	if _, err := rand.Read(buf); err != nil {
+		return fmt.Sprintf("gw-%d", time.Now().UnixNano())
+	}
+	return "gw-" + base64.RawURLEncoding.EncodeToString(buf)
 }
 
 func matchDomainAndGroup(token string, domains map[string]config.DomainConfig) (string, string, bool) {

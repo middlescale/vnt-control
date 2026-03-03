@@ -20,6 +20,7 @@ type Config struct {
 	Groups            map[string]GroupConfig  `json:"groups"`
 	DefaultDomain     string                  `json:"default_domain"`
 	Domains           map[string]DomainConfig `json:"domains"`
+	DefaultGateway    string                  `json:"default_gateway"`
 	ListenAddr        string                  `json:"listen_addr"`
 	AutoCertDomain    string                  `json:"autocert_domain"`
 	CertCacheDir      string                  `json:"cert_cache_dir"`
@@ -58,6 +59,9 @@ func LoadConfig(path string) (*Config, error) {
 
 // Validate 校验配置字段格式
 func (c *Config) Validate() error {
+	if strings.TrimSpace(c.DefaultGateway) == "" {
+		c.DefaultGateway = "gateway.middlescale.net:433"
+	}
 	// 域名校验（简单正则，支持主流域名）
 	domainRe := regexp.MustCompile(`^(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}$`)
 	groupRe := regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9-]{0,62}$`)

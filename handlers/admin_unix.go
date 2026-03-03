@@ -14,22 +14,27 @@ import (
 )
 
 type adminRequest struct {
-	Action     string `json:"action"`
-	Name       string `json:"name,omitempty"`
-	Domain     string `json:"domain,omitempty"`
-	UserID     string `json:"user_id,omitempty"`
-	Group      string `json:"group,omitempty"`
-	TTLSeconds int64  `json:"ttl_seconds,omitempty"`
+	Action       string   `json:"action"`
+	Name         string   `json:"name,omitempty"`
+	Domain       string   `json:"domain,omitempty"`
+	GatewayID    string   `json:"gateway_id,omitempty"`
+	Endpoint     string   `json:"endpoint,omitempty"`
+	WgPubKey     string   `json:"wg_pub_key,omitempty"`
+	Capabilities []string `json:"capabilities,omitempty"`
+	UserID       string   `json:"user_id,omitempty"`
+	Group        string   `json:"group,omitempty"`
+	TTLSeconds   int64    `json:"ttl_seconds,omitempty"`
 }
 
 type adminResponse struct {
-	OK           bool   `json:"ok"`
-	UserID       string `json:"user_id,omitempty"`
-	Name         string `json:"name,omitempty"`
-	Domain       string `json:"domain,omitempty"`
-	Ticket       string `json:"ticket,omitempty"`
-	ExpireAtUnix int64  `json:"expire_at_unix,omitempty"`
-	Error        string `json:"error,omitempty"`
+	OK           bool                       `json:"ok"`
+	UserID       string                     `json:"user_id,omitempty"`
+	Name         string                     `json:"name,omitempty"`
+	Domain       string                     `json:"domain,omitempty"`
+	Ticket       string                     `json:"ticket,omitempty"`
+	ExpireAtUnix int64                      `json:"expire_at_unix,omitempty"`
+	Gateways     []control.GatewayAdminView `json:"gateways,omitempty"`
+	Error        string                     `json:"error,omitempty"`
 }
 
 func StartAdminUnixServer(ctx context.Context, ctrl *control.Controller, socketPath string) error {
@@ -95,6 +100,19 @@ func handleAdminConn(ctrl *control.Controller, conn net.Conn) {
 			return
 		}
 		_ = json.NewEncoder(conn).Encode(adminResponse{OK: true, Ticket: t.Ticket, ExpireAtUnix: t.ExpireAt.Unix()})
+	case "register_gateway":
+		gatewayID := strings.TrimSpace(req.GatewayID)
+		if gatewayID == "" {
+			_ = json.NewEncoder(conn).Encode(adminResponse{OK: false, Error: "gateway_id required"})
+			return
+		}
+		if err := ctrl.ApproveGatewayNodeByID(gatewayID); err != nil {
+			_ = json.NewEncoder(conn).Encode(adminResponse{OK: false, Error: err.Error()})
+			return
+		}
+		_ = json.NewEncoder(conn).Encode(adminResponse{OK: true})
+	case "list_gateway":
+		_ = json.NewEncoder(conn).Encode(adminResponse{OK: true, Gateways: ctrl.ListGateways()})
 	default:
 		_ = json.NewEncoder(conn).Encode(adminResponse{OK: false, Error: "unsupported action"})
 	}

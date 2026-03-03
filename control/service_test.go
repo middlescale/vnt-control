@@ -798,6 +798,168 @@ func TestHandleDeviceAuthPacket(t *testing.T) {
 	}
 }
 
+func TestGatewayReportAndRegistrationGrant(t *testing.T) {
+	ctrl := newTestController()
+	defer ctrl.Stop()
+	ctrl.ApproveGatewayNode("gw-1", "127.0.0.1:51820")
+	report := &pb.GatewayReportRequest{
+		GatewayId:          "gw-1",
+		Endpoint:           "127.0.0.1:51820",
+		WireguardPublicKey: "wg-pub-key-1",
+		Capabilities:       []string{"wireguard_v1"},
+		ReportUnixMs:       time.Now().UnixMilli(),
+	}
+	b, _ := proto.Marshal(report)
+	packet := &protocol.Packet{
+		Proto:    protocol.ProtocolService,
+		AppProto: protocol.AppProtoGatewayReportRequest,
+		SrcIP:    net.ParseIP("10.0.0.2"),
+		DstIP:    net.ParseIP("0.0.0.1"),
+		Gateway:  true,
+		Payload:  b,
+	}
+	resp, err := ctrl.HandleGatewayReportPacket(packet)
+	if err != nil {
+		t.Fatalf("HandleGatewayReportPacket failed: %v", err)
+	}
+	var ack pb.GatewayReportAck
+	if err := proto.Unmarshal(resp.Payload, &ack); err != nil {
+		t.Fatalf("unmarshal gateway report ack failed: %v", err)
+	}
+	if !ack.GetOk() || ack.GetGatewayId() != "gw-1" {
+		t.Fatalf("unexpected gateway report ack: %+v", ack)
+	}
+
+	regResp := mustRegister(t, ctrl, newBaseRegisterReq("dev-gw-a", "node-gw-a"), &net.UDPAddr{IP: net.ParseIP("1.1.1.3"), Port: 3333})
+	grant := regResp.GetGatewayAccessGrant()
+	if grant == nil {
+		t.Fatalf("expected gateway access grant in registration response")
+	}
+	if grant.GetWireguardEndpoint() != "127.0.0.1:51820" || grant.GetWireguardPublicKey() != "wg-pub-key-1" {
+		t.Fatalf("unexpected grant wireguard fields: %+v", grant)
+	}
+	if len(grant.GetGatewayCapabilities()) == 0 || grant.GetGatewayCapabilities()[0] != "wireguard_v1" {
+		t.Fatalf("unexpected grant capabilities: %+v", grant.GetGatewayCapabilities())
+	}
+	if grant.GetTicket() == "" || grant.GetTicketExpireUnixMs() <= 0 {
+		t.Fatalf("expected short-lived ticket in grant: %+v", grant)
+	}
+}
+
+func TestGatewayReportRequiresApprovalForNonDefaultGateway(t *testing.T) {
+	ctrl := newTestController()
+	defer ctrl.Stop()
+	report := &pb.GatewayReportRequest{
+		GatewayId:          "gw-denied",
+		Endpoint:           "127.0.0.1:51820",
+		WireguardPublicKey: "wg-pub-key-denied",
+		Capabilities:       []string{"wireguard_v1"},
+		ReportUnixMs:       time.Now().UnixMilli(),
+	}
+	b, _ := proto.Marshal(report)
+	packet := &protocol.Packet{
+		Proto:    protocol.ProtocolService,
+		AppProto: protocol.AppProtoGatewayReportRequest,
+		SrcIP:    net.ParseIP("10.0.0.2"),
+		DstIP:    net.ParseIP("0.0.0.1"),
+		Gateway:  true,
+		Payload:  b,
+	}
+	resp, err := ctrl.HandleGatewayReportPacket(packet)
+	if err != nil {
+		t.Fatalf("HandleGatewayReportPacket failed: %v", err)
+	}
+	var ack pb.GatewayReportAck
+	if err := proto.Unmarshal(resp.Payload, &ack); err != nil {
+		t.Fatalf("unmarshal gateway report ack failed: %v", err)
+	}
+	if ack.GetOk() {
+		t.Fatalf("expected gateway report reject without admin approval")
+	}
+}
+
+func TestGatewayApproveByIDAfterPendingReport(t *testing.T) {
+	ctrl := newTestController()
+	defer ctrl.Stop()
+	report := &pb.GatewayReportRequest{
+		GatewayId:          "gw-pending",
+		Endpoint:           "127.0.0.1:51821",
+		WireguardPublicKey: "wg-pub-key-pending",
+		Capabilities:       []string{"wireguard_v1"},
+		ReportUnixMs:       time.Now().UnixMilli(),
+	}
+	b, _ := proto.Marshal(report)
+	packet := &protocol.Packet{
+		Proto:    protocol.ProtocolService,
+		AppProto: protocol.AppProtoGatewayReportRequest,
+		SrcIP:    net.ParseIP("10.0.0.2"),
+		DstIP:    net.ParseIP("0.0.0.1"),
+		Gateway:  true,
+		Payload:  b,
+	}
+	resp, err := ctrl.HandleGatewayReportPacket(packet)
+	if err != nil {
+		t.Fatalf("HandleGatewayReportPacket failed: %v", err)
+	}
+	var ack pb.GatewayReportAck
+	if err := proto.Unmarshal(resp.Payload, &ack); err != nil {
+		t.Fatalf("unmarshal gateway report ack failed: %v", err)
+	}
+	if ack.GetOk() {
+		t.Fatalf("expected first report to be pending approval")
+	}
+	if err := ctrl.ApproveGatewayNodeByID("gw-pending"); err != nil {
+		t.Fatalf("ApproveGatewayNodeByID failed: %v", err)
+	}
+	resp, err = ctrl.HandleGatewayReportPacket(packet)
+	if err != nil {
+		t.Fatalf("HandleGatewayReportPacket after approve failed: %v", err)
+	}
+	if err := proto.Unmarshal(resp.Payload, &ack); err != nil {
+		t.Fatalf("unmarshal gateway report ack failed: %v", err)
+	}
+	if !ack.GetOk() {
+		t.Fatalf("expected gateway report accepted after approval")
+	}
+}
+
+func TestGatewayReportAllowsConfiguredDefaultGateway(t *testing.T) {
+	ctrl := NewController(&config.Config{
+		Gateway:        net.ParseIP("10.26.0.1"),
+		Domain:         "ms.net",
+		Netmask:        "255.255.255.0",
+		DefaultGateway: "gateway.middlescale.net:433",
+	})
+	defer ctrl.Stop()
+	report := &pb.GatewayReportRequest{
+		GatewayId:          "gw-default",
+		Endpoint:           "gateway.middlescale.net:433",
+		WireguardPublicKey: "wg-pub-key-default",
+		Capabilities:       []string{"wireguard_v1"},
+		ReportUnixMs:       time.Now().UnixMilli(),
+	}
+	b, _ := proto.Marshal(report)
+	packet := &protocol.Packet{
+		Proto:    protocol.ProtocolService,
+		AppProto: protocol.AppProtoGatewayReportRequest,
+		SrcIP:    net.ParseIP("10.0.0.2"),
+		DstIP:    net.ParseIP("0.0.0.1"),
+		Gateway:  true,
+		Payload:  b,
+	}
+	resp, err := ctrl.HandleGatewayReportPacket(packet)
+	if err != nil {
+		t.Fatalf("HandleGatewayReportPacket failed: %v", err)
+	}
+	var ack pb.GatewayReportAck
+	if err := proto.Unmarshal(resp.Payload, &ack); err != nil {
+		t.Fatalf("unmarshal gateway report ack failed: %v", err)
+	}
+	if !ack.GetOk() {
+		t.Fatalf("expected default gateway auto-allowed, ack=%+v", ack)
+	}
+}
+
 func TestRegistrationUsesConfiguredGroupNetwork(t *testing.T) {
 	ctrl := NewController(&config.Config{
 		Groups: map[string]config.GroupConfig{
