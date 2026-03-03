@@ -21,3 +21,6 @@ cert-cache/
 # OS files
 .DS_Store
 Thumbs.db
+
+
+control
