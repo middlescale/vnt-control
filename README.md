@@ -39,12 +39,19 @@
 
 ```json
 {
-  "gateway": "10.26.0.1",
-  "domain": "ms.net",
-  "netmask": "255.255.255.0",
-  "groups": {
-    "ms.net": { "gateway": "10.26.0.1", "netmask": "255.255.255.0" },
-    "dev.net": { "gateway": "10.27.0.1", "netmask": "255.255.255.0" }
+  "default_domain": "ms.net",
+  "domains": {
+    "ms.net": {
+      "groups": {
+        "sales": { "gateway": "10.26.0.1", "netmask": "255.255.255.0" },
+        "marketing": { "gateway": "10.27.0.1", "netmask": "255.255.255.0" }
+      }
+    },
+    "dev.net": {
+      "groups": {
+        "qa": { "gateway": "10.28.0.1", "netmask": "255.255.255.0" }
+      }
+    }
   },
   "listen_addr": ":4433",
   "cert_cache_dir": "./cert-cache"
@@ -54,6 +61,8 @@
 可选字段：
 
 - `autocert_domain`：启用 `autocert` 时用于签发证书的域名。
+- `default_domain`：创建用户时未指定域名时使用，默认建议 `ms.net`。
+- `domains`：多域名配置，`domains.<domain>.groups.<group>` 对应子域配置，例如 `sales.ms.net`。
 - `tls_cert_path` / `tls_key_path`：使用本地证书文件。
 - `client_ca_path`：客户端 CA 文件路径（PEM）。
 - `require_client_cert`：是否强制客户端证书校验（mTLS）。
@@ -99,9 +108,12 @@ make proto   # 重新生成 proto Go 代码（需安装 protoc 与插件）
 示例：
 
 ```bash
-./vnt-admin --createUser user1
-./vnt-admin --issueDeviceTicket --userId <user_id> --group ms.net --ttlSeconds 300
+./vnt-admin --createUser user1 --domain ms.net
+./vnt-admin --issueDeviceTicket --userId <user_id> --group sales.ms.net --ttlSeconds 300
+./vnt-admin --issueDeviceTicket --userId <user_id> --group sales --ttlSeconds 300
 ```
+
+说明：`--group` 可传短名（如 `sales`，会自动补全为用户所属域名下的 `sales.<user-domain>`）；若传 FQDN（如 `sales.ms.net`），会校验其必须属于该用户所属域名。
 
 设备认证（auth device）由 `vnt-cli` 发起：客户端输入 `user_id/group/ticket` 发送到 `vnt-control`，认证成功后设备才可注册入网。
 

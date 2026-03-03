@@ -71,7 +71,7 @@ func main() {
 			NextProtos:   []string{"vnt-control"},
 		}
 	} else {
-		domain := firstNonEmpty(os.Getenv("AUTOCERT_DOMAIN"), cfg.AutoCertDomain, cfg.Domain)
+		domain := firstNonEmpty(os.Getenv("AUTOCERT_DOMAIN"), cfg.AutoCertDomain, cfg.EffectiveDefaultDomain())
 		if domain == "" {
 			log.Fatal("AUTOCERT_DOMAIN/domain is required when TLS cert/key are not provided")
 		}

@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 	"vnt-control/config"
@@ -852,6 +853,22 @@ func parseNetmask(netmask string) (net.IPMask, error) {
 }
 
 func (c *Controller) resolveGroupNetworkConfig(group string) (net.IP, net.IPMask, error) {
+	if len(c.cfg.Domains) > 0 {
+		domainName, groupName, ok := matchDomainAndGroup(group, c.cfg.Domains)
+		if !ok {
+			return nil, nil, fmt.Errorf("group %s not configured in domains (expect <group>.<domain>)", group)
+		}
+		dc := c.cfg.Domains[domainName]
+		gc, ok := dc.Groups[groupName]
+		if !ok {
+			return nil, nil, fmt.Errorf("group %s not configured under domain %s", groupName, domainName)
+		}
+		mask, err := parseNetmask(gc.Netmask)
+		if err != nil {
+			return nil, nil, err
+		}
+		return gc.Gateway, mask, nil
+	}
 	if len(c.cfg.Groups) > 0 {
 		gc, ok := c.cfg.Groups[group]
 		if !ok {
@@ -871,6 +888,25 @@ func (c *Controller) resolveGroupNetworkConfig(group string) (net.IP, net.IPMask
 		return nil, nil, err
 	}
 	return c.cfg.Gateway, mask, nil
+}
+
+func matchDomainAndGroup(token string, domains map[string]config.DomainConfig) (string, string, bool) {
+	bestDomain := ""
+	for domain := range domains {
+		suffix := "." + domain
+		if strings.HasSuffix(token, suffix) && len(domain) > len(bestDomain) {
+			bestDomain = domain
+		}
+	}
+	if bestDomain == "" {
+		return "", "", false
+	}
+	group := strings.TrimSuffix(token, "."+bestDomain)
+	group = strings.TrimSpace(group)
+	if group == "" {
+		return "", "", false
+	}
+	return bestDomain, group, true
 }
 
 func validateRegistrationRequest(reg *pb.RegistrationRequest) error {

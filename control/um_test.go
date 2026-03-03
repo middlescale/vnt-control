@@ -118,13 +118,16 @@ func TestIssueAndAuthDeviceTicket(t *testing.T) {
 	if err != nil {
 		t.Fatalf("IssueDeviceTicket failed: %v", err)
 	}
-	if _, err = um.AuthDevice(user.UserID, "g1", "dev-1", tk.Ticket); err != nil {
+	if tk.GroupName != "g1.ms.net" {
+		t.Fatalf("expected normalized group name, got %s", tk.GroupName)
+	}
+	if _, err = um.AuthDevice(user.UserID, "g1.ms.net", "dev-1", tk.Ticket); err != nil {
 		t.Fatalf("AuthDevice failed: %v", err)
 	}
-	if !um.IsAuthedDevice("g1", "dev-1") {
+	if !um.IsAuthedDevice("g1.ms.net", "dev-1") {
 		t.Fatalf("device should be authed")
 	}
-	if _, err = um.AuthDevice(user.UserID, "g1", "dev-1", tk.Ticket); err == nil {
+	if _, err = um.AuthDevice(user.UserID, "g1.ms.net", "dev-1", tk.Ticket); err == nil {
 		t.Fatalf("expected used ticket reject")
 	}
 }
@@ -137,7 +140,18 @@ func TestIssueDeviceTicketExpiry(t *testing.T) {
 		t.Fatalf("IssueDeviceTicket failed: %v", err)
 	}
 	time.Sleep(2 * time.Millisecond)
-	if _, err = um.AuthDevice(user.UserID, "g1", "dev-1", tk.Ticket); err == nil {
+	if _, err = um.AuthDevice(user.UserID, "g1.ms.net", "dev-1", tk.Ticket); err == nil {
 		t.Fatalf("expected expired ticket reject")
+	}
+}
+
+func TestIssueDeviceTicketFullDomainValidation(t *testing.T) {
+	um := NewUserManager()
+	user, _ := um.CreateUser("ticket-domain-user")
+	if _, err := um.IssueDeviceTicket(user.UserID, "sales.dev.net", time.Minute); err == nil {
+		t.Fatalf("expected mismatch domain reject")
+	}
+	if _, err := um.IssueDeviceTicket(user.UserID, "sales.ms.net", time.Minute); err != nil {
+		t.Fatalf("expected matching fqdn to pass: %v", err)
 	}
 }

@@ -127,7 +127,7 @@ func TestJSONUMStorePersistsAuthedDevices(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reload failed: %v", err)
 	}
-	if !umReloaded.IsAuthedDevice("g1", "dev-1") {
+	if !umReloaded.IsAuthedDevice(tk.GroupName, "dev-1") {
 		t.Fatalf("expected authed device persisted")
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -12,6 +13,7 @@ import (
 type UMUser struct {
 	UserID    string
 	Name      string
+	Domain    string
 	CreatedAt time.Time
 }
 
@@ -97,14 +99,19 @@ func NewUserManagerWithStore(store UMStore) (*UserManager, error) {
 	return m, nil
 }
 
-func (m *UserManager) CreateUser(name string) (UMUser, error) {
+func (m *UserManager) CreateUser(name string, domain ...string) (UMUser, error) {
 	if name == "" {
 		return UMUser{}, fmt.Errorf("user name is empty")
+	}
+	userDomain := "ms.net"
+	if len(domain) > 0 && strings.TrimSpace(domain[0]) != "" {
+		userDomain = strings.TrimSpace(domain[0])
 	}
 	id := fmt.Sprintf("u-%d", m.userSeq.Add(1))
 	user := UMUser{
 		UserID:    id,
 		Name:      name,
+		Domain:    userDomain,
 		CreatedAt: time.Now(),
 	}
 	m.mu.Lock()
@@ -238,6 +245,7 @@ func (m *UserManager) IssueDeviceTicket(userID string, groupName string, ttl tim
 	if userID == "" {
 		return UMDeviceTicket{}, fmt.Errorf("user id is empty")
 	}
+	groupName = strings.TrimSpace(groupName)
 	if groupName == "" {
 		return UMDeviceTicket{}, fmt.Errorf("group name is empty")
 	}
@@ -246,18 +254,39 @@ func (m *UserManager) IssueDeviceTicket(userID string, groupName string, ttl tim
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if _, ok := m.users[userID]; !ok {
+	user, ok := m.users[userID]
+	if !ok {
 		return UMDeviceTicket{}, fmt.Errorf("user not found")
+	}
+	fullGroupName, err := normalizeGroupForUser(groupName, user.Domain)
+	if err != nil {
+		return UMDeviceTicket{}, err
 	}
 	seq := m.enrollmentSeq.Add(1)
 	ticket := UMDeviceTicket{
 		Ticket:    fmt.Sprintf("dtk-%d-%d", time.Now().UnixNano(), seq),
 		UserID:    userID,
-		GroupName: groupName,
+		GroupName: fullGroupName,
 		ExpireAt:  time.Now().Add(ttl),
 	}
 	m.deviceTickets[ticket.Ticket] = ticket
 	return ticket, nil
+}
+
+func normalizeGroupForUser(groupName string, userDomain string) (string, error) {
+	if strings.TrimSpace(userDomain) == "" {
+		userDomain = "ms.net"
+	}
+	if strings.Contains(groupName, ".") {
+		if groupName == userDomain {
+			return groupName, nil
+		}
+		if !strings.HasSuffix(groupName, "."+userDomain) {
+			return "", fmt.Errorf("group %s does not belong to user domain %s", groupName, userDomain)
+		}
+		return groupName, nil
+	}
+	return groupName + "." + userDomain, nil
 }
 
 func (m *UserManager) AuthDevice(userID string, groupName string, deviceID string, ticket string) (UMAuthDevice, error) {
@@ -277,19 +306,24 @@ func (m *UserManager) AuthDevice(userID string, groupName string, deviceID strin
 	if now.After(t.ExpireAt) {
 		return UMAuthDevice{}, fmt.Errorf("ticket expired")
 	}
-	if t.UserID != userID || t.GroupName != groupName {
-		return UMAuthDevice{}, fmt.Errorf("ticket mismatch")
-	}
-	if _, ok := m.users[userID]; !ok {
+	user, ok := m.users[userID]
+	if !ok {
 		return UMAuthDevice{}, fmt.Errorf("user not found")
+	}
+	normalizedGroup, err := normalizeGroupForUser(groupName, user.Domain)
+	if err != nil {
+		return UMAuthDevice{}, err
+	}
+	if t.UserID != userID || t.GroupName != normalizedGroup {
+		return UMAuthDevice{}, fmt.Errorf("ticket mismatch")
 	}
 	record := UMAuthDevice{
 		UserID:    userID,
-		GroupName: groupName,
+		GroupName: normalizedGroup,
 		DeviceID:  deviceID,
 		AuthedAt:  now,
 	}
-	m.authedDevices[authedDeviceKey(groupName, deviceID)] = record
+	m.authedDevices[authedDeviceKey(normalizedGroup, deviceID)] = record
 	t.Used = true
 	m.deviceTickets[ticket] = t
 	if err := m.saveLocked(); err != nil {

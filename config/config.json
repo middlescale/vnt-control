@@ -1,12 +1,25 @@
 {
-    "groups": {
+    "default_domain": "ms.net",
+    "domains": {
         "ms.net": {
-            "gateway": "10.26.0.1",
-            "netmask": "255.255.255.0"
+            "groups": {
+                "sales": {
+                    "gateway": "10.26.0.1",
+                    "netmask": "255.255.255.0"
+                },
+                "marketing": {
+                    "gateway": "10.27.0.1",
+                    "netmask": "255.255.255.0"
+                }
+            }
         },
         "dev.net": {
-            "gateway": "10.27.0.1",
-            "netmask": "255.255.255.0"
+            "groups": {
+                "qa": {
+                    "gateway": "10.28.0.1",
+                    "netmask": "255.255.255.0"
+                }
+            }
         }
     },
     "listen_addr": ":4433",

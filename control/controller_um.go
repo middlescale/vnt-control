@@ -1,9 +1,28 @@
 package control
 
-import "time"
+import (
+	"fmt"
+	"strings"
+	"time"
+)
 
-func (c *Controller) UMCreateUser(name string) (UMUser, error) {
-	return c.um.CreateUser(name)
+func (c *Controller) UMCreateUser(name string, domain ...string) (UMUser, error) {
+	selectedDomain := ""
+	if len(domain) > 0 {
+		selectedDomain = strings.TrimSpace(domain[0])
+	}
+	if selectedDomain == "" {
+		selectedDomain = strings.TrimSpace(c.cfg.EffectiveDefaultDomain())
+	}
+	if selectedDomain == "" {
+		selectedDomain = "ms.net"
+	}
+	if len(c.cfg.Domains) > 0 {
+		if _, ok := c.cfg.Domains[selectedDomain]; !ok {
+			return UMUser{}, fmt.Errorf("domain %s not configured", selectedDomain)
+		}
+	}
+	return c.um.CreateUser(name, selectedDomain)
 }
 
 func (c *Controller) UMCreateEnrollment(userID string, ttl time.Duration) (UMEnrollment, error) {

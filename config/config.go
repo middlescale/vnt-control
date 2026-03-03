@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"regexp"
+	"strings"
 )
 
 // Config 配置结构体
@@ -13,22 +14,28 @@ import (
 // netmask: IPv4 子网掩码
 // domain: 域名字符串
 type Config struct {
-	Gateway           net.IP                 `json:"gateway"`
-	Domain            string                 `json:"domain"`
-	Netmask           string                 `json:"netmask"`
-	Groups            map[string]GroupConfig `json:"groups"`
-	ListenAddr        string                 `json:"listen_addr"`
-	AutoCertDomain    string                 `json:"autocert_domain"`
-	CertCacheDir      string                 `json:"cert_cache_dir"`
-	TLSCertPath       string                 `json:"tls_cert_path"`
-	TLSKeyPath        string                 `json:"tls_key_path"`
-	ClientCAPath      string                 `json:"client_ca_path"`
-	RequireClientCert bool                   `json:"require_client_cert"`
+	Gateway           net.IP                  `json:"gateway"`
+	Domain            string                  `json:"domain"`
+	Netmask           string                  `json:"netmask"`
+	Groups            map[string]GroupConfig  `json:"groups"`
+	DefaultDomain     string                  `json:"default_domain"`
+	Domains           map[string]DomainConfig `json:"domains"`
+	ListenAddr        string                  `json:"listen_addr"`
+	AutoCertDomain    string                  `json:"autocert_domain"`
+	CertCacheDir      string                  `json:"cert_cache_dir"`
+	TLSCertPath       string                  `json:"tls_cert_path"`
+	TLSKeyPath        string                  `json:"tls_key_path"`
+	ClientCAPath      string                  `json:"client_ca_path"`
+	RequireClientCert bool                    `json:"require_client_cert"`
 }
 
 type GroupConfig struct {
 	Gateway net.IP `json:"gateway"`
 	Netmask string `json:"netmask"`
+}
+
+type DomainConfig struct {
+	Groups map[string]GroupConfig `json:"groups"`
 }
 
 func LoadConfig(path string) (*Config, error) {
@@ -53,6 +60,35 @@ func LoadConfig(path string) (*Config, error) {
 func (c *Config) Validate() error {
 	// 域名校验（简单正则，支持主流域名）
 	domainRe := regexp.MustCompile(`^(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}$`)
+	groupRe := regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9-]{0,62}$`)
+	if len(c.Domains) > 0 {
+		if strings.TrimSpace(c.DefaultDomain) == "" {
+			c.DefaultDomain = "ms.net"
+		}
+		if !domainRe.MatchString(c.DefaultDomain) {
+			return errors.New("default_domain 必须为合法域名")
+		}
+		if _, ok := c.Domains[c.DefaultDomain]; !ok {
+			return errors.New("default_domain 未在 domains 中配置")
+		}
+		for domain, dc := range c.Domains {
+			if !domainRe.MatchString(domain) {
+				return errors.New("domains 的 key 必须为合法域名(FQDN)")
+			}
+			if len(dc.Groups) == 0 {
+				return errors.New("domains.<domain>.groups 不能为空")
+			}
+			for group, gc := range dc.Groups {
+				if !groupRe.MatchString(group) {
+					return errors.New("domains.<domain>.groups 的 key 必须为合法 group 名称")
+				}
+				if err := validateGatewayAndNetmask(gc.Gateway, gc.Netmask); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
 	if len(c.Groups) == 0 {
 		if err := validateGatewayAndNetmask(c.Gateway, c.Netmask); err != nil {
 			return err
@@ -79,6 +115,19 @@ func (c *Config) Validate() error {
 		}
 	}
 	return nil
+}
+
+func (c *Config) EffectiveDefaultDomain() string {
+	if strings.TrimSpace(c.DefaultDomain) != "" {
+		return c.DefaultDomain
+	}
+	if strings.TrimSpace(c.Domain) != "" {
+		return c.Domain
+	}
+	for domain := range c.Domains {
+		return domain
+	}
+	return ""
 }
 
 func validateGatewayAndNetmask(gateway net.IP, netmaskStr string) error {
