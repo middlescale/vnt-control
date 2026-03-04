@@ -133,12 +133,6 @@ func handleSession(ctrl *control.Controller, conn *quic.Conn) {
 			lastSweepMs = nowMs
 		}
 
-		// 目前只处理 Gateway数据，不转发
-		if !packet.Gateway {
-			log.Infof("忽略非 Gateway Packet: %s", packet.DebugString())
-			continue
-		}
-
 		// Protocol Service 和 Control 不需要上下文
 
 		if packet.Proto == protocol.ProtocolService {
