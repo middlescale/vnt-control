@@ -45,12 +45,14 @@ type GatewayAdminView struct {
 	Approved           bool     `json:"approved"`
 	Default            bool     `json:"default"`
 	Reported           bool     `json:"reported"`
+	Alive              bool     `json:"alive"`
 	WireGuardPublicKey string   `json:"wg_pub_key,omitempty"`
 	Capabilities       []string `json:"capabilities,omitempty"`
 	UpdatedAtUnix      int64    `json:"updated_at_unix,omitempty"`
 }
 
 const maxPunchAttemptsPerPair = 3
+const gatewayNodeLease = 90 * time.Second
 
 type PunchSessionState string
 
@@ -1013,6 +1015,7 @@ func (c *Controller) ApproveGatewayNodeByID(gatewayID string) error {
 func (c *Controller) ListGateways() []GatewayAdminView {
 	c.gatewayMu.RLock()
 	defer c.gatewayMu.RUnlock()
+	now := time.Now()
 	byID := map[string]GatewayAdminView{}
 	defaultEndpoint := strings.TrimSpace(c.cfg.DefaultGateway)
 	if defaultEndpoint != "" {
@@ -1043,6 +1046,7 @@ func (c *Controller) ListGateways() []GatewayAdminView {
 			}
 		}
 		item.Reported = true
+		item.Alive = now.Sub(seen.UpdatedAt) <= gatewayNodeLease
 		item.WireGuardPublicKey = seen.WireGuardPublicKey
 		item.Capabilities = append([]string{}, seen.Capabilities...)
 		item.UpdatedAtUnix = seen.UpdatedAt.Unix()
@@ -1055,6 +1059,7 @@ func (c *Controller) ListGateways() []GatewayAdminView {
 			for _, seen := range c.gatewaySeen {
 				if strings.TrimSpace(seen.Endpoint) == defaultEndpoint {
 					item.Reported = true
+					item.Alive = now.Sub(seen.UpdatedAt) <= gatewayNodeLease
 					item.WireGuardPublicKey = seen.WireGuardPublicKey
 					item.Capabilities = append([]string{}, seen.Capabilities...)
 					item.UpdatedAtUnix = seen.UpdatedAt.Unix()
@@ -1067,6 +1072,7 @@ func (c *Controller) ListGateways() []GatewayAdminView {
 	for gatewayID, item := range byID {
 		if node, ok := c.gatewayNodes[gatewayID]; ok && strings.TrimSpace(node.Endpoint) == strings.TrimSpace(item.Endpoint) {
 			item.Reported = true
+			item.Alive = now.Sub(node.UpdatedAt) <= gatewayNodeLease
 			item.WireGuardPublicKey = node.WireGuardPublicKey
 			item.Capabilities = append([]string{}, node.Capabilities...)
 			item.UpdatedAtUnix = node.UpdatedAt.Unix()
@@ -1113,8 +1119,12 @@ func (c *Controller) recordGatewaySeen(info GatewayNodeInfo) {
 func (c *Controller) buildGatewayAccessGrant() *pb.GatewayAccessGrant {
 	c.gatewayMu.RLock()
 	defer c.gatewayMu.RUnlock()
+	now := time.Now()
 	var picked *GatewayNodeInfo
 	for _, node := range c.gatewayNodes {
+		if now.Sub(node.UpdatedAt) > gatewayNodeLease {
+			continue
+		}
 		n := node
 		picked = &n
 		break

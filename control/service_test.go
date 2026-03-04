@@ -960,6 +960,26 @@ func TestGatewayReportAllowsConfiguredDefaultGateway(t *testing.T) {
 	}
 }
 
+func TestRegistrationSkipsExpiredGatewayLease(t *testing.T) {
+	ctrl := newTestController()
+	defer ctrl.Stop()
+	ctrl.gatewayNodes["gw-expired"] = GatewayNodeInfo{
+		GatewayID:          "gw-expired",
+		Endpoint:           "127.0.0.1:51822",
+		WireGuardPublicKey: "wg-pub-key-expired",
+		Capabilities:       []string{"wireguard_v1"},
+		UpdatedAt:          time.Now().Add(-2 * gatewayNodeLease),
+	}
+	regResp := mustRegister(t, ctrl, newBaseRegisterReq("dev-expired-a", "node-expired-a"), &net.UDPAddr{IP: net.ParseIP("1.1.1.3"), Port: 3333})
+	grant := regResp.GetGatewayAccessGrant()
+	if grant == nil {
+		t.Fatalf("expected gateway access grant in registration response")
+	}
+	if grant.GetWireguardEndpoint() == "127.0.0.1:51822" {
+		t.Fatalf("expected expired gateway to be skipped")
+	}
+}
+
 func TestRegistrationUsesConfiguredGroupNetwork(t *testing.T) {
 	ctrl := NewController(&config.Config{
 		Groups: map[string]config.GroupConfig{

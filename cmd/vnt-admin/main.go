@@ -40,6 +40,7 @@ type gatewayInfo struct {
 	Approved           bool     `json:"approved"`
 	Default            bool     `json:"default"`
 	Reported           bool     `json:"reported"`
+	Alive              bool     `json:"alive"`
 	WireGuardPublicKey string   `json:"wg_pub_key,omitempty"`
 	Capabilities       []string `json:"capabilities,omitempty"`
 	UpdatedAtUnix      int64    `json:"updated_at_unix,omitempty"`
@@ -108,7 +109,7 @@ func main() {
 		fmt.Println("gateway registered")
 	case "list_gateway":
 		for _, gw := range resp.Gateways {
-			fmt.Printf("gateway=%s endpoint=%s default=%t approved=%t reported=%t updated_at_unix=%d\n", gw.GatewayID, gw.Endpoint, gw.Default, gw.Approved, gw.Reported, gw.UpdatedAtUnix)
+			fmt.Printf("gateway=%s endpoint=%s default=%t approved=%t reported=%t alive=%t updated_at_unix=%d\n", gw.GatewayID, gw.Endpoint, gw.Default, gw.Approved, gw.Reported, gw.Alive, gw.UpdatedAtUnix)
 		}
 	}
 }
