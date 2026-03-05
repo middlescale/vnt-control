@@ -155,6 +155,14 @@ func handleSession(ctrl *control.Controller, conn *quic.Conn) {
 				respPacket, virtualIP, err = ctrl.HandleRegistrationPacketWithVirtualIP(packet, conn.RemoteAddr())
 				if err != nil {
 					log.Errorf("HandleRegistrationPacket error: %v", err)
+					errPacket, packetErr := ctrl.BuildRegistrationErrorPacket(packet, err)
+					if packetErr != nil {
+						log.Errorf("BuildRegistrationErrorPacket error: %v", packetErr)
+						continue
+					}
+					if _, writeErr := stream.Write(errPacket.Marshal()); writeErr != nil {
+						log.Errorf("send registration error packet failed: %v", writeErr)
+					}
 					continue
 				}
 				quicStreams.register(conn.RemoteAddr(), virtualIP, stream)

@@ -35,21 +35,21 @@ type Controller struct {
 }
 
 type GatewayNodeInfo struct {
-	GatewayID          string
-	Endpoint           string
-	Capabilities       []string
-	UpdatedAt          time.Time
+	GatewayID    string
+	Endpoint     string
+	Capabilities []string
+	UpdatedAt    time.Time
 }
 
 type GatewayAdminView struct {
-	GatewayID          string   `json:"gateway_id"`
-	Endpoint           string   `json:"endpoint"`
-	Approved           bool     `json:"approved"`
-	Default            bool     `json:"default"`
-	Reported           bool     `json:"reported"`
-	Alive              bool     `json:"alive"`
-	Capabilities       []string `json:"capabilities,omitempty"`
-	UpdatedAtUnix      int64    `json:"updated_at_unix,omitempty"`
+	GatewayID     string   `json:"gateway_id"`
+	Endpoint      string   `json:"endpoint"`
+	Approved      bool     `json:"approved"`
+	Default       bool     `json:"default"`
+	Reported      bool     `json:"reported"`
+	Alive         bool     `json:"alive"`
+	Capabilities  []string `json:"capabilities,omitempty"`
+	UpdatedAtUnix int64    `json:"updated_at_unix,omitempty"`
 }
 
 const maxPunchAttemptsPerPair = 3
@@ -289,6 +289,45 @@ func (c *Controller) HandleRegistrationPacketWithVirtualIP(request *protocol.Pac
 	}
 
 	return respPacket, virtualIP, nil
+}
+
+func (c *Controller) BuildRegistrationErrorPacket(request *protocol.Packet, err error) (*protocol.Packet, error) {
+	code := uint32(1)
+	reason := "registration failed"
+	if err != nil {
+		reason = err.Error()
+		switch {
+		case strings.Contains(reason, "expect <group>.<domain>"),
+			strings.Contains(reason, "not configured in domains"):
+			code = 1001
+		case strings.Contains(reason, "not authed"):
+			code = 1002
+		case strings.Contains(reason, "unmarshal"),
+			strings.Contains(reason, "validate"):
+			code = 1003
+		default:
+			code = 1999
+		}
+	}
+	resp := &pb.RegistrationResponse{
+		ErrorCode:    code,
+		ErrorMessage: reason,
+	}
+	payload, marshalErr := proto.Marshal(resp)
+	if marshalErr != nil {
+		return nil, fmt.Errorf("RegistrationResponse(error) marshal error: %v", marshalErr)
+	}
+	return &protocol.Packet{
+		Ver:       protocol.V3,
+		Proto:     protocol.ProtocolService,
+		AppProto:  protocol.AppProtoRegistrationResponse,
+		SourceTTL: protocol.MAX_TTL,
+		TTL:       protocol.MAX_TTL,
+		SrcIP:     request.DstIP,
+		DstIP:     request.SrcIP,
+		Gateway:   true,
+		Payload:   payload,
+	}, nil
 }
 
 func (c *Controller) HandlePullDeviceListPacket(request *protocol.Packet) (*protocol.Packet, error) {
