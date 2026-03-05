@@ -3,6 +3,8 @@ package handlers
 import (
 	"context"
 	"crypto/tls"
+	"encoding/binary"
+	"io"
 	"net"
 	"sync"
 	"time"
@@ -71,7 +73,7 @@ func (h *streamHub) writeToIP(virtualIP uint32, payload []byte) bool {
 	}
 	target.mu.Lock()
 	defer target.mu.Unlock()
-	_, err := (*target.stream).Write(payload)
+	err := writeFramedStream(target.stream, payload)
 	if err != nil {
 		return false
 	}
@@ -114,163 +116,185 @@ func handleSession(ctrl *control.Controller, conn *quic.Conn) {
 	}
 	defer stream.Close()
 	buf := make([]byte, 4096)
+	frameBuf := make([]byte, 0, 8192)
 	lastSweepMs := int64(0)
 	for {
 		n, err := stream.Read(buf)
-		if err != nil {
+		if err != nil && !(err == io.EOF && n > 0) {
 			log.Printf("Read error: %v", err)
-			// 应该 break 吗？
 			break
 		}
-		packet, err := protocol.Unmarshal(buf[:n])
-		if err != nil {
-			log.Printf("Unmarshal packet error: %v", err)
-			continue
+		if n > 0 {
+			frameBuf = append(frameBuf, buf[:n]...)
 		}
-		nowMs := time.Now().UnixMilli()
-		if nowMs-lastSweepMs >= 1000 {
-			ctrl.ReconcilePunchSessions(nowMs)
-			lastSweepMs = nowMs
-		}
+		for {
+			if len(frameBuf) < 4 {
+				break
+			}
+			frameLen := int(binary.BigEndian.Uint32(frameBuf[:4]))
+			if frameLen <= 0 || frameLen > 1<<20 {
+				log.Printf("Invalid frame length: %d", frameLen)
+				return
+			}
+			if len(frameBuf) < 4+frameLen {
+				break
+			}
+			packetRaw := append([]byte(nil), frameBuf[4:4+frameLen]...)
+			frameBuf = frameBuf[4+frameLen:]
+			packet, err := protocol.Unmarshal(packetRaw)
+			if err != nil {
+				log.Printf("Unmarshal packet error: %v", err)
+				continue
+			}
+			nowMs := time.Now().UnixMilli()
+			if nowMs-lastSweepMs >= 1000 {
+				ctrl.ReconcilePunchSessions(nowMs)
+				lastSweepMs = nowMs
+			}
 
-		// Protocol Service 和 Control 不需要上下文
+			if packet.Proto == protocol.ProtocolService {
+				var respPacket *protocol.Packet
+				var err error
+				var virtualIP uint32
 
-		if packet.Proto == protocol.ProtocolService {
-			var respPacket *protocol.Packet
-			var err error
-			var virtualIP uint32
-
-			switch packet.AppProto {
-
-			// handshake
-			case protocol.AppProtoHandshakeRequest:
-				respPacket, err = ctrl.HandleHandshakePacket(packet)
-				if err != nil {
-					log.Errorf("HandleHandshakePacket error: %v", err)
-					continue
-				}
-
-			// registration
-			case protocol.AppProtoRegistrationRequest:
-				respPacket, virtualIP, err = ctrl.HandleRegistrationPacketWithVirtualIP(packet, conn.RemoteAddr())
-				if err != nil {
-					log.Errorf("HandleRegistrationPacket error: %v", err)
-					errPacket, packetErr := ctrl.BuildRegistrationErrorPacket(packet, err)
-					if packetErr != nil {
-						log.Errorf("BuildRegistrationErrorPacket error: %v", packetErr)
+				switch packet.AppProto {
+				case protocol.AppProtoHandshakeRequest:
+					respPacket, err = ctrl.HandleHandshakePacket(packet)
+					if err != nil {
+						log.Errorf("HandleHandshakePacket error: %v", err)
 						continue
 					}
-					if _, writeErr := stream.Write(errPacket.Marshal()); writeErr != nil {
-						log.Errorf("send registration error packet failed: %v", writeErr)
+				case protocol.AppProtoRegistrationRequest:
+					respPacket, virtualIP, err = ctrl.HandleRegistrationPacketWithVirtualIP(packet, conn.RemoteAddr())
+					if err != nil {
+						log.Errorf("HandleRegistrationPacket error: %v", err)
+						errPacket, packetErr := ctrl.BuildRegistrationErrorPacket(packet, err)
+						if packetErr != nil {
+							log.Errorf("BuildRegistrationErrorPacket error: %v", packetErr)
+							continue
+						}
+						if writeErr := writeFramedStream(stream, errPacket.Marshal()); writeErr != nil {
+							log.Errorf("send registration error packet failed: %v", writeErr)
+						}
+						continue
+					}
+					quicStreams.register(conn.RemoteAddr(), virtualIP, stream)
+				case protocol.AppProtoPullDeviceList:
+					respPacket, err = ctrl.HandlePullDeviceListPacket(packet)
+					if err != nil {
+						log.Errorf("HandlePullDeviceListPacket error: %v", err)
+						continue
+					}
+				case protocol.AppProtoDeviceAuthRequest:
+					respPacket, err = ctrl.HandleDeviceAuthPacket(packet)
+					if err != nil {
+						log.Errorf("HandleDeviceAuthPacket error: %v", err)
+						continue
+					}
+				case protocol.AppProtoGatewayReportRequest:
+					respPacket, err = ctrl.HandleGatewayReportPacket(packet)
+					if err != nil {
+						log.Errorf("HandleGatewayReportPacket error: %v", err)
+						continue
+					}
+				case protocol.AppProtoClientStatusInfo:
+					err = ctrl.HandleClientStatusInfoPacket(packet)
+					if err != nil {
+						log.Errorf("HandleClientStatusInfoPacket error: %v", err)
+					}
+					startPackets, err := ctrl.BuildPunchStartPacketsFromStatus(packet)
+					if err != nil {
+						log.Errorf("BuildPunchStartPacketsFromStatus error: %v", err)
+					} else {
+						if len(startPackets) > 0 {
+							log.Infof("status-triggered PunchStart packets: %d", len(startPackets))
+						}
+						for _, push := range startPackets {
+							if push == nil || push.DstIP == nil {
+								continue
+							}
+							if !quicStreams.writeToIP(ipToUint32(push.DstIP), push.Marshal()) {
+								log.Warnf("status-triggered PunchStart dispatch failed: %s", push.DstIP)
+							} else {
+								log.Infof("status-triggered PunchStart dispatched: %s", push.DstIP)
+							}
+						}
 					}
 					continue
-				}
-				quicStreams.register(conn.RemoteAddr(), virtualIP, stream)
-			case protocol.AppProtoPullDeviceList:
-				respPacket, err = ctrl.HandlePullDeviceListPacket(packet)
-				if err != nil {
-					log.Errorf("HandlePullDeviceListPacket error: %v", err)
-					continue
-				}
-			case protocol.AppProtoDeviceAuthRequest:
-				respPacket, err = ctrl.HandleDeviceAuthPacket(packet)
-				if err != nil {
-					log.Errorf("HandleDeviceAuthPacket error: %v", err)
-					continue
-				}
-			case protocol.AppProtoGatewayReportRequest:
-				respPacket, err = ctrl.HandleGatewayReportPacket(packet)
-				if err != nil {
-					log.Errorf("HandleGatewayReportPacket error: %v", err)
-					continue
-				}
-			case protocol.AppProtoClientStatusInfo:
-				err = ctrl.HandleClientStatusInfoPacket(packet)
-				if err != nil {
-					log.Errorf("HandleClientStatusInfoPacket error: %v", err)
-				}
-				startPackets, err := ctrl.BuildPunchStartPacketsFromStatus(packet)
-				if err != nil {
-					log.Errorf("BuildPunchStartPacketsFromStatus error: %v", err)
-				} else {
-					if len(startPackets) > 0 {
-						log.Infof("status-triggered PunchStart packets: %d", len(startPackets))
+				case protocol.AppProtoPunchRequest:
+					respPacket, err = ctrl.HandlePunchRequestPacket(packet)
+					if err != nil {
+						log.Errorf("HandlePunchRequestPacket error: %v", err)
+						continue
+					}
+					startPackets, err := ctrl.BuildPunchStartPackets(packet)
+					if err != nil {
+						log.Errorf("BuildPunchStartPackets error: %v", err)
+						continue
 					}
 					for _, push := range startPackets {
 						if push == nil || push.DstIP == nil {
 							continue
 						}
 						if !quicStreams.writeToIP(ipToUint32(push.DstIP), push.Marshal()) {
-							log.Warnf("status-triggered PunchStart dispatch failed: %s", push.DstIP)
-						} else {
-							log.Infof("status-triggered PunchStart dispatched: %s", push.DstIP)
+							log.Warnf("PunchStart dispatch failed, peer not available: %s", push.DstIP)
 						}
 					}
-				}
-				continue
-			case protocol.AppProtoPunchRequest:
-				respPacket, err = ctrl.HandlePunchRequestPacket(packet)
-				if err != nil {
-					log.Errorf("HandlePunchRequestPacket error: %v", err)
+				case protocol.AppProtoPunchAck:
+					err = ctrl.HandlePunchAckPacket(packet)
+					if err != nil {
+						log.Errorf("HandlePunchAckPacket error: %v", err)
+					} else {
+						log.Infof("PunchAck received from %s", packet.SrcIP)
+					}
+					continue
+				case protocol.AppProtoPunchResult:
+					err = ctrl.HandlePunchResultPacket(packet)
+					if err != nil {
+						log.Errorf("HandlePunchResultPacket error: %v", err)
+					}
+					continue
+				default:
+					log.Debugf("忽略非 service处理类型 Packet: %d", packet.AppProto)
 					continue
 				}
-				startPackets, err := ctrl.BuildPunchStartPackets(packet)
-				if err != nil {
-					log.Errorf("BuildPunchStartPackets error: %v", err)
+				if respPacket == nil {
 					continue
 				}
-				for _, push := range startPackets {
-					if push == nil || push.DstIP == nil {
-						continue
-					}
-					if !quicStreams.writeToIP(ipToUint32(push.DstIP), push.Marshal()) {
-						log.Warnf("PunchStart dispatch failed, peer not available: %s", push.DstIP)
-					}
+				if err := writeFramedStream(stream, respPacket.Marshal()); err != nil {
+					log.Errorf("Write ServiceResponse error: %v", err)
 				}
-			case protocol.AppProtoPunchAck:
-				err = ctrl.HandlePunchAckPacket(packet)
+			} else if packet.Proto == protocol.ProtocolControl {
+				respPacket, err := ctrl.HandleControlPacket(packet, conn.RemoteAddr())
 				if err != nil {
-					log.Errorf("HandlePunchAckPacket error: %v", err)
-				} else {
-					log.Infof("PunchAck received from %s", packet.SrcIP)
+					log.Errorf("HandleControlPacket error: %v", err)
+					continue
 				}
-				continue
-			case protocol.AppProtoPunchResult:
-				err = ctrl.HandlePunchResultPacket(packet)
-				if err != nil {
-					log.Errorf("HandlePunchResultPacket error: %v", err)
+				if respPacket == nil {
+					continue
 				}
-				continue
-
-			default:
-				log.Debugf("忽略非 service处理类型 Packet: %d", packet.AppProto)
-				continue
+				if err := writeFramedStream(stream, respPacket.Marshal()); err != nil {
+					log.Errorf("Write ControlResponse error: %v", err)
+				}
+			} else {
+				log.Infof("忽略非 Service/Control Packet: %s", packet.DebugString())
 			}
-			if respPacket == nil {
-				continue
-			}
-			_, err = stream.Write(respPacket.Marshal())
-			if err != nil {
-				log.Errorf("Write HandshakeResponse error: %v", err)
-			}
-		} else if packet.Proto == protocol.ProtocolControl {
-			respPacket, err := ctrl.HandleControlPacket(packet, conn.RemoteAddr())
-			if err != nil {
-				log.Errorf("HandleControlPacket error: %v", err)
-				continue
-			}
-			if respPacket == nil {
-				continue
-			}
-			_, err = stream.Write(respPacket.Marshal())
-			if err != nil {
-				log.Errorf("Write ControlResponse error: %v", err)
-			}
-		} else {
-			log.Infof("忽略非 Service/Control Packet: %s", packet.DebugString())
+		}
+		if err == io.EOF {
+			break
 		}
 
 	}
+}
+
+func writeFramedStream(stream *quic.Stream, payload []byte) error {
+	header := make([]byte, 4)
+	binary.BigEndian.PutUint32(header, uint32(len(payload)))
+	if _, err := (*stream).Write(header); err != nil {
+		return err
+	}
+	_, err := (*stream).Write(payload)
+	return err
 }
 
 func ipToUint32(ip net.IP) uint32 {

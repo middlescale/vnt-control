@@ -31,6 +31,8 @@ message RegistrationRequest {
     bool allow_ip_change = 7;
     bool client_secret = 8;
     bytes client_secret_hash = 9;
+    bytes device_pub_key = 10;
+    string device_pub_key_alg = 11;
 }
 
 message RegistrationResponse {

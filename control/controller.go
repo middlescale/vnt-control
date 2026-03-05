@@ -1180,7 +1180,7 @@ func (c *Controller) buildGatewayAccessGrant(virtualIP uint32) *pb.GatewayAccess
 	}
 	return &pb.GatewayAccessGrant{
 		GatewayAddrs:        []string{"quic://" + picked.Endpoint},
-		GatewayServerName:   picked.GatewayID,
+		GatewayServerName:   defaultGatewayServerName(picked.Endpoint),
 		Ticket:              ticket,
 		TicketExpireUnixMs:  expire.UnixMilli(),
 		SessionId:           sessionID,
