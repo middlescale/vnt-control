@@ -160,7 +160,7 @@ func (c *Controller) HandleHandshakePacket(reqPacket *protocol.Packet) (*protoco
 	}
 
 	rspPacket := &protocol.Packet{
-		Ver:       protocol.V2,
+		Ver:       protocol.V3,
 		Proto:     protocol.ProtocolService,
 		AppProto:  protocol.AppProtoHandshakeResponse,
 		SourceTTL: protocol.MAX_TTL,
@@ -277,7 +277,7 @@ func (c *Controller) HandleRegistrationPacketWithVirtualIP(request *protocol.Pac
 	}
 
 	respPacket := &protocol.Packet{
-		Ver:       protocol.V2,
+		Ver:       protocol.V3,
 		Proto:     protocol.ProtocolService,
 		AppProto:  protocol.AppProtoRegistrationResponse,
 		SourceTTL: protocol.MAX_TTL,
@@ -302,7 +302,7 @@ func (c *Controller) HandlePullDeviceListPacket(request *protocol.Packet) (*prot
 		return nil, fmt.Errorf("DeviceList marshal error: %v", err)
 	}
 	return &protocol.Packet{
-		Ver:       protocol.V2,
+		Ver:       protocol.V3,
 		Proto:     protocol.ProtocolService,
 		AppProto:  protocol.AppProtoPushDeviceList,
 		SourceTTL: protocol.MAX_TTL,
@@ -332,7 +332,7 @@ func (c *Controller) HandleDeviceAuthPacket(request *protocol.Packet) (*protocol
 			return nil, marshalErr
 		}
 		return &protocol.Packet{
-			Ver:       protocol.V2,
+			Ver:       protocol.V3,
 			Proto:     protocol.ProtocolService,
 			AppProto:  protocol.AppProtoDeviceAuthAck,
 			SourceTTL: protocol.MAX_TTL,
@@ -354,7 +354,7 @@ func (c *Controller) HandleDeviceAuthPacket(request *protocol.Packet) (*protocol
 		return nil, err
 	}
 	return &protocol.Packet{
-		Ver:       protocol.V2,
+		Ver:       protocol.V3,
 		Proto:     protocol.ProtocolService,
 		AppProto:  protocol.AppProtoDeviceAuthAck,
 		SourceTTL: protocol.MAX_TTL,
@@ -503,7 +503,7 @@ func (c *Controller) BuildPunchStartPacketsFromStatus(request *protocol.Packet) 
 			}
 			return []*protocol.Packet{
 				{
-					Ver:       protocol.V2,
+					Ver:       protocol.V3,
 					Proto:     protocol.ProtocolService,
 					AppProto:  protocol.AppProtoPunchStart,
 					SourceTTL: protocol.MAX_TTL,
@@ -514,7 +514,7 @@ func (c *Controller) BuildPunchStartPacketsFromStatus(request *protocol.Packet) 
 					Payload:   sourcePayload,
 				},
 				{
-					Ver:       protocol.V2,
+					Ver:       protocol.V3,
 					Proto:     protocol.ProtocolService,
 					AppProto:  protocol.AppProtoPunchStart,
 					SourceTTL: protocol.MAX_TTL,
@@ -572,7 +572,7 @@ func (c *Controller) HandlePunchRequestPacket(request *protocol.Packet) (*protoc
 		return nil, fmt.Errorf("PunchAck marshal error: %v", err)
 	}
 	return &protocol.Packet{
-		Ver:       protocol.V2,
+		Ver:       protocol.V3,
 		Proto:     protocol.ProtocolService,
 		AppProto:  protocol.AppProtoPunchAck,
 		SourceTTL: protocol.MAX_TTL,
@@ -630,7 +630,7 @@ func (c *Controller) BuildPunchStartPackets(request *protocol.Packet) ([]*protoc
 	}
 	return []*protocol.Packet{
 		{
-			Ver:       protocol.V2,
+			Ver:       protocol.V3,
 			Proto:     protocol.ProtocolService,
 			AppProto:  protocol.AppProtoPunchStart,
 			SourceTTL: protocol.MAX_TTL,
@@ -641,7 +641,7 @@ func (c *Controller) BuildPunchStartPackets(request *protocol.Packet) ([]*protoc
 			Payload:   sourcePayload,
 		},
 		{
-			Ver:       protocol.V2,
+			Ver:       protocol.V3,
 			Proto:     protocol.ProtocolService,
 			AppProto:  protocol.AppProtoPunchStart,
 			SourceTTL: protocol.MAX_TTL,
@@ -752,7 +752,7 @@ func (c *Controller) HandleControlPacket(request *protocol.Packet, remoteAddr ne
 		epoch := c.nc.TouchClientByIP(request.SrcIP)
 		payload := protocol.BuildPingPayload(pingTime, epoch)
 		return &protocol.Packet{
-			Ver:       protocol.V2,
+			Ver:       protocol.V3,
 			Proto:     protocol.ProtocolControl,
 			AppProto:  protocol.AppProtocol(protocol.ControlPong),
 			SourceTTL: protocol.MAX_TTL,
@@ -768,7 +768,7 @@ func (c *Controller) HandleControlPacket(request *protocol.Packet, remoteAddr ne
 			return nil, err
 		}
 		return &protocol.Packet{
-			Ver:       protocol.V2,
+			Ver:       protocol.V3,
 			Proto:     protocol.ProtocolControl,
 			AppProto:  protocol.AppProtocol(protocol.ControlAddrResponse),
 			SourceTTL: protocol.MAX_TTL,
@@ -969,7 +969,7 @@ func (c *Controller) buildGatewayReportAck(packet *protocol.Packet, ack *pb.Gate
 		return nil, err
 	}
 	return &protocol.Packet{
-		Ver:       protocol.V2,
+		Ver:       protocol.V3,
 		Proto:     protocol.ProtocolService,
 		AppProto:  protocol.AppProtoGatewayReportAck,
 		SourceTTL: protocol.MAX_TTL,

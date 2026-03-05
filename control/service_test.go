@@ -45,7 +45,7 @@ func TestHandleHandshakePacketSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HandleHandshakePacket failed: %v", err)
 	}
-	if respPacket.Ver != protocol.V2 {
+	if respPacket.Ver != protocol.V3 {
 		t.Fatalf("unexpected version: %v", respPacket.Ver)
 	}
 	if respPacket.Proto != protocol.ProtocolService {
@@ -610,7 +610,7 @@ func TestHandlePullDeviceListPacket(t *testing.T) {
 	resp1 := mustRegister(t, ctrl, newBaseRegisterReq("dev-a", "node-a"), &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1111})
 	resp2 := mustRegister(t, ctrl, newBaseRegisterReq("dev-b", "node-b"), &net.UDPAddr{IP: net.ParseIP("1.1.1.2"), Port: 2222})
 	req := &protocol.Packet{
-		Ver:       protocol.V2,
+		Ver:       protocol.V3,
 		Proto:     protocol.ProtocolService,
 		AppProto:  protocol.AppProtoPullDeviceList,
 		SourceTTL: protocol.MAX_TTL,

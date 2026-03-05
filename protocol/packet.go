@@ -42,6 +42,7 @@ type Version uint8
 
 const (
 	V2             Version = 2
+	V3             Version = 3
 	VersionUnknown Version = 255
 )
 
@@ -49,6 +50,8 @@ func VersionFromUint8(val uint8) Version {
 	switch val {
 	case 2:
 		return V2
+	case 3:
+		return V3
 	default:
 		return VersionUnknown
 	}
@@ -181,7 +184,7 @@ func NewPacket(ver, proto, appProto, sourceTTL, ttl uint8, srcIP, dstIP net.IP, 
 
 func (p *Packet) Marshal() []byte {
 	buf := make([]byte, PacketHeaderSize+len(p.Payload))
-	buf[0] = (V2.ToUint8() & 0x0F) // 版本占4位
+	buf[0] = (V3.ToUint8() & 0x0F) // 版本占4位
 	buf[1] = p.Proto.ToUint8()
 	buf[2] = p.AppProto.ToUint8()
 	buf[3] = ((p.SourceTTL & 0x0F) << 4) | (p.TTL & 0x0F) // SourceTTL和TTL各占4位
@@ -194,12 +197,6 @@ func (p *Packet) Marshal() []byte {
 	// 数据体
 	copy(buf[PacketHeaderSize:], p.Payload)
 
-	if p.Gateway {
-		buf[0] |= 0x40 // 0b0100
-	} else {
-		buf[0] &= 0xBF // 0b1011
-	}
-
 	return buf
 }
 
@@ -210,7 +207,7 @@ func Unmarshal(data []byte) (*Packet, error) {
 
 	p := &Packet{}
 	p.Ver = VersionFromUint8(data[0] & 0x0F)
-	p.Gateway = (data[0] & 0x40) != 0
+	p.Gateway = false
 	p.Proto = ProtocolFromUint8(data[1])
 	p.AppProto = AppProtocolFromUint8(data[2])
 	p.SourceTTL = (data[3] >> 4) & 0x0F
