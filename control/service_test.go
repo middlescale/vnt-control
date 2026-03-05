@@ -803,11 +803,10 @@ func TestGatewayReportAndRegistrationGrant(t *testing.T) {
 	defer ctrl.Stop()
 	ctrl.ApproveGatewayNode("gw-1", "127.0.0.1:51820")
 	report := &pb.GatewayReportRequest{
-		GatewayId:          "gw-1",
-		Endpoint:           "127.0.0.1:51820",
-		WireguardPublicKey: "wg-pub-key-1",
-		Capabilities:       []string{"wireguard_v1"},
-		ReportUnixMs:       time.Now().UnixMilli(),
+		GatewayId:    "gw-1",
+		Endpoint:     "127.0.0.1:51820",
+		Capabilities: []string{"udp_blind_relay_v1"},
+		ReportUnixMs: time.Now().UnixMilli(),
 	}
 	b, _ := proto.Marshal(report)
 	packet := &protocol.Packet{
@@ -835,10 +834,7 @@ func TestGatewayReportAndRegistrationGrant(t *testing.T) {
 	if grant == nil {
 		t.Fatalf("expected gateway access grant in registration response")
 	}
-	if grant.GetWireguardEndpoint() != "127.0.0.1:51820" || grant.GetWireguardPublicKey() != "wg-pub-key-1" {
-		t.Fatalf("unexpected grant wireguard fields: %+v", grant)
-	}
-	if len(grant.GetGatewayCapabilities()) == 0 || grant.GetGatewayCapabilities()[0] != "wireguard_v1" {
+	if len(grant.GetGatewayCapabilities()) == 0 || grant.GetGatewayCapabilities()[0] != "udp_blind_relay_v1" {
 		t.Fatalf("unexpected grant capabilities: %+v", grant.GetGatewayCapabilities())
 	}
 	if grant.GetTicket() == "" || grant.GetTicketExpireUnixMs() <= 0 {
@@ -850,11 +846,10 @@ func TestGatewayReportRequiresApprovalForNonDefaultGateway(t *testing.T) {
 	ctrl := newTestController()
 	defer ctrl.Stop()
 	report := &pb.GatewayReportRequest{
-		GatewayId:          "gw-denied",
-		Endpoint:           "127.0.0.1:51820",
-		WireguardPublicKey: "wg-pub-key-denied",
-		Capabilities:       []string{"wireguard_v1"},
-		ReportUnixMs:       time.Now().UnixMilli(),
+		GatewayId:    "gw-denied",
+		Endpoint:     "127.0.0.1:51820",
+		Capabilities: []string{"udp_blind_relay_v1"},
+		ReportUnixMs: time.Now().UnixMilli(),
 	}
 	b, _ := proto.Marshal(report)
 	packet := &protocol.Packet{
@@ -882,11 +877,10 @@ func TestGatewayApproveByIDAfterPendingReport(t *testing.T) {
 	ctrl := newTestController()
 	defer ctrl.Stop()
 	report := &pb.GatewayReportRequest{
-		GatewayId:          "gw-pending",
-		Endpoint:           "127.0.0.1:51821",
-		WireguardPublicKey: "wg-pub-key-pending",
-		Capabilities:       []string{"wireguard_v1"},
-		ReportUnixMs:       time.Now().UnixMilli(),
+		GatewayId:    "gw-pending",
+		Endpoint:     "127.0.0.1:51821",
+		Capabilities: []string{"udp_blind_relay_v1"},
+		ReportUnixMs: time.Now().UnixMilli(),
 	}
 	b, _ := proto.Marshal(report)
 	packet := &protocol.Packet{
@@ -932,11 +926,10 @@ func TestGatewayReportAllowsConfiguredDefaultGateway(t *testing.T) {
 	})
 	defer ctrl.Stop()
 	report := &pb.GatewayReportRequest{
-		GatewayId:          "gw-default",
-		Endpoint:           "gateway.middlescale.net:433",
-		WireguardPublicKey: "wg-pub-key-default",
-		Capabilities:       []string{"wireguard_v1"},
-		ReportUnixMs:       time.Now().UnixMilli(),
+		GatewayId:    "gw-default",
+		Endpoint:     "gateway.middlescale.net:433",
+		Capabilities: []string{"udp_blind_relay_v1"},
+		ReportUnixMs: time.Now().UnixMilli(),
 	}
 	b, _ := proto.Marshal(report)
 	packet := &protocol.Packet{
@@ -964,18 +957,17 @@ func TestRegistrationSkipsExpiredGatewayLease(t *testing.T) {
 	ctrl := newTestController()
 	defer ctrl.Stop()
 	ctrl.gatewayNodes["gw-expired"] = GatewayNodeInfo{
-		GatewayID:          "gw-expired",
-		Endpoint:           "127.0.0.1:51822",
-		WireGuardPublicKey: "wg-pub-key-expired",
-		Capabilities:       []string{"wireguard_v1"},
-		UpdatedAt:          time.Now().Add(-2 * gatewayNodeLease),
+		GatewayID:    "gw-expired",
+		Endpoint:     "127.0.0.1:51822",
+		Capabilities: []string{"udp_blind_relay_v1"},
+		UpdatedAt:    time.Now().Add(-2 * gatewayNodeLease),
 	}
 	regResp := mustRegister(t, ctrl, newBaseRegisterReq("dev-expired-a", "node-expired-a"), &net.UDPAddr{IP: net.ParseIP("1.1.1.3"), Port: 3333})
 	grant := regResp.GetGatewayAccessGrant()
 	if grant == nil {
 		t.Fatalf("expected gateway access grant in registration response")
 	}
-	if grant.GetWireguardEndpoint() == "127.0.0.1:51822" {
+	if len(grant.GetGatewayAddrs()) > 0 && grant.GetGatewayAddrs()[0] == "quic://127.0.0.1:51822" {
 		t.Fatalf("expected expired gateway to be skipped")
 	}
 }

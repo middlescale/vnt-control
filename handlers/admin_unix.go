@@ -19,7 +19,6 @@ type adminRequest struct {
 	Domain       string   `json:"domain,omitempty"`
 	GatewayID    string   `json:"gateway_id,omitempty"`
 	Endpoint     string   `json:"endpoint,omitempty"`
-	WgPubKey     string   `json:"wg_pub_key,omitempty"`
 	Capabilities []string `json:"capabilities,omitempty"`
 	UserID       string   `json:"user_id,omitempty"`
 	Group        string   `json:"group,omitempty"`

@@ -14,20 +14,21 @@ import (
 // netmask: IPv4 子网掩码
 // domain: 域名字符串
 type Config struct {
-	Gateway           net.IP                  `json:"gateway"`
-	Domain            string                  `json:"domain"`
-	Netmask           string                  `json:"netmask"`
-	Groups            map[string]GroupConfig  `json:"groups"`
-	DefaultDomain     string                  `json:"default_domain"`
-	Domains           map[string]DomainConfig `json:"domains"`
-	DefaultGateway    string                  `json:"default_gateway"`
-	ListenAddr        string                  `json:"listen_addr"`
-	AutoCertDomain    string                  `json:"autocert_domain"`
-	CertCacheDir      string                  `json:"cert_cache_dir"`
-	TLSCertPath       string                  `json:"tls_cert_path"`
-	TLSKeyPath        string                  `json:"tls_key_path"`
-	ClientCAPath      string                  `json:"client_ca_path"`
-	RequireClientCert bool                    `json:"require_client_cert"`
+	Gateway             net.IP                  `json:"gateway"`
+	Domain              string                  `json:"domain"`
+	Netmask             string                  `json:"netmask"`
+	Groups              map[string]GroupConfig  `json:"groups"`
+	DefaultDomain       string                  `json:"default_domain"`
+	Domains             map[string]DomainConfig `json:"domains"`
+	DefaultGateway      string                  `json:"default_gateway"`
+	GatewayTicketSecret string                  `json:"gateway_ticket_secret"`
+	ListenAddr          string                  `json:"listen_addr"`
+	AutoCertDomain      string                  `json:"autocert_domain"`
+	CertCacheDir        string                  `json:"cert_cache_dir"`
+	TLSCertPath         string                  `json:"tls_cert_path"`
+	TLSKeyPath          string                  `json:"tls_key_path"`
+	ClientCAPath        string                  `json:"client_ca_path"`
+	RequireClientCert   bool                    `json:"require_client_cert"`
 }
 
 type GroupConfig struct {
@@ -61,6 +62,9 @@ func LoadConfig(path string) (*Config, error) {
 func (c *Config) Validate() error {
 	if strings.TrimSpace(c.DefaultGateway) == "" {
 		c.DefaultGateway = "gateway.middlescale.net:433"
+	}
+	if strings.TrimSpace(c.GatewayTicketSecret) == "" {
+		c.GatewayTicketSecret = "dev-gateway-ticket-secret-change-me"
 	}
 	// 域名校验（简单正则，支持主流域名）
 	domainRe := regexp.MustCompile(`^(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}$`)

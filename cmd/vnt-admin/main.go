@@ -16,7 +16,6 @@ type adminRequest struct {
 	Domain       string   `json:"domain,omitempty"`
 	GatewayID    string   `json:"gateway_id,omitempty"`
 	Endpoint     string   `json:"endpoint,omitempty"`
-	WgPubKey     string   `json:"wg_pub_key,omitempty"`
 	Capabilities []string `json:"capabilities,omitempty"`
 	UserID       string   `json:"user_id,omitempty"`
 	Group        string   `json:"group,omitempty"`
@@ -41,7 +40,6 @@ type gatewayInfo struct {
 	Default            bool     `json:"default"`
 	Reported           bool     `json:"reported"`
 	Alive              bool     `json:"alive"`
-	WireGuardPublicKey string   `json:"wg_pub_key,omitempty"`
 	Capabilities       []string `json:"capabilities,omitempty"`
 	UpdatedAtUnix      int64    `json:"updated_at_unix,omitempty"`
 }
@@ -57,8 +55,7 @@ func main() {
 	gatewayID := flag.String("gatewayId", "", "gateway id")
 	gatewayIDSnake := flag.String("gateway_id", "", "gateway id")
 	endpoint := flag.String("endpoint", "", "gateway endpoint host:port (deprecated for approval)")
-	wgPubKey := flag.String("wgPubKey", "", "wireguard public key (deprecated for approval)")
-	caps := flag.String("caps", "wireguard_v1", "comma-separated gateway capabilities")
+	caps := flag.String("caps", "quic_stream_relay_v1", "comma-separated gateway capabilities")
 	userID := flag.String("userId", "", "user id")
 	group := flag.String("group", "", "group name")
 	ttlSeconds := flag.Int64("ttlSeconds", 600, "ticket ttl seconds")
@@ -88,7 +85,6 @@ func main() {
 			Action:       "register_gateway",
 			GatewayID:    gid,
 			Endpoint:     strings.TrimSpace(*endpoint),
-			WgPubKey:     strings.TrimSpace(*wgPubKey),
 			Capabilities: splitCSV(*caps),
 		}
 	default:
