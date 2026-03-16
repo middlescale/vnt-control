@@ -197,6 +197,12 @@ func handleSession(ctrl *control.Controller, conn *quic.Conn) {
 						log.Errorf("HandleGatewayReportPacket error: %v", err)
 						continue
 					}
+				case protocol.AppProtoRefreshGatewayGrantRequest:
+					respPacket, err = ctrl.HandleRefreshGatewayGrantPacket(packet)
+					if err != nil {
+						log.Errorf("HandleRefreshGatewayGrantPacket error: %v", err)
+						continue
+					}
 				case protocol.AppProtoClientStatusInfo:
 					err = ctrl.HandleClientStatusInfoPacket(packet)
 					if err != nil {

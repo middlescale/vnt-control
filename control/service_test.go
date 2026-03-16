@@ -837,7 +837,7 @@ func TestGatewayReportAndRegistrationGrant(t *testing.T) {
 	if len(grant.GetGatewayCapabilities()) == 0 || grant.GetGatewayCapabilities()[0] != "udp_blind_relay_v1" {
 		t.Fatalf("unexpected grant capabilities: %+v", grant.GetGatewayCapabilities())
 	}
-	if grant.GetTicket() == "" || grant.GetTicketExpireUnixMs() <= 0 {
+	if len(grant.GetTicket()) == 0 || grant.GetTicketExpireUnixMs() <= 0 {
 		t.Fatalf("expected short-lived ticket in grant: %+v", grant)
 	}
 }
@@ -969,6 +969,54 @@ func TestRegistrationSkipsExpiredGatewayLease(t *testing.T) {
 	}
 	if len(grant.GetGatewayAddrs()) > 0 && grant.GetGatewayAddrs()[0] == "quic://127.0.0.1:51822" {
 		t.Fatalf("expected expired gateway to be skipped")
+	}
+}
+
+func TestRefreshGatewayGrantPacket(t *testing.T) {
+	ctrl := newTestController()
+	defer ctrl.Stop()
+
+	regReq := newBaseRegisterReq("dev-refresh-a", "node-refresh-a")
+	regResp := mustRegister(t, ctrl, regReq, &net.UDPAddr{IP: net.ParseIP("1.1.1.30"), Port: 3030})
+	grant := regResp.GetGatewayAccessGrant()
+	if grant == nil {
+		t.Fatalf("expected gateway access grant in registration response")
+	}
+
+	req := &pb.RefreshGatewayGrantRequest{
+		VirtualIp:     regResp.GetVirtualIp(),
+		DeviceId:      regReq.GetDeviceId(),
+		LastSessionId: grant.GetSessionId(),
+		LastPolicyRev: grant.GetPolicyRev(),
+	}
+	payload, err := proto.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal refresh gateway grant request failed: %v", err)
+	}
+	respPacket, err := ctrl.HandleRefreshGatewayGrantPacket(&protocol.Packet{
+		Ver:       protocol.V3,
+		Proto:     protocol.ProtocolService,
+		AppProto:  protocol.AppProtoRefreshGatewayGrantRequest,
+		SourceTTL: protocol.MAX_TTL,
+		TTL:       protocol.MAX_TTL,
+		SrcIP:     util.Uint32ToIP(regResp.GetVirtualIp()),
+		DstIP:     util.Uint32ToIP(regResp.GetVirtualGateway()),
+		Gateway:   true,
+		Payload:   payload,
+	})
+	if err != nil {
+		t.Fatalf("HandleRefreshGatewayGrantPacket failed: %v", err)
+	}
+
+	var resp pb.RefreshGatewayGrantResponse
+	if err := proto.Unmarshal(respPacket.Payload, &resp); err != nil {
+		t.Fatalf("unmarshal refresh gateway grant response failed: %v", err)
+	}
+	if !resp.GetHasUpdate() {
+		t.Fatalf("expected refreshed grant, got %+v", resp)
+	}
+	if resp.GetGatewayAccessGrant() == nil {
+		t.Fatalf("expected gateway access grant in refresh response")
 	}
 }
 

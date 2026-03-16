@@ -1,11 +1,11 @@
 package control
 
 import (
+	"crypto/ed25519"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
-	"encoding/base64"
-	"encoding/hex"
+	"crypto/x509"
 	"fmt"
 	"net"
 	"os"
@@ -18,6 +18,7 @@ import (
 	"vnt-control/protocol/pb"
 	"vnt-control/util"
 
+	"encoding/pem"
 	log "github.com/sirupsen/logrus"
 	"google.golang.org/protobuf/proto"
 )
@@ -32,6 +33,9 @@ type Controller struct {
 	gatewayNodes map[string]GatewayNodeInfo
 	gatewayAllow map[string]string
 	gatewaySeen  map[string]GatewayNodeInfo
+
+	gatewayTicketSigner ed25519.PrivateKey
+	gatewayTicketKeyID  string
 }
 
 type GatewayNodeInfo struct {
@@ -97,6 +101,7 @@ func NewController(cfg *config.Config) *Controller {
 		cfg.DefaultGateway = "gateway.middlescale.net:433"
 	}
 	um := newUserManagerFromStore()
+	privateKey, keyID := loadGatewayTicketSigner(cfg)
 	return &Controller{
 		nc: NetworkControl{
 			VirtualNetwork:    *NewExpireMap[string, *NetworkInfo](7 * 24 * time.Hour),
@@ -106,12 +111,49 @@ func NewController(cfg *config.Config) *Controller {
 			PunchPairCooldown: *NewExpireMap[string, struct{}](20 * time.Second),
 			PunchPairRetry:    *NewExpireMap[string, PunchRetryState](30 * time.Minute),
 		},
-		um:           um,
-		cfg:          cfg,
-		gatewayNodes: make(map[string]GatewayNodeInfo),
-		gatewayAllow: make(map[string]string),
-		gatewaySeen:  make(map[string]GatewayNodeInfo),
+		um:                  um,
+		cfg:                 cfg,
+		gatewayNodes:        make(map[string]GatewayNodeInfo),
+		gatewayAllow:        make(map[string]string),
+		gatewaySeen:         make(map[string]GatewayNodeInfo),
+		gatewayTicketSigner: privateKey,
+		gatewayTicketKeyID:  keyID,
 	}
+}
+
+func loadGatewayTicketSigner(cfg *config.Config) (ed25519.PrivateKey, string) {
+	keyID := strings.TrimSpace(cfg.GatewayTicketKeyID)
+	path := strings.TrimSpace(cfg.GatewayTicketPrivateKeyPath)
+	if path == "" {
+		return nil, keyID
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		log.Warnf("read gateway ticket private key failed (%s): %v", path, err)
+		return nil, keyID
+	}
+	if block, _ := pem.Decode(raw); block != nil {
+		raw = block.Bytes
+	}
+	privateKey, err := parseEd25519PrivateKey(raw)
+	if err != nil {
+		log.Warnf("parse gateway ticket private key failed (%s): %v", path, err)
+		return nil, keyID
+	}
+	log.Infof("loaded gateway ticket Ed25519 signer from %s", path)
+	return privateKey, keyID
+}
+
+func parseEd25519PrivateKey(raw []byte) (ed25519.PrivateKey, error) {
+	key, err := x509.ParsePKCS8PrivateKey(raw)
+	if err != nil {
+		return nil, err
+	}
+	privateKey, ok := key.(ed25519.PrivateKey)
+	if !ok {
+		return nil, fmt.Errorf("pkcs8 key is not ed25519")
+	}
+	return privateKey, nil
 }
 
 func newUserManagerFromStore() *UserManager {
@@ -267,7 +309,7 @@ func (c *Controller) HandleRegistrationPacketWithVirtualIP(request *protocol.Pac
 	c.nc.TouchCipherSession(remoteAddr)
 	netInfo.Epoch++
 	registrationResp.VirtualIp = virtualIP
-	registrationResp.GatewayAccessGrant = c.buildGatewayAccessGrant(virtualIP)
+	registrationResp.GatewayAccessGrant = c.buildGatewayAccessGrant(virtualIP, registration.GetDeviceId())
 	registrationResp.Epoch = uint32(netInfo.Epoch)
 	registrationResp.DeviceInfoList = buildDeviceInfoList(netInfo.Clients, virtualIP)
 
@@ -396,6 +438,51 @@ func (c *Controller) HandleDeviceAuthPacket(request *protocol.Packet) (*protocol
 		Ver:       protocol.V3,
 		Proto:     protocol.ProtocolService,
 		AppProto:  protocol.AppProtoDeviceAuthAck,
+		SourceTTL: protocol.MAX_TTL,
+		TTL:       protocol.MAX_TTL,
+		SrcIP:     request.DstIP,
+		DstIP:     request.SrcIP,
+		Gateway:   true,
+		Payload:   payload,
+	}, nil
+}
+
+func (c *Controller) HandleRefreshGatewayGrantPacket(request *protocol.Packet) (*protocol.Packet, error) {
+	var req pb.RefreshGatewayGrantRequest
+	if err := proto.Unmarshal(request.Payload, &req); err != nil {
+		return nil, err
+	}
+	if req.GetVirtualIp() == 0 {
+		return nil, fmt.Errorf("refresh gateway grant virtual_ip is empty")
+	}
+	if req.GetDeviceId() == "" {
+		return nil, fmt.Errorf("refresh gateway grant device_id is empty")
+	}
+	if srcIP := request.SrcIP.To4(); srcIP == nil || util.IpToUint32(srcIP) != req.GetVirtualIp() {
+		return nil, fmt.Errorf("refresh gateway grant source mismatch")
+	}
+	if !c.clientOwnsVirtualIP(req.GetVirtualIp(), req.GetDeviceId()) {
+		return nil, fmt.Errorf("refresh gateway grant device mismatch")
+	}
+
+	resp := &pb.RefreshGatewayGrantResponse{
+		HasUpdate: true,
+		Reason:    "refreshed",
+	}
+	if grant := c.buildGatewayAccessGrant(req.GetVirtualIp(), req.GetDeviceId()); grant != nil {
+		resp.GatewayAccessGrant = grant
+	} else {
+		resp.HasUpdate = false
+		resp.Reason = "no gateway available"
+	}
+	payload, err := proto.Marshal(resp)
+	if err != nil {
+		return nil, err
+	}
+	return &protocol.Packet{
+		Ver:       protocol.V3,
+		Proto:     protocol.ProtocolService,
+		AppProto:  protocol.AppProtoRefreshGatewayGrantResponse,
 		SourceTTL: protocol.MAX_TTL,
 		TTL:       protocol.MAX_TTL,
 		SrcIP:     request.DstIP,
@@ -1148,7 +1235,7 @@ func (c *Controller) recordGatewaySeen(info GatewayNodeInfo) {
 	c.gatewayMu.Unlock()
 }
 
-func (c *Controller) buildGatewayAccessGrant(virtualIP uint32) *pb.GatewayAccessGrant {
+func (c *Controller) buildGatewayAccessGrant(virtualIP uint32, deviceID string) *pb.GatewayAccessGrant {
 	c.gatewayMu.RLock()
 	defer c.gatewayMu.RUnlock()
 	now := time.Now()
@@ -1173,7 +1260,22 @@ func (c *Controller) buildGatewayAccessGrant(virtualIP uint32) *pb.GatewayAccess
 	}
 	expire := time.Now().Add(2 * time.Minute)
 	sessionID := uint64(time.Now().UnixNano())
-	ticket, err := newGatewayTicket(c.cfg.GatewayTicketSecret, virtualIP, sessionID, expire.UnixMilli())
+	leaseSecs := uint32(60)
+	graceSecs := uint32(30)
+	ticket, err := newGatewayTicket(
+		c.cfg.GatewayTicketSecret,
+		c.gatewayTicketSigner,
+		c.gatewayTicketKeyID,
+		deviceID,
+		virtualIP,
+		sessionID,
+		1,
+		[]string{picked.GatewayID},
+		"",
+		expire.UnixMilli(),
+		leaseSecs,
+		graceSecs,
+	)
 	if err != nil {
 		log.Warnf("build gateway ticket failed: %v", err)
 		return nil
@@ -1181,11 +1283,13 @@ func (c *Controller) buildGatewayAccessGrant(virtualIP uint32) *pb.GatewayAccess
 	return &pb.GatewayAccessGrant{
 		GatewayAddrs:        []string{"quic://" + picked.Endpoint},
 		GatewayServerName:   defaultGatewayServerName(picked.Endpoint),
-		Ticket:              ticket,
+		Ticket:              []byte(ticket),
 		TicketExpireUnixMs:  expire.UnixMilli(),
 		SessionId:           sessionID,
 		PolicyRev:           1,
 		GatewayCapabilities: append([]string{}, picked.Capabilities...),
+		LeaseSecs:           leaseSecs,
+		GraceSecs:           graceSecs,
 	}
 }
 
@@ -1201,18 +1305,56 @@ func defaultGatewayServerName(endpoint string) string {
 	return host
 }
 
-func newGatewayTicket(secret string, virtualIP uint32, sessionID uint64, expireUnixMs int64) (string, error) {
+func newGatewayTicket(
+	secret string,
+	privateKey ed25519.PrivateKey,
+	keyID string,
+	deviceID string,
+	virtualIP uint32,
+	sessionID uint64,
+	policyRevision uint64,
+	gatewayIDs []string,
+	gatewayGroupID string,
+	expireUnixMs int64,
+	leaseCapSecs uint32,
+	graceCapSecs uint32,
+) ([]byte, error) {
 	buf := make([]byte, 12)
 	if _, err := rand.Read(buf); err != nil {
-		return "", err
+		return nil, err
 	}
-	nonce := base64.RawURLEncoding.EncodeToString(buf)
-	payload := fmt.Sprintf("%d:%d:%d:%s", virtualIP, sessionID, expireUnixMs, nonce)
-	payloadEncoded := base64.RawURLEncoding.EncodeToString([]byte(payload))
-	mac := hmac.New(sha256.New, []byte(secret))
-	_, _ = mac.Write([]byte(payloadEncoded))
-	signature := hex.EncodeToString(mac.Sum(nil))
-	return "v1." + payloadEncoded + "." + signature, nil
+	nowMs := time.Now().UnixMilli()
+	claims := &pb.GatewayTicketClaims{
+		TicketId:        fmt.Sprintf("%x", buf),
+		DeviceId:        deviceID,
+		VirtualIp:       virtualIP,
+		SessionId:       sessionID,
+		PolicyRevision:  policyRevision,
+		GatewayIds:      append([]string{}, gatewayIDs...),
+		GatewayGroupId:  gatewayGroupID,
+		IssuedAtUnixMs:  nowMs,
+		NotBeforeUnixMs: nowMs - 5_000,
+		ExpireUnixMs:    expireUnixMs,
+		LeaseCapSecs:    leaseCapSecs,
+		GraceCapSecs:    graceCapSecs,
+	}
+	claimsBytes, err := proto.Marshal(claims)
+	if err != nil {
+		return nil, err
+	}
+	ticket := &pb.SignedGatewayTicket{Claims: claimsBytes}
+	if len(privateKey) > 0 {
+		ticket.Alg = "ed25519"
+		ticket.KeyId = keyID
+		ticket.Signature = ed25519.Sign(privateKey, claimsBytes)
+	} else {
+		mac := hmac.New(sha256.New, []byte(secret))
+		_, _ = mac.Write(claimsBytes)
+		ticket.Alg = "hmac-sha256"
+		ticket.KeyId = "gateway-hmac-v1"
+		ticket.Signature = mac.Sum(nil)
+	}
+	return proto.Marshal(ticket)
 }
 
 func matchDomainAndGroup(token string, domains map[string]config.DomainConfig) (string, string, bool) {
@@ -1273,6 +1415,17 @@ func findClientIPByDeviceID(clients map[uint32]ClientInfo, deviceID string) uint
 		}
 	}
 	return 0
+}
+
+func (c *Controller) clientOwnsVirtualIP(virtualIP uint32, deviceID string) bool {
+	c.nc.VirtualNetwork.mutex.RLock()
+	defer c.nc.VirtualNetwork.mutex.RUnlock()
+	for _, network := range c.nc.VirtualNetwork.data {
+		if client, ok := network.Clients[virtualIP]; ok {
+			return client.DeviceId == deviceID
+		}
+	}
+	return false
 }
 
 func buildDeviceInfoList(clients map[uint32]ClientInfo, selfIP uint32) []*pb.DeviceInfo {

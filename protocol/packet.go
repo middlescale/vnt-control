@@ -115,6 +115,8 @@ const (
 	AppProtoGatewayReportAck        AppProtocol = 18
 	AppProtoGatewayConnectHello     AppProtocol = 19
 	AppProtoGatewayConnectAck       AppProtocol = 20
+	AppProtoRefreshGatewayGrantRequest AppProtocol = 21
+	AppProtoRefreshGatewayGrantResponse AppProtocol = 22
 	AppProtoUnknown                 AppProtocol = 255
 )
 
@@ -158,6 +160,10 @@ func AppProtocolFromUint8(val uint8) AppProtocol {
 		return AppProtoGatewayConnectHello
 	case 20:
 		return AppProtoGatewayConnectAck
+	case 21:
+		return AppProtoRefreshGatewayGrantRequest
+	case 22:
+		return AppProtoRefreshGatewayGrantResponse
 	default:
 		return AppProtoUnknown
 	}
