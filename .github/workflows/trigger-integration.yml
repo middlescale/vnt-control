@@ -21,4 +21,4 @@ jobs:
             -H "Accept: application/vnd.github+json" \
             -H "Authorization: Bearer $GH_TOKEN" \
             https://api.github.com/repos/middlescale/vnt-integration/dispatches \
-            -d "{\"event_type\":\"vnt_control_push\",\"client_payload\":{\"vnt_ref\":\"main\",\"vnt_control_ref\":\"${GITHUB_REF_NAME}\"}}"
+            -d "{\"event_type\":\"vnt_control_push\",\"client_payload\":{\"vnt_ref\":\"main\",\"vnt_control_ref\":\"${GITHUB_SHA}\"}}"
