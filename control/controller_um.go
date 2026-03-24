@@ -49,12 +49,24 @@ func (c *Controller) UMIssueDeviceTicket(userID string, groupName string, ttl ti
 	return c.um.IssueDeviceTicket(userID, groupName, ttl)
 }
 
-func (c *Controller) UMAuthDevice(userID string, groupName string, deviceID string, ticket string) (UMAuthDevice, error) {
-	return c.um.AuthDevice(userID, groupName, deviceID, ticket)
+func (c *Controller) UMValidateDeviceAuth(userID string, groupName string, deviceID string, ticket string) (string, error) {
+	return c.um.ValidateDeviceAuth(userID, groupName, deviceID, ticket)
+}
+
+func (c *Controller) UMAuthDevice(userID string, groupName string, deviceID string, ticket string, pubKey []byte) (UMAuthDevice, error) {
+	return c.um.AuthDevice(userID, groupName, deviceID, ticket, pubKey)
 }
 
 func (c *Controller) UMIsAuthedDevice(groupName string, deviceID string) bool {
 	return c.um.IsAuthedDevice(groupName, deviceID)
+}
+
+func (c *Controller) UMGetAuthedDevice(groupName string, deviceID string) (UMAuthDevice, bool) {
+	return c.um.GetAuthedDevice(groupName, deviceID)
+}
+
+func (c *Controller) UMCheckAuthedDevice(groupName string, deviceID string, pubKey []byte) error {
+	return c.um.CheckAuthedDevice(groupName, deviceID, pubKey)
 }
 
 func (c *Controller) UMRequireTicketAuthForGroup(groupName string) bool {

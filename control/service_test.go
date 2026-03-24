@@ -3,6 +3,7 @@ package control
 import (
 	"fmt"
 	"net"
+	"strings"
 	"testing"
 	"time"
 	"vnt-control/config"
@@ -517,9 +518,11 @@ func TestHandleRegistrationPacketConflictAndAllowIpChange(t *testing.T) {
 	defer ctrl.Stop()
 
 	resp1 := mustRegister(t, ctrl, &pb.RegistrationRequest{
-		Token:    "ms.net",
-		DeviceId: "dev-a",
-		Name:     "node-a",
+		Token:        "ms.net",
+		DeviceId:     "dev-a",
+		Name:         "node-a",
+		DevicePubKey: []byte("pk-dev-a"),
+		OnlineKxPub:  testOnlineKxPub("dev-a-v1"),
 	}, &net.UDPAddr{IP: net.ParseIP("1.2.3.4"), Port: 3456})
 	if resp1.GetVirtualIp() == 0 {
 		t.Fatalf("virtual ip should not be zero")
@@ -543,6 +546,8 @@ func TestHandleRegistrationPacketConflictAndAllowIpChange(t *testing.T) {
 		Name:          "node-b",
 		VirtualIp:     resp1.GetVirtualIp(),
 		AllowIpChange: false,
+		DevicePubKey:  []byte("pk-dev-b"),
+		OnlineKxPub:   testOnlineKxPub("dev-b-v1"),
 	}), &net.UDPAddr{IP: net.ParseIP("5.6.7.8"), Port: 7788})
 	if err == nil {
 		t.Fatalf("expected conflict error")
@@ -554,6 +559,8 @@ func TestHandleRegistrationPacketConflictAndAllowIpChange(t *testing.T) {
 		Name:          "node-b",
 		VirtualIp:     resp1.GetVirtualIp(),
 		AllowIpChange: true,
+		DevicePubKey:  []byte("pk-dev-b"),
+		OnlineKxPub:   testOnlineKxPub("dev-b-v2"),
 	}, &net.UDPAddr{IP: net.ParseIP("5.6.7.8"), Port: 7788})
 	if resp2.GetVirtualIp() == resp1.GetVirtualIp() {
 		t.Fatalf("allow_ip_change should allocate a different ip")
@@ -571,14 +578,18 @@ func TestHandleRegistrationPacketReuseSameDeviceIP(t *testing.T) {
 	defer ctrl.Stop()
 
 	resp1 := mustRegister(t, ctrl, &pb.RegistrationRequest{
-		Token:    "ms.net",
-		DeviceId: "dev-a",
-		Name:     "node-a",
+		Token:        "ms.net",
+		DeviceId:     "dev-a",
+		Name:         "node-a",
+		DevicePubKey: []byte("pk-dev-a"),
+		OnlineKxPub:  testOnlineKxPub("dev-a-v1"),
 	}, &net.UDPAddr{IP: net.ParseIP("10.10.10.10"), Port: 10000})
 	resp2 := mustRegister(t, ctrl, &pb.RegistrationRequest{
-		Token:    "ms.net",
-		DeviceId: "dev-a",
-		Name:     "node-a-updated",
+		Token:        "ms.net",
+		DeviceId:     "dev-a",
+		Name:         "node-a-updated",
+		DevicePubKey: []byte("pk-dev-a"),
+		OnlineKxPub:  testOnlineKxPub("dev-a-v2"),
 	}, &net.UDPAddr{IP: net.ParseIP("10.10.10.11"), Port: 10001})
 
 	if resp1.GetVirtualIp() != resp2.GetVirtualIp() {
@@ -594,10 +605,12 @@ func TestHandleRegistrationPacketInvalidRequestedIP(t *testing.T) {
 	defer ctrl.Stop()
 
 	_, err := ctrl.HandleRegistrationPacket(newRegistrationPacket(t, &pb.RegistrationRequest{
-		Token:     "ms.net",
-		DeviceId:  "dev-a",
-		Name:      "node-a",
-		VirtualIp: util.IpToUint32(net.ParseIP("10.27.0.1")),
+		Token:        "ms.net",
+		DeviceId:     "dev-a",
+		Name:         "node-a",
+		VirtualIp:    util.IpToUint32(net.ParseIP("10.27.0.1")),
+		DevicePubKey: []byte("pk-dev-a"),
+		OnlineKxPub:  testOnlineKxPub("dev-a-v1"),
 	}), &net.UDPAddr{IP: net.ParseIP("9.9.9.9"), Port: 9999})
 	if err == nil {
 		t.Fatalf("expected invalid requested ip error")
@@ -635,6 +648,15 @@ func TestHandlePullDeviceListPacket(t *testing.T) {
 	}
 	if len(list.GetDeviceInfoList()) != 1 || list.GetDeviceInfoList()[0].GetVirtualIp() != resp1.GetVirtualIp() {
 		t.Fatalf("unexpected device list response: %+v", list.GetDeviceInfoList())
+	}
+	if list.GetDeviceInfoList()[0].GetDeviceId() != "dev-a" {
+		t.Fatalf("unexpected device id in list: %+v", list.GetDeviceInfoList()[0])
+	}
+	if string(list.GetDeviceInfoList()[0].GetDevicePubKey()) != "pk-dev-a" {
+		t.Fatalf("unexpected device pub key in list: %+v", list.GetDeviceInfoList()[0])
+	}
+	if string(list.GetDeviceInfoList()[0].GetOnlineKxPub()) != string(testOnlineKxPub("dev-a")) {
+		t.Fatalf("unexpected online kx pub in list: %+v", list.GetDeviceInfoList()[0])
 	}
 }
 
@@ -765,7 +787,7 @@ func TestRegistrationRequiresAuthedDeviceWhenTicketIssued(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected registration rejected before certification")
 	}
-	if _, err := ctrl.UMAuthDevice(user.UserID, "ms.net", deviceID, tk.Ticket); err != nil {
+	if _, err := ctrl.UMAuthDevice(user.UserID, "ms.net", deviceID, tk.Ticket, req.GetDevicePubKey()); err != nil {
 		t.Fatalf("UMAuthDevice failed: %v", err)
 	}
 	_ = mustRegister(t, ctrl, req, &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1111})
@@ -782,19 +804,19 @@ func TestHandleDeviceAuthPacket(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UMIssueDeviceTicket failed: %v", err)
 	}
-	req := &pb.DeviceAuthRequest{UserId: user.UserID, Group: "ms.net", DeviceId: "dev-x", Ticket: tk.Ticket}
+	req := &pb.DeviceAuthRequest{UserId: user.UserID, Group: "ms.net", DeviceId: "dev-x", Ticket: tk.Ticket, DevicePubKey: []byte("pk-dev-x")}
 	b, _ := proto.Marshal(req)
 	packet := &protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoDeviceAuthRequest, SrcIP: net.ParseIP("10.0.0.2"), DstIP: net.ParseIP("0.0.0.1"), Gateway: true, Payload: b}
 	resp, err := ctrl.HandleDeviceAuthPacket(packet)
 	if err != nil {
 		t.Fatalf("HandleDeviceAuthPacket failed: %v", err)
 	}
-	var ack pb.DeviceAuthAck
-	if err := proto.Unmarshal(resp.Payload, &ack); err != nil {
-		t.Fatalf("unmarshal ack failed: %v", err)
+	var challenge pb.DeviceAuthChallenge
+	if err := proto.Unmarshal(resp.Payload, &challenge); err != nil {
+		t.Fatalf("unmarshal challenge failed: %v", err)
 	}
-	if !ack.GetOk() || !ctrl.UMIsAuthedDevice("ms.net", "dev-x") {
-		t.Fatalf("expected auth success, ack=%+v", ack)
+	if challenge.GetChallengeId() == "" || len(challenge.GetNonce()) == 0 {
+		t.Fatalf("expected challenge response, got %+v", challenge)
 	}
 }
 
@@ -1049,7 +1071,10 @@ func newTestController() *Controller {
 
 func mustRegister(t *testing.T, ctrl *Controller, req *pb.RegistrationRequest, remoteAddr net.Addr) *pb.RegistrationResponse {
 	t.Helper()
-	ensureAuthed(t, ctrl, req.GetToken(), req.GetDeviceId())
+	if len(req.GetDevicePubKey()) == 0 {
+		req.DevicePubKey = []byte("pk-" + req.GetDeviceId())
+	}
+	ensureAuthed(t, ctrl, req.GetToken(), req.GetDeviceId(), req.GetDevicePubKey())
 	respPacket, err := ctrl.HandleRegistrationPacket(newRegistrationPacket(t, req), remoteAddr)
 	if err != nil {
 		t.Fatalf("HandleRegistrationPacket failed: %v", err)
@@ -1081,12 +1106,18 @@ func mustRegister(t *testing.T, ctrl *Controller, req *pb.RegistrationRequest, r
 	return &resp
 }
 
-func ensureAuthed(t *testing.T, ctrl *Controller, group, deviceID string) {
+func ensureAuthed(t *testing.T, ctrl *Controller, group, deviceID string, devicePubKey []byte) {
 	t.Helper()
 	if ctrl.UMIsAuthedDevice(group, deviceID) {
-		return
+		if err := ctrl.UMCheckAuthedDevice(group, deviceID, devicePubKey); err == nil {
+			return
+		}
 	}
-	user, err := ctrl.UMCreateUser(fmt.Sprintf("user-%s-%s", group, deviceID))
+	createArgs := []string{fmt.Sprintf("user-%s-%s", group, deviceID)}
+	if strings.Contains(group, ".") {
+		createArgs = append(createArgs, group)
+	}
+	user, err := ctrl.UMCreateUser(createArgs[0], createArgs[1:]...)
 	if err != nil {
 		t.Fatalf("UMCreateUser failed: %v", err)
 	}
@@ -1094,7 +1125,7 @@ func ensureAuthed(t *testing.T, ctrl *Controller, group, deviceID string) {
 	if err != nil {
 		t.Fatalf("UMIssueDeviceTicket failed: %v", err)
 	}
-	if _, err = ctrl.UMAuthDevice(user.UserID, group, deviceID, tk.Ticket); err != nil {
+	if _, err = ctrl.UMAuthDevice(user.UserID, group, deviceID, tk.Ticket, devicePubKey); err != nil {
 		t.Fatalf("UMAuthDevice failed: %v", err)
 	}
 }

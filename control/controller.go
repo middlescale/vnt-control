@@ -1,6 +1,7 @@
 package control
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/hmac"
 	"crypto/rand"
@@ -29,6 +30,9 @@ type Controller struct {
 	cfg *config.Config
 	mu  sync.Mutex
 
+	authChallengeMu sync.Mutex
+	authChallenges  map[string]deviceAuthChallengeState
+
 	gatewayMu    sync.RWMutex
 	gatewayNodes map[string]GatewayNodeInfo
 	gatewayAllow map[string]string
@@ -45,6 +49,17 @@ type GatewayNodeInfo struct {
 	UpdatedAt    time.Time
 }
 
+type deviceAuthChallengeState struct {
+	UserID         string
+	GroupName      string
+	DeviceID       string
+	Ticket         string
+	DevicePubKey   []byte
+	Nonce          []byte
+	ExpireAt       time.Time
+	ReauthRequired bool
+}
+
 type GatewayAdminView struct {
 	GatewayID     string   `json:"gateway_id"`
 	Endpoint      string   `json:"endpoint"`
@@ -58,6 +73,7 @@ type GatewayAdminView struct {
 
 const maxPunchAttemptsPerPair = 3
 const gatewayNodeLease = 90 * time.Second
+const deviceAuthChallengeTTL = 60 * time.Second
 
 type PunchSessionState string
 
@@ -113,6 +129,7 @@ func NewController(cfg *config.Config) *Controller {
 		},
 		um:                  um,
 		cfg:                 cfg,
+		authChallenges:      make(map[string]deviceAuthChallengeState),
 		gatewayNodes:        make(map[string]GatewayNodeInfo),
 		gatewayAllow:        make(map[string]string),
 		gatewaySeen:         make(map[string]GatewayNodeInfo),
@@ -240,8 +257,8 @@ func (c *Controller) HandleRegistrationPacketWithVirtualIP(request *protocol.Pac
 	if err != nil {
 		return nil, 0, err
 	}
-	if !c.UMIsAuthedDevice(domain, registration.GetDeviceId()) {
-		return nil, 0, fmt.Errorf("device %s is not authed for group %s", registration.GetDeviceId(), domain)
+	if err := c.UMCheckAuthedDevice(domain, registration.GetDeviceId(), registration.GetDevicePubKey()); err != nil {
+		return nil, 0, fmt.Errorf("device %s auth check failed for group %s: %w", registration.GetDeviceId(), domain, err)
 	}
 
 	raddrStr := remoteAddr.String()
@@ -300,8 +317,8 @@ func (c *Controller) HandleRegistrationPacketWithVirtualIP(request *protocol.Pac
 	clientInfo.DataPlaneLastSeen = 0
 	clientInfo.VirtualIp = virtualIP
 	clientInfo.Address = remoteAddr
-	clientInfo.ClientSecret = registration.GetClientSecret()
-	clientInfo.ClientSecretHash = append(clientInfo.ClientSecretHash[:0], registration.GetClientSecretHash()...)
+	clientInfo.DevicePubKey = append(clientInfo.DevicePubKey[:0], registration.GetDevicePubKey()...)
+	clientInfo.OnlineKxPub = append(clientInfo.OnlineKxPub[:0], registration.GetOnlineKxPub()...)
 	clientInfo.Wireguard = false
 	clientInfo.LastJoin = now
 	netInfo.Clients[virtualIP] = clientInfo
@@ -400,7 +417,8 @@ func (c *Controller) HandleDeviceAuthPacket(request *protocol.Packet) (*protocol
 	if err := proto.Unmarshal(request.Payload, &req); err != nil {
 		return nil, err
 	}
-	if _, err := c.UMAuthDevice(req.GetUserId(), req.GetGroup(), req.GetDeviceId(), req.GetTicket()); err != nil {
+	groupName, err := c.UMValidateDeviceAuth(req.GetUserId(), req.GetGroup(), req.GetDeviceId(), req.GetTicket())
+	if err != nil {
 		ack := &pb.DeviceAuthAck{
 			Ok:       false,
 			Reason:   err.Error(),
@@ -408,43 +426,84 @@ func (c *Controller) HandleDeviceAuthPacket(request *protocol.Packet) (*protocol
 			Group:    req.GetGroup(),
 			DeviceId: req.GetDeviceId(),
 		}
-		payload, marshalErr := proto.Marshal(ack)
-		if marshalErr != nil {
-			return nil, marshalErr
+		return c.buildServicePacket(request, protocol.AppProtoDeviceAuthAck, ack)
+	}
+	if len(req.GetDevicePubKey()) == 0 {
+		ack := &pb.DeviceAuthAck{
+			Ok:       false,
+			Reason:   "device public key is empty",
+			UserId:   req.GetUserId(),
+			Group:    req.GetGroup(),
+			DeviceId: req.GetDeviceId(),
 		}
-		return &protocol.Packet{
-			Ver:       protocol.V3,
-			Proto:     protocol.ProtocolService,
-			AppProto:  protocol.AppProtoDeviceAuthAck,
-			SourceTTL: protocol.MAX_TTL,
-			TTL:       protocol.MAX_TTL,
-			SrcIP:     request.DstIP,
-			DstIP:     request.SrcIP,
-			Gateway:   true,
-			Payload:   payload,
-		}, nil
+		return c.buildServicePacket(request, protocol.AppProtoDeviceAuthAck, ack)
 	}
-	ack := &pb.DeviceAuthAck{
-		Ok:       true,
-		UserId:   req.GetUserId(),
-		Group:    req.GetGroup(),
-		DeviceId: req.GetDeviceId(),
+	reauthRequired := false
+	if existing, ok := c.UMGetAuthedDevice(groupName, req.GetDeviceId()); ok {
+		if existing.PubKeyHex != toPubKeyHex(req.GetDevicePubKey(), "ed25519") {
+			reauthRequired = true
+		}
 	}
-	payload, err := proto.Marshal(ack)
+	challenge, err := c.newDeviceAuthChallenge(req.GetUserId(), groupName, req.GetDeviceId(), req.GetTicket(), req.GetDevicePubKey(), reauthRequired)
 	if err != nil {
 		return nil, err
 	}
-	return &protocol.Packet{
-		Ver:       protocol.V3,
-		Proto:     protocol.ProtocolService,
-		AppProto:  protocol.AppProtoDeviceAuthAck,
-		SourceTTL: protocol.MAX_TTL,
-		TTL:       protocol.MAX_TTL,
-		SrcIP:     request.DstIP,
-		DstIP:     request.SrcIP,
-		Gateway:   true,
-		Payload:   payload,
-	}, nil
+	return c.buildServicePacket(request, protocol.AppProtoDeviceAuthChallenge, challenge)
+}
+
+func (c *Controller) HandleDeviceAuthProofPacket(request *protocol.Packet) (*protocol.Packet, error) {
+	var req pb.DeviceAuthProof
+	if err := proto.Unmarshal(request.Payload, &req); err != nil {
+		return nil, err
+	}
+	challenge, ok := c.consumeDeviceAuthChallenge(req.GetChallengeId())
+	if !ok || time.Now().After(challenge.ExpireAt) {
+		ack := &pb.DeviceAuthAck{
+			Ok:       false,
+			Reason:   "challenge_expired",
+			DeviceId: req.GetDeviceId(),
+		}
+		return c.buildServicePacket(request, protocol.AppProtoDeviceAuthAck, ack)
+	}
+	if challenge.DeviceID != req.GetDeviceId() || !bytes.Equal(challenge.DevicePubKey, req.GetDevicePubKey()) {
+		ack := &pb.DeviceAuthAck{
+			Ok:             false,
+			Reason:         "device_key_mismatch",
+			DeviceId:       req.GetDeviceId(),
+			ReauthRequired: challenge.ReauthRequired,
+		}
+		return c.buildServicePacket(request, protocol.AppProtoDeviceAuthAck, ack)
+	}
+	if !ed25519.Verify(ed25519.PublicKey(req.GetDevicePubKey()), buildDeviceAuthSignedPayload(req.GetChallengeId(), challenge.Nonce, req.GetDeviceId(), req.GetDevicePubKey()), req.GetSignature()) {
+		ack := &pb.DeviceAuthAck{
+			Ok:             false,
+			Reason:         "invalid_signature",
+			DeviceId:       req.GetDeviceId(),
+			ReauthRequired: challenge.ReauthRequired,
+		}
+		return c.buildServicePacket(request, protocol.AppProtoDeviceAuthAck, ack)
+	}
+	record, err := c.UMAuthDevice(challenge.UserID, challenge.GroupName, challenge.DeviceID, challenge.Ticket, challenge.DevicePubKey)
+	if err != nil {
+		ack := &pb.DeviceAuthAck{
+			Ok:             false,
+			Reason:         err.Error(),
+			UserId:         challenge.UserID,
+			Group:          challenge.GroupName,
+			DeviceId:       challenge.DeviceID,
+			ReauthRequired: challenge.ReauthRequired,
+		}
+		return c.buildServicePacket(request, protocol.AppProtoDeviceAuthAck, ack)
+	}
+	ack := &pb.DeviceAuthAck{
+		Ok:               true,
+		UserId:           record.UserID,
+		Group:            record.GroupName,
+		DeviceId:         record.DeviceID,
+		AuthExpireUnixMs: record.AuthExpireAt.UnixMilli(),
+		ReauthRequired:   challenge.ReauthRequired,
+	}
+	return c.buildServicePacket(request, protocol.AppProtoDeviceAuthAck, ack)
 }
 
 func (c *Controller) HandleRefreshGatewayGrantPacket(request *protocol.Packet) (*protocol.Packet, error) {
@@ -1386,10 +1445,97 @@ func validateRegistrationRequest(reg *pb.RegistrationRequest) error {
 	if reg.GetName() == "" || len(reg.GetName()) > 128 {
 		return fmt.Errorf("name length error")
 	}
-	if len(reg.GetClientSecretHash()) > 128 {
-		return fmt.Errorf("client_secret_hash length error")
+	if len(reg.GetDevicePubKey()) == 0 {
+		return fmt.Errorf("device_pub_key is empty")
+	}
+	if len(reg.GetOnlineKxPub()) != 32 {
+		return fmt.Errorf("online_kx_pub length error")
 	}
 	return nil
+}
+
+func (c *Controller) buildServicePacket(request *protocol.Packet, appProto protocol.AppProtocol, msg proto.Message) (*protocol.Packet, error) {
+	payload, err := proto.Marshal(msg)
+	if err != nil {
+		return nil, err
+	}
+	return &protocol.Packet{
+		Ver:       protocol.V3,
+		Proto:     protocol.ProtocolService,
+		AppProto:  appProto,
+		SourceTTL: protocol.MAX_TTL,
+		TTL:       protocol.MAX_TTL,
+		SrcIP:     request.DstIP,
+		DstIP:     request.SrcIP,
+		Gateway:   true,
+		Payload:   payload,
+	}, nil
+}
+
+func (c *Controller) newDeviceAuthChallenge(userID, groupName, deviceID, ticket string, devicePubKey []byte, reauthRequired bool) (*pb.DeviceAuthChallenge, error) {
+	nonce := make([]byte, 32)
+	if _, err := rand.Read(nonce); err != nil {
+		return nil, err
+	}
+	challengeIDBytes := make([]byte, 16)
+	if _, err := rand.Read(challengeIDBytes); err != nil {
+		return nil, err
+	}
+	challengeID := fmt.Sprintf("%x", challengeIDBytes)
+	challenge := deviceAuthChallengeState{
+		UserID:         userID,
+		GroupName:      groupName,
+		DeviceID:       deviceID,
+		Ticket:         ticket,
+		DevicePubKey:   append([]byte(nil), devicePubKey...),
+		Nonce:          nonce,
+		ExpireAt:       time.Now().Add(deviceAuthChallengeTTL),
+		ReauthRequired: reauthRequired,
+	}
+	c.authChallengeMu.Lock()
+	defer c.authChallengeMu.Unlock()
+	now := time.Now()
+	for id, state := range c.authChallenges {
+		if now.After(state.ExpireAt) {
+			delete(c.authChallenges, id)
+		}
+	}
+	c.authChallenges[challengeID] = challenge
+	return &pb.DeviceAuthChallenge{
+		ChallengeId:    challengeID,
+		Nonce:          append([]byte(nil), nonce...),
+		ExpireUnixMs:   challenge.ExpireAt.UnixMilli(),
+		ReauthRequired: reauthRequired,
+	}, nil
+}
+
+func (c *Controller) consumeDeviceAuthChallenge(challengeID string) (deviceAuthChallengeState, bool) {
+	c.authChallengeMu.Lock()
+	defer c.authChallengeMu.Unlock()
+	challenge, ok := c.authChallenges[challengeID]
+	if ok {
+		delete(c.authChallenges, challengeID)
+	}
+	return challenge, ok
+}
+
+func buildDeviceAuthSignedPayload(challengeID string, nonce []byte, deviceID string, devicePubKey []byte) []byte {
+	buf := make([]byte, 0, len(challengeID)+len(nonce)+len(deviceID)+len(devicePubKey)+16)
+	appendLenPrefixed(&buf, []byte(challengeID))
+	appendLenPrefixed(&buf, nonce)
+	appendLenPrefixed(&buf, []byte(deviceID))
+	appendLenPrefixed(&buf, devicePubKey)
+	return buf
+}
+
+func appendLenPrefixed(buf *[]byte, data []byte) {
+	var lenBuf [4]byte
+	lenBuf[0] = byte(len(data) >> 24)
+	lenBuf[1] = byte(len(data) >> 16)
+	lenBuf[2] = byte(len(data) >> 8)
+	lenBuf[3] = byte(len(data))
+	*buf = append(*buf, lenBuf[:]...)
+	*buf = append(*buf, data...)
 }
 
 func validateRequestedIP(virtualIP uint32, gateway net.IP, netmask net.IPMask) error {
@@ -1435,15 +1581,15 @@ func buildDeviceInfoList(clients map[uint32]ClientInfo, selfIP uint32) []*pb.Dev
 			continue
 		}
 		item := &pb.DeviceInfo{
-			Name:             info.Name,
-			VirtualIp:        ip,
-			ClientSecret:     info.ClientSecret,
-			Wireguard:        info.Wireguard,
-			ClientSecretHash: nil,
+			Name:         info.Name,
+			VirtualIp:    ip,
+			Wireguard:    info.Wireguard,
+			DeviceId:     info.DeviceId,
+			DevicePubKey: append([]byte(nil), info.DevicePubKey...),
+			OnlineKxPub:  append([]byte(nil), info.OnlineKxPub...),
 		}
 		if info.ControlOnline {
 			item.DeviceStatus = 0
-			item.ClientSecretHash = append(item.ClientSecretHash, info.ClientSecretHash...)
 		} else {
 			item.DeviceStatus = 1
 		}

@@ -57,10 +57,12 @@ type UMDeviceTicket struct {
 }
 
 type UMAuthDevice struct {
-	UserID    string
-	GroupName string
-	DeviceID  string
-	AuthedAt  time.Time
+	UserID       string
+	GroupName    string
+	DeviceID     string
+	PubKeyHex    string
+	AuthedAt     time.Time
+	AuthExpireAt time.Time
 }
 
 type UserManager struct {
@@ -75,6 +77,8 @@ type UserManager struct {
 	authedDevices  map[string]UMAuthDevice
 	deviceTickets  map[string]UMDeviceTicket
 }
+
+const defaultDeviceAuthTTL = 24 * time.Hour
 
 func NewUserManager() *UserManager {
 	m := &UserManager{
@@ -289,39 +293,63 @@ func normalizeGroupForUser(groupName string, userDomain string) (string, error) 
 	return groupName + "." + userDomain, nil
 }
 
-func (m *UserManager) AuthDevice(userID string, groupName string, deviceID string, ticket string) (UMAuthDevice, error) {
+func (m *UserManager) ValidateDeviceAuth(userID string, groupName string, deviceID string, ticket string) (string, error) {
 	if userID == "" || groupName == "" || deviceID == "" || ticket == "" {
-		return UMAuthDevice{}, fmt.Errorf("user/group/device/ticket required")
+		return "", fmt.Errorf("user/group/device/ticket required")
 	}
 	now := time.Now()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	t, ok := m.deviceTickets[ticket]
 	if !ok {
-		return UMAuthDevice{}, fmt.Errorf("ticket not found")
+		return "", fmt.Errorf("ticket not found")
 	}
 	if t.Used {
-		return UMAuthDevice{}, fmt.Errorf("ticket already used")
+		return "", fmt.Errorf("ticket already used")
 	}
 	if now.After(t.ExpireAt) {
-		return UMAuthDevice{}, fmt.Errorf("ticket expired")
+		return "", fmt.Errorf("ticket expired")
 	}
 	user, ok := m.users[userID]
 	if !ok {
-		return UMAuthDevice{}, fmt.Errorf("user not found")
+		return "", fmt.Errorf("user not found")
 	}
 	normalizedGroup, err := normalizeGroupForUser(groupName, user.Domain)
 	if err != nil {
-		return UMAuthDevice{}, err
+		return "", err
 	}
 	if t.UserID != userID || t.GroupName != normalizedGroup {
-		return UMAuthDevice{}, fmt.Errorf("ticket mismatch")
+		return "", fmt.Errorf("ticket mismatch")
 	}
+	return normalizedGroup, nil
+}
+
+func (m *UserManager) AuthDevice(
+	userID string,
+	groupName string,
+	deviceID string,
+	ticket string,
+	pubKey []byte,
+) (UMAuthDevice, error) {
+	if len(pubKey) == 0 {
+		return UMAuthDevice{}, fmt.Errorf("device public key is empty")
+	}
+	normalizedGroup, err := m.ValidateDeviceAuth(userID, groupName, deviceID, ticket)
+	if err != nil {
+		return UMAuthDevice{}, err
+	}
+	now := time.Now()
+	pubKeyHex := toPubKeyHex(pubKey, "ed25519")
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	t := m.deviceTickets[ticket]
 	record := UMAuthDevice{
-		UserID:    userID,
-		GroupName: normalizedGroup,
-		DeviceID:  deviceID,
-		AuthedAt:  now,
+		UserID:       userID,
+		GroupName:    normalizedGroup,
+		DeviceID:     deviceID,
+		PubKeyHex:    pubKeyHex,
+		AuthedAt:     now,
+		AuthExpireAt: now.Add(defaultDeviceAuthTTL),
 	}
 	m.authedDevices[authedDeviceKey(normalizedGroup, deviceID)] = record
 	t.Used = true
@@ -337,6 +365,32 @@ func (m *UserManager) IsAuthedDevice(groupName string, deviceID string) bool {
 	defer m.mu.RUnlock()
 	_, ok := m.authedDevices[authedDeviceKey(groupName, deviceID)]
 	return ok
+}
+
+func (m *UserManager) GetAuthedDevice(groupName string, deviceID string) (UMAuthDevice, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	record, ok := m.authedDevices[authedDeviceKey(groupName, deviceID)]
+	return record, ok
+}
+
+func (m *UserManager) CheckAuthedDevice(groupName string, deviceID string, pubKey []byte) error {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	record, ok := m.authedDevices[authedDeviceKey(groupName, deviceID)]
+	if !ok {
+		return fmt.Errorf("not_auth")
+	}
+	if !record.AuthExpireAt.IsZero() && time.Now().After(record.AuthExpireAt) {
+		return fmt.Errorf("auth_expired")
+	}
+	if len(pubKey) == 0 {
+		return fmt.Errorf("device_key_mismatch")
+	}
+	if record.PubKeyHex != toPubKeyHex(pubKey, "ed25519") {
+		return fmt.Errorf("device_key_mismatch")
+	}
+	return nil
 }
 
 func (m *UserManager) RequireTicketAuthForGroup(groupName string) bool {

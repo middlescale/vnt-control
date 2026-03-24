@@ -191,6 +191,12 @@ func handleSession(ctrl *control.Controller, conn *quic.Conn) {
 						log.Errorf("HandleDeviceAuthPacket error: %v", err)
 						continue
 					}
+				case protocol.AppProtoDeviceAuthProof:
+					respPacket, err = ctrl.HandleDeviceAuthProofPacket(packet)
+					if err != nil {
+						log.Errorf("HandleDeviceAuthProofPacket error: %v", err)
+						continue
+					}
 				case protocol.AppProtoGatewayReportRequest:
 					respPacket, err = ctrl.HandleGatewayReportPacket(packet)
 					if err != nil {

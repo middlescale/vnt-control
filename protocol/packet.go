@@ -102,8 +102,6 @@ const (
 	AppProtoPushDeviceList          AppProtocol = 4
 	AppProtoHandshakeRequest        AppProtocol = 5
 	AppProtoHandshakeResponse       AppProtocol = 6
-	AppProtoSecretHandshakeRequest  AppProtocol = 7
-	AppProtoSecretHandshakeResponse AppProtocol = 8
 	AppProtoClientStatusInfo        AppProtocol = 9
 	AppProtoPunchRequest            AppProtocol = 10
 	AppProtoPunchAck                AppProtocol = 11
@@ -117,6 +115,8 @@ const (
 	AppProtoGatewayConnectAck       AppProtocol = 20
 	AppProtoRefreshGatewayGrantRequest AppProtocol = 21
 	AppProtoRefreshGatewayGrantResponse AppProtocol = 22
+	AppProtoDeviceAuthChallenge     AppProtocol = 23
+	AppProtoDeviceAuthProof         AppProtocol = 24
 	AppProtoUnknown                 AppProtocol = 255
 )
 
@@ -134,10 +134,6 @@ func AppProtocolFromUint8(val uint8) AppProtocol {
 		return AppProtoHandshakeRequest
 	case 6:
 		return AppProtoHandshakeResponse
-	case 7:
-		return AppProtoSecretHandshakeRequest
-	case 8:
-		return AppProtoSecretHandshakeResponse
 	case 9:
 		return AppProtoClientStatusInfo
 	case 10:
@@ -164,6 +160,10 @@ func AppProtocolFromUint8(val uint8) AppProtocol {
 		return AppProtoRefreshGatewayGrantRequest
 	case 22:
 		return AppProtoRefreshGatewayGrantResponse
+	case 23:
+		return AppProtoDeviceAuthChallenge
+	case 24:
+		return AppProtoDeviceAuthProof
 	default:
 		return AppProtoUnknown
 	}

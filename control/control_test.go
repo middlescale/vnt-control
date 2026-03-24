@@ -105,8 +105,16 @@ func TestHandleControlPacketAddrRequest(t *testing.T) {
 
 func newBaseRegisterReq(deviceID, name string) *pb.RegistrationRequest {
 	return &pb.RegistrationRequest{
-		Token:    "ms.net",
-		DeviceId: deviceID,
-		Name:     name,
+		Token:        "ms.net",
+		DeviceId:     deviceID,
+		Name:         name,
+		DevicePubKey: []byte("pk-" + deviceID),
+		OnlineKxPub:  testOnlineKxPub(deviceID),
 	}
+}
+
+func testOnlineKxPub(label string) []byte {
+	buf := make([]byte, 32)
+	copy(buf, []byte("online-"+label))
+	return buf
 }

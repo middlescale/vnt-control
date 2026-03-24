@@ -120,7 +120,7 @@ func TestJSONUMStorePersistsAuthedDevices(t *testing.T) {
 	if err != nil {
 		t.Fatalf("IssueDeviceTicket failed: %v", err)
 	}
-	if _, err := um.AuthDevice(user.UserID, "g1", "dev-1", tk.Ticket); err != nil {
+	if _, err := um.AuthDevice(user.UserID, "g1", "dev-1", tk.Ticket, []byte("pk-dev-1")); err != nil {
 		t.Fatalf("AuthDevice failed: %v", err)
 	}
 	umReloaded, err := NewUserManagerWithStore(NewJSONUMStore(path))

@@ -31,9 +31,9 @@ type ClientInfo struct {
 	VirtualIp uint32 // 虚拟IP，IPv4大端表示
 	Address   net.Addr
 
-	ClientSecret     bool
-	ClientSecretHash []byte
-	Wireguard        bool
+	DevicePubKey []byte
+	OnlineKxPub  []byte
+	Wireguard    bool
 
 	LastJoin int64 // Unix时间戳 (timestamp)
 
@@ -41,12 +41,12 @@ type ClientInfo struct {
 }
 
 type ClientStatusInfo struct {
-	P2PList         []net.IP
-	PublicIPList    []net.IP
-	PublicUDPPorts  []uint16
-	LocalUDPPorts   []uint16
-	UpStream        uint64
-	DownStream      uint64
-	IsCone          bool
-	UpdateTime      int64 // Unix时间戳 (timestamp)
+	P2PList        []net.IP
+	PublicIPList   []net.IP
+	PublicUDPPorts []uint16
+	LocalUDPPorts  []uint16
+	UpStream       uint64
+	DownStream     uint64
+	IsCone         bool
+	UpdateTime     int64 // Unix时间戳 (timestamp)
 }

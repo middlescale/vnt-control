@@ -121,13 +121,13 @@ func TestIssueAndAuthDeviceTicket(t *testing.T) {
 	if tk.GroupName != "g1.ms.net" {
 		t.Fatalf("expected normalized group name, got %s", tk.GroupName)
 	}
-	if _, err = um.AuthDevice(user.UserID, "g1.ms.net", "dev-1", tk.Ticket); err != nil {
+	if _, err = um.AuthDevice(user.UserID, "g1.ms.net", "dev-1", tk.Ticket, []byte("pk-dev-1")); err != nil {
 		t.Fatalf("AuthDevice failed: %v", err)
 	}
 	if !um.IsAuthedDevice("g1.ms.net", "dev-1") {
 		t.Fatalf("device should be authed")
 	}
-	if _, err = um.AuthDevice(user.UserID, "g1.ms.net", "dev-1", tk.Ticket); err == nil {
+	if _, err = um.AuthDevice(user.UserID, "g1.ms.net", "dev-1", tk.Ticket, []byte("pk-dev-1")); err == nil {
 		t.Fatalf("expected used ticket reject")
 	}
 }
@@ -140,7 +140,7 @@ func TestIssueDeviceTicketExpiry(t *testing.T) {
 		t.Fatalf("IssueDeviceTicket failed: %v", err)
 	}
 	time.Sleep(2 * time.Millisecond)
-	if _, err = um.AuthDevice(user.UserID, "g1.ms.net", "dev-1", tk.Ticket); err == nil {
+	if _, err = um.AuthDevice(user.UserID, "g1.ms.net", "dev-1", tk.Ticket, []byte("pk-dev-1")); err == nil {
 		t.Fatalf("expected expired ticket reject")
 	}
 }
