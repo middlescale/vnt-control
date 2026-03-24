@@ -203,15 +203,10 @@ func (c *Controller) HandleHandshakePacket(reqPacket *protocol.Packet) (*protoco
 		return nil, err
 	}
 
-	if req.GetSecret() {
-		log.Infof("handsshake request no need secret, ignored")
-	}
-
-	rsp := &pb.HandshakeResponse{
-		Version:      "goversion-1.0.0",
-		Secret:       false,
-		Capabilities: negotiateHandshakeCapabilities(req.GetCapabilities()),
-	}
+    rsp := &pb.HandshakeResponse{
+        Version:      "goversion-1.0.0",
+        Capabilities: negotiateHandshakeCapabilities(req.GetCapabilities()),
+    }
 	playload, err := proto.Marshal(rsp)
 	if err != nil {
 		log.Errorf("HandshakeResponse marshal error: %v", err)

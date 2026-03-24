@@ -23,11 +23,10 @@ func TestHandleHandshakePacketSuccess(t *testing.T) {
 	ctrl := NewController(cfg)
 	defer ctrl.Stop()
 
-	req := &pb.HandshakeRequest{
-		Version:      "test-client",
-		Secret:       true,
-		Capabilities: []string{"udp_endpoint_report_v1", "punch_coord_v1", "gateway_ticket_v1", "unknown_cap"},
-	}
+    req := &pb.HandshakeRequest{
+        Version:      "test-client",
+        Capabilities: []string{"udp_endpoint_report_v1", "punch_coord_v1", "gateway_ticket_v1", "unknown_cap"},
+    }
 	payload, err := proto.Marshal(req)
 	if err != nil {
 		t.Fatalf("marshal handshake request failed: %v", err)
@@ -78,12 +77,9 @@ func TestHandleHandshakePacketSuccess(t *testing.T) {
 	if resp.GetVersion() != "goversion-1.0.0" {
 		t.Fatalf("unexpected response version: %s", resp.GetVersion())
 	}
-	if resp.GetSecret() {
-		t.Fatalf("expected secret=false")
-	}
-	if len(resp.GetCapabilities()) != 3 || resp.GetCapabilities()[0] != "udp_endpoint_report_v1" || resp.GetCapabilities()[1] != "punch_coord_v1" || resp.GetCapabilities()[2] != "gateway_ticket_v1" {
-		t.Fatalf("unexpected capabilities: %v", resp.GetCapabilities())
-	}
+    if len(resp.GetCapabilities()) != 3 || resp.GetCapabilities()[0] != "udp_endpoint_report_v1" || resp.GetCapabilities()[1] != "punch_coord_v1" || resp.GetCapabilities()[2] != "gateway_ticket_v1" {
+        t.Fatalf("unexpected capabilities: %v", resp.GetCapabilities())
+    }
 }
 
 func TestHandleHandshakePacketInvalidPayload(t *testing.T) {
@@ -111,11 +107,10 @@ func TestHandleHandshakePacketInvalidPayload(t *testing.T) {
 func TestHandleHandshakePacketUnsupportedCapabilities(t *testing.T) {
 	ctrl := newTestController()
 	defer ctrl.Stop()
-	req := &pb.HandshakeRequest{
-		Version:      "test-client",
-		Secret:       false,
-		Capabilities: []string{"unknown_cap_a", "unknown_cap_b"},
-	}
+    req := &pb.HandshakeRequest{
+        Version:      "test-client",
+        Capabilities: []string{"unknown_cap_a", "unknown_cap_b"},
+    }
 	payload, err := proto.Marshal(req)
 	if err != nil {
 		t.Fatalf("marshal handshake request failed: %v", err)
