@@ -23,10 +23,10 @@ func TestHandleHandshakePacketSuccess(t *testing.T) {
 	ctrl := NewController(cfg)
 	defer ctrl.Stop()
 
-    req := &pb.HandshakeRequest{
-        Version:      "test-client",
-        Capabilities: []string{"udp_endpoint_report_v1", "punch_coord_v1", "gateway_ticket_v1", "unknown_cap"},
-    }
+	req := &pb.HandshakeRequest{
+		Version:      "test-client",
+		Capabilities: []string{"udp_endpoint_report_v1", "punch_coord_v1", "gateway_ticket_v1", "unknown_cap"},
+	}
 	payload, err := proto.Marshal(req)
 	if err != nil {
 		t.Fatalf("marshal handshake request failed: %v", err)
@@ -77,9 +77,9 @@ func TestHandleHandshakePacketSuccess(t *testing.T) {
 	if resp.GetVersion() != "goversion-1.0.0" {
 		t.Fatalf("unexpected response version: %s", resp.GetVersion())
 	}
-    if len(resp.GetCapabilities()) != 3 || resp.GetCapabilities()[0] != "udp_endpoint_report_v1" || resp.GetCapabilities()[1] != "punch_coord_v1" || resp.GetCapabilities()[2] != "gateway_ticket_v1" {
-        t.Fatalf("unexpected capabilities: %v", resp.GetCapabilities())
-    }
+	if len(resp.GetCapabilities()) != 3 || resp.GetCapabilities()[0] != "udp_endpoint_report_v1" || resp.GetCapabilities()[1] != "punch_coord_v1" || resp.GetCapabilities()[2] != "gateway_ticket_v1" {
+		t.Fatalf("unexpected capabilities: %v", resp.GetCapabilities())
+	}
 }
 
 func TestHandleHandshakePacketInvalidPayload(t *testing.T) {
@@ -107,10 +107,10 @@ func TestHandleHandshakePacketInvalidPayload(t *testing.T) {
 func TestHandleHandshakePacketUnsupportedCapabilities(t *testing.T) {
 	ctrl := newTestController()
 	defer ctrl.Stop()
-    req := &pb.HandshakeRequest{
-        Version:      "test-client",
-        Capabilities: []string{"unknown_cap_a", "unknown_cap_b"},
-    }
+	req := &pb.HandshakeRequest{
+		Version:      "test-client",
+		Capabilities: []string{"unknown_cap_a", "unknown_cap_b"},
+	}
 	payload, err := proto.Marshal(req)
 	if err != nil {
 		t.Fatalf("marshal handshake request failed: %v", err)
@@ -346,6 +346,78 @@ func TestBuildPunchStartPackets(t *testing.T) {
 	}
 }
 
+func TestHandlePunchAckAndResultInitializeSessionMaps(t *testing.T) {
+	ctrl := newTestController()
+	defer ctrl.Stop()
+
+	srcIP := util.IpToUint32(net.ParseIP("10.26.0.2"))
+	dstIP := util.IpToUint32(net.ParseIP("10.26.0.3"))
+	sessionID := uint64(4001)
+	attempt := uint32(1)
+	key := punchSessionKey(sessionID, attempt)
+	ctrl.nc.PunchSessions.Set(key, &PunchSession{
+		SessionID:      sessionID,
+		Source:         srcIP,
+		Target:         dstIP,
+		Attempt:        attempt,
+		DeadlineUnixMs: time.Now().Add(5 * time.Second).UnixMilli(),
+		State:          PunchSessionDispatch,
+		RequestedAt:    time.Now().Unix(),
+	})
+
+	ackPayload, err := proto.Marshal(&pb.PunchAck{
+		SessionId: sessionID,
+		Source:    dstIP,
+		Attempt:   attempt,
+		Accepted:  true,
+	})
+	if err != nil {
+		t.Fatalf("marshal punch ack failed: %v", err)
+	}
+	if err := ctrl.HandlePunchAckPacket(&protocol.Packet{
+		Proto:    protocol.ProtocolService,
+		AppProto: protocol.AppProtoPunchAck,
+		SrcIP:    util.Uint32ToIP(dstIP),
+		Payload:  ackPayload,
+	}); err != nil {
+		t.Fatalf("HandlePunchAckPacket failed: %v", err)
+	}
+
+	resultPayload, err := proto.Marshal(&pb.PunchResult{
+		SessionId: sessionID,
+		Source:    dstIP,
+		Target:    srcIP,
+		Attempt:   attempt,
+		Code:      pb.PunchResultCode_PunchResultSuccess,
+		Reason:    "ok",
+	})
+	if err != nil {
+		t.Fatalf("marshal punch result failed: %v", err)
+	}
+	if err := ctrl.HandlePunchResultPacket(&protocol.Packet{
+		Proto:    protocol.ProtocolService,
+		AppProto: protocol.AppProtoPunchResult,
+		SrcIP:    util.Uint32ToIP(dstIP),
+		Payload:  resultPayload,
+	}); err != nil {
+		t.Fatalf("HandlePunchResultPacket failed: %v", err)
+	}
+
+	session, ok := ctrl.nc.FindPunchSession(sessionID, attempt)
+	if !ok {
+		t.Fatalf("session not found")
+	}
+	if session.Ack == nil || session.Results == nil {
+		t.Fatalf("session maps not initialized: %+v", session)
+	}
+	if !session.Ack[dstIP] {
+		t.Fatalf("ack not recorded for %d", dstIP)
+	}
+	if session.Results[dstIP] == nil {
+		t.Fatalf("result not recorded for %d", dstIP)
+	}
+}
+
 func TestBuildPunchStartPacketsFromStatus(t *testing.T) {
 	ctrl := newTestController()
 	defer ctrl.Stop()
@@ -356,12 +428,14 @@ func TestBuildPunchStartPacketsFromStatus(t *testing.T) {
 		NatType:        pb.PunchNatType_Cone,
 		PublicIpList:   []uint32{util.IpToUint32(net.ParseIP("8.8.8.8"))},
 		PublicUdpPorts: []uint32{30001},
+		LocalUdpPorts:  []uint32{1111},
 	}
 	dstStatus := &pb.ClientStatusInfo{
 		Source:         dstReg.GetVirtualIp(),
 		NatType:        pb.PunchNatType_Cone,
 		PublicIpList:   []uint32{util.IpToUint32(net.ParseIP("9.9.9.9"))},
 		PublicUdpPorts: []uint32{30002},
+		LocalUdpPorts:  []uint32{2222},
 	}
 	srcPayload, err := proto.Marshal(srcStatus)
 	if err != nil {
@@ -388,6 +462,22 @@ func TestBuildPunchStartPacketsFromStatus(t *testing.T) {
 	}
 	if len(startPackets) != 2 {
 		t.Fatalf("expected 2 start packets, got %d", len(startPackets))
+	}
+	var start pb.PunchStart
+	if err := proto.Unmarshal(startPackets[0].Payload, &start); err != nil {
+		t.Fatalf("unmarshal punch start failed: %v", err)
+	}
+	var foundPublic, foundLocal bool
+	for _, ep := range start.GetPeerEndpoints() {
+		switch {
+		case ep.GetIp() == util.IpToUint32(net.ParseIP("9.9.9.9")) && ep.GetPort() == 30002:
+			foundPublic = true
+		case ep.GetIp() == util.IpToUint32(net.ParseIP("1.1.1.2")) && ep.GetPort() == 2222:
+			foundLocal = true
+		}
+	}
+	if !foundPublic || !foundLocal {
+		t.Fatalf("expected public and local endpoints in punch start, got %+v", start.GetPeerEndpoints())
 	}
 	next, err := ctrl.BuildPunchStartPacketsFromStatus(&protocol.Packet{
 		Proto: protocol.ProtocolService,

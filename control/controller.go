@@ -203,10 +203,10 @@ func (c *Controller) HandleHandshakePacket(reqPacket *protocol.Packet) (*protoco
 		return nil, err
 	}
 
-    rsp := &pb.HandshakeResponse{
-        Version:      "goversion-1.0.0",
-        Capabilities: negotiateHandshakeCapabilities(req.GetCapabilities()),
-    }
+	rsp := &pb.HandshakeResponse{
+		Version:      "goversion-1.0.0",
+		Capabilities: negotiateHandshakeCapabilities(req.GetCapabilities()),
+	}
 	playload, err := proto.Marshal(rsp)
 	if err != nil {
 		log.Errorf("HandshakeResponse marshal error: %v", err)
@@ -631,8 +631,8 @@ func (c *Controller) BuildPunchStartPacketsFromStatus(request *protocol.Packet) 
 					continue
 				}
 			}
-			sourceEndpoints := buildPunchEndpoints(srcClient.ClientStatus)
-			targetEndpoints := buildPunchEndpoints(targetClient.ClientStatus)
+			sourceEndpoints := buildPunchEndpoints(srcClient)
+			targetEndpoints := buildPunchEndpoints(targetClient)
 			if len(sourceEndpoints) == 0 || len(targetEndpoints) == 0 {
 				continue
 			}
@@ -848,6 +848,12 @@ func (c *Controller) HandlePunchAckPacket(request *protocol.Packet) error {
 	if ack.GetSource() != 0 && ack.GetSource() != source {
 		return fmt.Errorf("punch ack source mismatch: %d != %d", ack.GetSource(), source)
 	}
+	if session.Ack == nil {
+		session.Ack = make(map[uint32]bool)
+	}
+	if session.Results == nil {
+		session.Results = make(map[uint32]*pb.PunchResult)
+	}
 	session.Ack[source] = ack.GetAccepted()
 	pairKey := punchPairKey(session.Source, session.Target)
 	if !ack.GetAccepted() {
@@ -876,6 +882,12 @@ func (c *Controller) HandlePunchResultPacket(request *protocol.Packet) error {
 	source := util.IpToUint32(request.SrcIP)
 	if result.GetSource() != 0 && result.GetSource() != source {
 		return fmt.Errorf("punch result source mismatch: %d != %d", result.GetSource(), source)
+	}
+	if session.Ack == nil {
+		session.Ack = make(map[uint32]bool)
+	}
+	if session.Results == nil {
+		session.Results = make(map[uint32]*pb.PunchResult)
 	}
 	session.Results[source] = &result
 	pairKey := punchPairKey(session.Source, session.Target)
@@ -1001,26 +1013,40 @@ func (c *Controller) updatePunchRetryState(pairKey string, status PunchSessionSt
 	}
 }
 
-func buildPunchEndpoints(status *ClientStatusInfo) []*pb.PunchEndpoint {
-	if status == nil || len(status.PublicIPList) == 0 || len(status.PublicUDPPorts) == 0 {
+func buildPunchEndpoints(client ClientInfo) []*pb.PunchEndpoint {
+	status := client.ClientStatus
+	if status == nil {
 		return nil
 	}
-	endpoints := make([]*pb.PunchEndpoint, 0, len(status.PublicIPList)*len(status.PublicUDPPorts))
-	for _, ip := range status.PublicIPList {
+	endpoints := make([]*pb.PunchEndpoint, 0, len(status.PublicIPList)*len(status.PublicUDPPorts)+len(status.LocalUDPPorts))
+	seen := make(map[string]struct{})
+	appendEndpoint := func(ip net.IP, port uint16) {
+		if port == 0 {
+			return
+		}
 		ipv4 := ip.To4()
 		if ipv4 == nil {
-			continue
+			return
 		}
-		ipv4u := util.IpToUint32(ipv4)
+		key := ipv4.String() + ":" + strconv.Itoa(int(port))
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		endpoints = append(endpoints, &pb.PunchEndpoint{
+			Ip:   util.IpToUint32(ipv4),
+			Port: uint32(port),
+			Tcp:  false,
+		})
+	}
+	for _, ip := range status.PublicIPList {
 		for _, port := range status.PublicUDPPorts {
-			if port == 0 {
-				continue
-			}
-			endpoints = append(endpoints, &pb.PunchEndpoint{
-				Ip:   ipv4u,
-				Port: uint32(port),
-				Tcp:  false,
-			})
+			appendEndpoint(ip, port)
+		}
+	}
+	if udpAddr, ok := client.Address.(*net.UDPAddr); ok {
+		for _, port := range status.LocalUDPPorts {
+			appendEndpoint(udpAddr.IP, port)
 		}
 	}
 	return endpoints
