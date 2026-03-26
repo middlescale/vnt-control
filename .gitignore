@@ -18,6 +18,9 @@ cert-cache/
 # Logs
 *.log
 
+# Local runtime artifacts
+_runtime/
+
 # OS files
 .DS_Store
 Thumbs.db
