@@ -6,9 +6,9 @@ import (
 	"encoding/json"
 	"net"
 	"os"
+	"sdl-control/control"
 	"strings"
 	"time"
-	"vnt-control/control"
 
 	log "github.com/sirupsen/logrus"
 )

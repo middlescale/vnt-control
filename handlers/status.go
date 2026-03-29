@@ -13,7 +13,7 @@ type Status struct {
 func StatusHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(Status{
-		Service: "vnt-control",
+		Service: "sdl-control",
 		Status:  "ok",
 	})
 }

@@ -1,5 +1,5 @@
-APP_NAME=vnt-control
-ADMIN_APP_NAME=vnt-admin
+APP_NAME=sdl-control
+ADMIN_APP_NAME=sdl-admin
 GO_FILES=$(shell find . -name '*.go' -not -path "./vendor/*")
 PROTO_DIR=proto
 PROTO_FILES=$(wildcard $(PROTO_DIR)/*.proto)
@@ -11,7 +11,7 @@ all: build
 
 build:
 	go build -o $(APP_NAME) main.go
-	go build -o $(ADMIN_APP_NAME) ./cmd/vnt-admin
+	go build -o $(ADMIN_APP_NAME) ./cmd/sdl-admin
 
 run:
 	./$(APP_NAME)

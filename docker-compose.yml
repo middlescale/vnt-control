@@ -1,12 +1,12 @@
 version: '3.8'
 
 services:
-  vnt-control:
+  sdl-control:
     build:
       context: .
       dockerfile: Dockerfile.server
-    image: ghcr.io/middlescale/vnt-control
-    container_name: vnt-control
+    image: ghcr.io/middlescale/sdl-control
+    container_name: sdl-control
     # QUIC typically uses UDP; expose UDP port here if you need host access.
     ports:
       - "4433:4433/udp"
@@ -18,7 +18,7 @@ services:
       - TLS_CERT=/certs/server.crt
       - TLS_KEY=/certs/server.key
       - CONFIG_PATH=/workspace/config/config.json
-    command: ["/usr/local/bin/vnt-control"]
+    command: ["/usr/local/bin/sdl-control"]
 
   # Optional: build your rust client here if you have its Dockerfile in a sibling folder.
   rust-client:
@@ -37,7 +37,7 @@ services:
     image: alpine:3.18
     container_name: vnt-tester
     depends_on:
-      - vnt-control
+      - sdl-control
       - rust-client
     volumes:
       - ./test/certs:/certs:ro

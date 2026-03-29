@@ -6,10 +6,10 @@ import (
 	"encoding/binary"
 	"io"
 	"net"
+	"sdl-control/control"
+	"sdl-control/protocol"
 	"sync"
 	"time"
-	"vnt-control/control"
-	"vnt-control/protocol"
 
 	"github.com/quic-go/quic-go"
 	log "github.com/sirupsen/logrus"

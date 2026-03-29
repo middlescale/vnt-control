@@ -34,14 +34,14 @@ type adminResponse struct {
 }
 
 type gatewayInfo struct {
-	GatewayID          string   `json:"gateway_id"`
-	Endpoint           string   `json:"endpoint"`
-	Approved           bool     `json:"approved"`
-	Default            bool     `json:"default"`
-	Reported           bool     `json:"reported"`
-	Alive              bool     `json:"alive"`
-	Capabilities       []string `json:"capabilities,omitempty"`
-	UpdatedAtUnix      int64    `json:"updated_at_unix,omitempty"`
+	GatewayID     string   `json:"gateway_id"`
+	Endpoint      string   `json:"endpoint"`
+	Approved      bool     `json:"approved"`
+	Default       bool     `json:"default"`
+	Reported      bool     `json:"reported"`
+	Alive         bool     `json:"alive"`
+	Capabilities  []string `json:"capabilities,omitempty"`
+	UpdatedAtUnix int64    `json:"updated_at_unix,omitempty"`
 }
 
 func main() {
@@ -137,10 +137,10 @@ func call(socket string, req adminRequest) adminResponse {
 
 func fatalUsage() {
 	fmt.Fprintln(os.Stderr, "usage:")
-	fmt.Fprintln(os.Stderr, "  vnt-admin --createUser user1 [--domain ms.net]")
-	fmt.Fprintln(os.Stderr, "  vnt-admin --issueDeviceTicket --userId u-1 --group g1 [--ttlSeconds 600]")
-	fmt.Fprintln(os.Stderr, "  vnt-admin --list_gateway")
-	fmt.Fprintln(os.Stderr, "  vnt-admin --register_gateway --gateway_id gw-1")
+	fmt.Fprintln(os.Stderr, "  sdl-admin --createUser user1 [--domain ms.net]")
+	fmt.Fprintln(os.Stderr, "  sdl-admin --issueDeviceTicket --userId u-1 --group g1 [--ttlSeconds 600]")
+	fmt.Fprintln(os.Stderr, "  sdl-admin --list_gateway")
+	fmt.Fprintln(os.Stderr, "  sdl-admin --register_gateway --gateway_id gw-1")
 	os.Exit(2)
 }
 
@@ -157,8 +157,8 @@ func splitCSV(v string) []string {
 }
 
 func defaultSocketPath() string {
-	if v := os.Getenv("VNT_ADMIN_SOCKET"); strings.TrimSpace(v) != "" {
+	if v := os.Getenv("SDL_ADMIN_SOCKET"); strings.TrimSpace(v) != "" {
 		return v
 	}
-	return "/tmp/vnt-control-admin.sock"
+	return "/tmp/sdl-control-admin.sock"
 }

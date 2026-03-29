@@ -1,5 +1,5 @@
 # Go build
-vnt-control
+sdl-control
 *.exe
 *.out
 *.test

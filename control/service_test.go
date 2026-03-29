@@ -3,13 +3,13 @@ package control
 import (
 	"fmt"
 	"net"
+	"sdl-control/config"
+	"sdl-control/protocol"
+	"sdl-control/protocol/pb"
+	"sdl-control/util"
 	"strings"
 	"testing"
 	"time"
-	"vnt-control/config"
-	"vnt-control/protocol"
-	"vnt-control/protocol/pb"
-	"vnt-control/util"
 
 	"google.golang.org/protobuf/proto"
 )

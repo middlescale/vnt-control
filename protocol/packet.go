@@ -96,28 +96,28 @@ func (p Protocol) ToUint8() uint8 {
 type AppProtocol uint8
 
 const (
-	AppProtoRegistrationRequest     AppProtocol = 1
-	AppProtoRegistrationResponse    AppProtocol = 2
-	AppProtoPullDeviceList          AppProtocol = 3
-	AppProtoPushDeviceList          AppProtocol = 4
-	AppProtoHandshakeRequest        AppProtocol = 5
-	AppProtoHandshakeResponse       AppProtocol = 6
-	AppProtoClientStatusInfo        AppProtocol = 9
-	AppProtoPunchRequest            AppProtocol = 10
-	AppProtoPunchAck                AppProtocol = 11
-	AppProtoPunchStart              AppProtocol = 12
-	AppProtoPunchResult             AppProtocol = 13
-	AppProtoDeviceAuthRequest       AppProtocol = 15
-	AppProtoDeviceAuthAck           AppProtocol = 16
-	AppProtoGatewayReportRequest    AppProtocol = 17
-	AppProtoGatewayReportAck        AppProtocol = 18
-	AppProtoGatewayConnectHello     AppProtocol = 19
-	AppProtoGatewayConnectAck       AppProtocol = 20
-	AppProtoRefreshGatewayGrantRequest AppProtocol = 21
+	AppProtoRegistrationRequest         AppProtocol = 1
+	AppProtoRegistrationResponse        AppProtocol = 2
+	AppProtoPullDeviceList              AppProtocol = 3
+	AppProtoPushDeviceList              AppProtocol = 4
+	AppProtoHandshakeRequest            AppProtocol = 5
+	AppProtoHandshakeResponse           AppProtocol = 6
+	AppProtoClientStatusInfo            AppProtocol = 9
+	AppProtoPunchRequest                AppProtocol = 10
+	AppProtoPunchAck                    AppProtocol = 11
+	AppProtoPunchStart                  AppProtocol = 12
+	AppProtoPunchResult                 AppProtocol = 13
+	AppProtoDeviceAuthRequest           AppProtocol = 15
+	AppProtoDeviceAuthAck               AppProtocol = 16
+	AppProtoGatewayReportRequest        AppProtocol = 17
+	AppProtoGatewayReportAck            AppProtocol = 18
+	AppProtoGatewayConnectHello         AppProtocol = 19
+	AppProtoGatewayConnectAck           AppProtocol = 20
+	AppProtoRefreshGatewayGrantRequest  AppProtocol = 21
 	AppProtoRefreshGatewayGrantResponse AppProtocol = 22
-	AppProtoDeviceAuthChallenge     AppProtocol = 23
-	AppProtoDeviceAuthProof         AppProtocol = 24
-	AppProtoUnknown                 AppProtocol = 255
+	AppProtoDeviceAuthChallenge         AppProtocol = 23
+	AppProtoDeviceAuthProof             AppProtocol = 24
+	AppProtoUnknown                     AppProtocol = 255
 )
 
 func AppProtocolFromUint8(val uint8) AppProtocol {

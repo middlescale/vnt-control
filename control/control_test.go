@@ -2,10 +2,10 @@ package control
 
 import (
 	"net"
+	"sdl-control/protocol"
+	"sdl-control/protocol/pb"
+	"sdl-control/util"
 	"testing"
-	"vnt-control/protocol"
-	"vnt-control/protocol/pb"
-	"vnt-control/util"
 )
 
 func TestHandleControlPacketPingPong(t *testing.T) {

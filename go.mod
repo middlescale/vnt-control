@@ -1,4 +1,4 @@
-module vnt-control
+module sdl-control
 
 go 1.23.0
 

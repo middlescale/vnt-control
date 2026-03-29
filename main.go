@@ -6,12 +6,12 @@ import (
 	"crypto/x509"
 	"os"
 	"os/signal"
+	"sdl-control/config"
+	"sdl-control/control"
+	"sdl-control/handlers"
 	"strconv"
 	"strings"
 	"syscall"
-	"vnt-control/config"
-	"vnt-control/control"
-	"vnt-control/handlers"
 
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/acme/autocert"
@@ -68,7 +68,7 @@ func main() {
 		tlsConfig = &tls.Config{
 			Certificates: []tls.Certificate{cert},
 			MinVersion:   tls.VersionTLS13,
-			NextProtos:   []string{"vnt-control"},
+			NextProtos:   []string{"sdl-control"},
 		}
 	} else {
 		domain := firstNonEmpty(os.Getenv("AUTOCERT_DOMAIN"), cfg.AutoCertDomain, cfg.EffectiveDefaultDomain())
@@ -88,7 +88,7 @@ func main() {
 
 		tlsConfig = m.TLSConfig()
 		tlsConfig.MinVersion = tls.VersionTLS13
-		tlsConfig.NextProtos = []string{"vnt-control"}
+		tlsConfig.NextProtos = []string{"sdl-control"}
 	}
 	if clientCAPath != "" {
 		clientCA, err := os.ReadFile(clientCAPath)
@@ -115,7 +115,7 @@ func main() {
 
 	ctrl := control.NewController(cfg)
 
-	adminSocket := firstNonEmpty(os.Getenv("ADMIN_SOCKET_PATH"), "/tmp/vnt-control-admin.sock")
+	adminSocket := firstNonEmpty(os.Getenv("ADMIN_SOCKET_PATH"), "/tmp/sdl-control-admin.sock")
 	if err := handlers.StartAdminUnixServer(ctx, ctrl, adminSocket); err != nil {
 		log.Fatalf("start admin unix socket failed: %v", err)
 	}
