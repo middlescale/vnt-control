@@ -59,6 +59,8 @@
     }
   },
   "listen_addr": ":4433",
+  "autocert_http_addr": ":80",
+  "autocert_email": "admin@example.com",
   "cert_cache_dir": "./cert-cache"
 }
 ```
@@ -66,6 +68,8 @@
 可选字段：
 
 - `autocert_domain`：启用 `autocert` 时用于签发证书的域名。
+- `autocert_http_addr`：内置 ACME `HTTP-01` challenge server 监听地址，默认 `:80`。
+- `autocert_email`：ACME 账户联系邮箱，可选但推荐配置。
 - `default_domain`：创建用户时未指定域名时使用，默认建议 `ms.net`。
 - `default_gateway`：无动态上报 gateway 时用于下发的默认网关地址，默认 `gateway.middlescale.net:433`。
 - `gateway_ticket_secret`：gateway 访问票据的 HMAC 密钥，默认 `dev-gateway-ticket-secret-change-me`（生产请替换）。
@@ -80,6 +84,8 @@
 - `LISTEN_ADDR`
 - `TLS_CERT` / `TLS_KEY`
 - `AUTOCERT_DOMAIN`
+- `AUTOCERT_HTTP_ADDR`
+- `AUTOCERT_EMAIL`
 - `CERT_CACHE_DIR`
 - `TLS_CLIENT_CA`
 - `TLS_REQUIRE_CLIENT_CERT`
@@ -94,6 +100,32 @@ make build
 ```
 
 编译产物为当前目录下的 `./sdl-control`。
+
+### 内置 ACME / 自动续期
+
+当未提供 `TLS_CERT` / `TLS_KEY` 或 `tls_cert_path` / `tls_key_path` 时，`sdl-control` 会自动进入内置 ACME 模式：
+
+- QUIC 服务继续监听 `listen_addr`
+- 同时额外启动一个 `HTTP-01` challenge server 在 `autocert_http_addr`（默认 `:80`）
+- 证书与 ACME 账户缓存保存在 `cert_cache_dir`
+
+最小要求：
+
+- `autocert_domain` 指向当前 control 公网域名
+- 该域名的 80 端口能到达 `sdl-control`
+- `listen_addr` 对应的 QUIC 端口能被客户端访问
+
+示例：
+
+```bash
+AUTOCERT_DOMAIN=control.example.com \
+AUTOCERT_HTTP_ADDR=:80 \
+AUTOCERT_EMAIL=admin@example.com \
+LISTEN_ADDR=:4433 \
+./sdl-control
+```
+
+如果你已经有现成证书，仍然可以继续走静态文件模式；只有在未提供证书文件时，才会切到内置 ACME。
 
 常用命令：
 

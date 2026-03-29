@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"net/http"
 	"os"
 	"os/signal"
 	"sdl-control/config"
@@ -59,6 +60,8 @@ func main() {
 	}
 
 	var tlsConfig *tls.Config
+	var autocertHTTPAddr string
+	var autocertHTTPHandler http.Handler
 	if tlsCertPath != "" && tlsKeyPath != "" {
 		log.Infof("Loading TLS cert from env paths: %s, %s", tlsCertPath, tlsKeyPath)
 		cert, err := tls.LoadX509KeyPair(tlsCertPath, tlsKeyPath)
@@ -75,6 +78,10 @@ func main() {
 		if domain == "" {
 			log.Fatal("AUTOCERT_DOMAIN/domain is required when TLS cert/key are not provided")
 		}
+		autocertHTTPAddr = firstNonEmpty(os.Getenv("AUTOCERT_HTTP_ADDR"), cfg.AutoCertHTTPAddr)
+		if autocertHTTPAddr == "" {
+			autocertHTTPAddr = ":80"
+		}
 		cacheDir := firstNonEmpty(os.Getenv("CERT_CACHE_DIR"), cfg.CertCacheDir)
 		if cacheDir == "" {
 			cacheDir = "./cert-cache"
@@ -84,11 +91,19 @@ func main() {
 			Prompt:     autocert.AcceptTOS,
 			HostPolicy: autocert.HostWhitelist(domain),
 			Cache:      autocert.DirCache(cacheDir),
+			Email:      firstNonEmpty(os.Getenv("AUTOCERT_EMAIL"), cfg.AutoCertEmail),
 		}
 
 		tlsConfig = m.TLSConfig()
 		tlsConfig.MinVersion = tls.VersionTLS13
 		tlsConfig.NextProtos = []string{"sdl-control"}
+		autocertHTTPHandler = m.HTTPHandler(nil)
+		log.Infof(
+			"ACME enabled for domain=%s, http_challenge_addr=%s, cache_dir=%s",
+			domain,
+			autocertHTTPAddr,
+			cacheDir,
+		)
 	}
 	if clientCAPath != "" {
 		clientCA, err := os.ReadFile(clientCAPath)
@@ -118,6 +133,11 @@ func main() {
 	adminSocket := firstNonEmpty(os.Getenv("ADMIN_SOCKET_PATH"), "/tmp/sdl-control-admin.sock")
 	if err := handlers.StartAdminUnixServer(ctx, ctrl, adminSocket); err != nil {
 		log.Fatalf("start admin unix socket failed: %v", err)
+	}
+	if autocertHTTPHandler != nil {
+		if err := handlers.StartHTTPServer(ctx, autocertHTTPAddr, autocertHTTPHandler); err != nil {
+			log.Fatalf("start autocert http challenge server failed: %v", err)
+		}
 	}
 
 	go func() {

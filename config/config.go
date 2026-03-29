@@ -26,6 +26,8 @@ type Config struct {
 	GatewayTicketPrivateKeyPath string                  `json:"gateway_ticket_private_key_path"`
 	ListenAddr                  string                  `json:"listen_addr"`
 	AutoCertDomain              string                  `json:"autocert_domain"`
+	AutoCertHTTPAddr            string                  `json:"autocert_http_addr"`
+	AutoCertEmail               string                  `json:"autocert_email"`
 	CertCacheDir                string                  `json:"cert_cache_dir"`
 	TLSCertPath                 string                  `json:"tls_cert_path"`
 	TLSKeyPath                  string                  `json:"tls_key_path"`
@@ -70,6 +72,9 @@ func (c *Config) Validate() error {
 	}
 	if strings.TrimSpace(c.GatewayTicketKeyID) == "" {
 		c.GatewayTicketKeyID = "gateway-ticket-v1"
+	}
+	if strings.TrimSpace(c.AutoCertHTTPAddr) == "" {
+		c.AutoCertHTTPAddr = ":80"
 	}
 	// 域名校验（简单正则，支持主流域名）
 	domainRe := regexp.MustCompile(`^(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}$`)
