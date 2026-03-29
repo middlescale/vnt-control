@@ -2,12 +2,14 @@
 
 # Build stage
 FROM golang:1.23-alpine AS builder
+ARG TARGETOS=linux
+ARG TARGETARCH=amd64
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-# Build static-like binary (CGO disabled) for linux/amd64
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags='-s -w' -o /out/sdl-control ./
+# Build static-like binary for the requested target platform.
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -ldflags='-s -w' -o /out/sdl-control ./
 
 # Final stage
 FROM alpine:3.18
@@ -16,6 +18,7 @@ COPY --from=builder /out/sdl-control /usr/local/bin/sdl-control
 # Optional directory for autocert cache
 RUN mkdir -p /var/lib/sdl-control && chown 1000:1000 /var/lib/sdl-control || true
 
+EXPOSE 80/tcp
 EXPOSE 4433/udp
 
 USER 1000

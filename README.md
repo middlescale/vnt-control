@@ -170,6 +170,15 @@ Gateway 注册后，control 会在客户端注册响应 `RegistrationResponse.ga
 go test ./...
 ```
 
+## 服务端镜像发布
+
+仓库内置了 `release-image` workflow：
+
+- tag push：发布 `ghcr.io/<owner>/sdl-control:<tag>`
+- `workflow_dispatch`：可指定 `source_ref` 与 `release_tag`
+
+这条 workflow 设计为给 `sdl-integration` 的 release gate 和 `sdl-deploy` 消费。
+
 ## 迁移方向（简要）
 
 1. 继续补齐与 `vnts` 对齐的控制面协议行为（认证、注册、状态同步）。
