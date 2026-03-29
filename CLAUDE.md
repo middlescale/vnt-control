@@ -9,7 +9,7 @@ The sdl-control project is a Go reimplementation of the control plane for the VN
 ### Control Plane vs Data Plane Separation
 - **Control Plane** (`sdl-control`): Handles authentication, registration, session management, and status synchronization
 - **Data Plane**: Independent gateway clusters responsible for packet forwarding and relaying
-- **Client** (`vnt`): Communicates with control plane via QUIC protocol
+- **Client** (`sdl`): Communicates with control plane via QUIC protocol
 
 ### Core Components
 - `main.go`: Service startup entry point, handles configuration loading, TLS initialization, and QUIC server startup

@@ -13,11 +13,11 @@
 - `gateway` 集群（Data Plane）：
   - 数据包转发与中继
   - 横向扩展与高可用
-- `vnt` 客户端：
+- `sdl` 客户端：
   - 通过 QUIC 与控制面交互
   - 按控制面下发信息选择/切换数据路径
 
-> 过渡说明：当前仓库、二进制和环境变量仍沿用 `vnt*` 命名；第一阶段先做品牌与文档迁移，内部兼容面暂不深改。
+> 过渡说明：仓库、二进制与主要运行时命名已经切到 `sdl*`；仍有少量内部实现/历史术语保留旧命名，后续会继续收口。
 
 ## 在线状态语义（当前实现）
 
@@ -126,7 +126,7 @@ make proto   # 重新生成 proto Go 代码（需安装 protoc 与插件）
 
 Gateway 注册后，control 会在客户端注册响应 `RegistrationResponse.gateway_access_grant` 下发可用 gateway 信息（endpoint/public_key/capabilities）与短期 ticket。ticket 由 `gateway_ticket_secret` 进行 HMAC 签名，绑定 `virtual_ip + session_id + expire + nonce`。除配置中的 `default_gateway` 外，其他 gateway 需先经 `sdl-admin --register_gateway --gateway_id <id>` 批准后，其 `GatewayReportRequest` 才会被接受。`sdl-admin --list_gateway` 可查看缺省网关、待批准上报与已批准网关状态（含 `alive` 保活状态）。control 对已批准网关采用租约保活（90 秒），超时未上报的网关不会继续被下发给客户端。
 
-设备认证（auth device）由 `vnt-cli` 发起：客户端输入 `user_id/group/ticket` 发送到 `sdl-control`，认证成功后设备才可注册入网。
+设备认证（auth device）由 `sdl auth` 发起：客户端输入 `user_id/group/ticket` 发送到 `sdl-control`，认证成功后设备才可注册入网。
 
 可选参数：
 
