@@ -15,8 +15,14 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+type framedSession interface {
+	io.Reader
+	io.Writer
+	io.Closer
+}
+
 type sessionStream struct {
-	stream *quic.Stream
+	writer io.Writer
 	mu     sync.Mutex
 }
 
@@ -33,14 +39,14 @@ func newStreamHub() *streamHub {
 	}
 }
 
-func (h *streamHub) register(remoteAddr net.Addr, virtualIP uint32, stream *quic.Stream) {
+func (h *streamHub) register(remoteAddr net.Addr, virtualIP uint32, writer io.Writer) {
 	if remoteAddr == nil || virtualIP == 0 {
 		return
 	}
 	addr := remoteAddr.String()
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.byIP[virtualIP] = &sessionStream{stream: stream}
+	h.byIP[virtualIP] = &sessionStream{writer: writer}
 	ips := h.ipsByAddr[addr]
 	if ips == nil {
 		ips = make(map[uint32]struct{})
@@ -73,7 +79,7 @@ func (h *streamHub) writeToIP(virtualIP uint32, payload []byte) bool {
 	}
 	target.mu.Lock()
 	defer target.mu.Unlock()
-	err := writeFramedStream(target.stream, payload)
+	err := writeFramedWriter(target.writer, payload)
 	if err != nil {
 		return false
 	}
@@ -106,20 +112,25 @@ func StartQuicServer(ctx context.Context, ctrl *control.Controller, addr string,
 }
 
 func handleSession(ctrl *control.Controller, conn *quic.Conn) {
-	ctrl.TouchCipherSession(conn.RemoteAddr())
-	defer quicStreams.unregisterRemote(conn.RemoteAddr())
-	defer ctrl.LeaveByRemoteAddr(conn.RemoteAddr())
 	stream, err := conn.AcceptStream(context.Background())
 	if err != nil {
 		log.Printf("Stream error: %v", err)
 		return
 	}
-	defer stream.Close()
+	defer conn.CloseWithError(0, "")
+	serveControlSession(ctrl, conn.RemoteAddr(), stream)
+}
+
+func serveControlSession(ctrl *control.Controller, remoteAddr net.Addr, session framedSession) {
+	ctrl.TouchCipherSession(remoteAddr)
+	defer quicStreams.unregisterRemote(remoteAddr)
+	defer ctrl.LeaveByRemoteAddr(remoteAddr)
+	defer session.Close()
 	buf := make([]byte, 4096)
 	frameBuf := make([]byte, 0, 8192)
 	lastSweepMs := int64(0)
 	for {
-		n, err := stream.Read(buf)
+		n, err := session.Read(buf)
 		if err != nil && !(err == io.EOF && n > 0) {
 			log.Printf("Read error: %v", err)
 			break
@@ -165,7 +176,7 @@ func handleSession(ctrl *control.Controller, conn *quic.Conn) {
 						continue
 					}
 				case protocol.AppProtoRegistrationRequest:
-					respPacket, virtualIP, err = ctrl.HandleRegistrationPacketWithVirtualIP(packet, conn.RemoteAddr())
+					respPacket, virtualIP, err = ctrl.HandleRegistrationPacketWithVirtualIP(packet, remoteAddr)
 					if err != nil {
 						log.Errorf("HandleRegistrationPacket error: %v", err)
 						errPacket, packetErr := ctrl.BuildRegistrationErrorPacket(packet, err)
@@ -173,12 +184,12 @@ func handleSession(ctrl *control.Controller, conn *quic.Conn) {
 							log.Errorf("BuildRegistrationErrorPacket error: %v", packetErr)
 							continue
 						}
-						if writeErr := writeFramedStream(stream, errPacket.Marshal()); writeErr != nil {
+						if writeErr := writeFramedWriter(session, errPacket.Marshal()); writeErr != nil {
 							log.Errorf("send registration error packet failed: %v", writeErr)
 						}
 						continue
 					}
-					quicStreams.register(conn.RemoteAddr(), virtualIP, stream)
+					quicStreams.register(remoteAddr, virtualIP, session)
 				case protocol.AppProtoPullDeviceList:
 					respPacket, err = ctrl.HandlePullDeviceListPacket(packet)
 					if err != nil {
@@ -273,11 +284,11 @@ func handleSession(ctrl *control.Controller, conn *quic.Conn) {
 				if respPacket == nil {
 					continue
 				}
-				if err := writeFramedStream(stream, respPacket.Marshal()); err != nil {
+				if err := writeFramedWriter(session, respPacket.Marshal()); err != nil {
 					log.Errorf("Write ServiceResponse error: %v", err)
 				}
 			} else if packet.Proto == protocol.ProtocolControl {
-				respPacket, err := ctrl.HandleControlPacket(packet, conn.RemoteAddr())
+				respPacket, err := ctrl.HandleControlPacket(packet, remoteAddr)
 				if err != nil {
 					log.Errorf("HandleControlPacket error: %v", err)
 					continue
@@ -285,7 +296,7 @@ func handleSession(ctrl *control.Controller, conn *quic.Conn) {
 				if respPacket == nil {
 					continue
 				}
-				if err := writeFramedStream(stream, respPacket.Marshal()); err != nil {
+				if err := writeFramedWriter(session, respPacket.Marshal()); err != nil {
 					log.Errorf("Write ControlResponse error: %v", err)
 				}
 			} else {
@@ -300,12 +311,16 @@ func handleSession(ctrl *control.Controller, conn *quic.Conn) {
 }
 
 func writeFramedStream(stream *quic.Stream, payload []byte) error {
+	return writeFramedWriter(stream, payload)
+}
+
+func writeFramedWriter(writer io.Writer, payload []byte) error {
 	header := make([]byte, 4)
 	binary.BigEndian.PutUint32(header, uint32(len(payload)))
-	if _, err := (*stream).Write(header); err != nil {
+	if _, err := writer.Write(header); err != nil {
 		return err
 	}
-	_, err := (*stream).Write(payload)
+	_, err := writer.Write(payload)
 	return err
 }
 

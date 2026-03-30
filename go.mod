@@ -10,8 +10,10 @@ require (
 	golang.org/x/crypto v0.41.0
 )
 
+require github.com/quic-go/qpack v0.5.1 // indirect
+
 require (
-	github.com/sirupsen/logrus v1.9.3 // indirect
+	github.com/sirupsen/logrus v1.9.3
 	go.uber.org/mock v0.5.0 // indirect
 	golang.org/x/mod v0.26.0 // indirect
 	golang.org/x/net v0.42.0 // indirect

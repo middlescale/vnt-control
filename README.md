@@ -1,6 +1,6 @@
 # sdl-control
 
-`sdl-control` 是 `vnts` 的 Go 重写控制面项目，目标是将控制面与网关转发面解耦：客户端通过 QUIC 与控制服务通信完成认证与状态同步，数据转发由独立 gateway 集群负责。
+`sdl-control` 是 `vnts` 的 Go 重写控制面项目，目标是将控制面与网关转发面解耦：客户端和 gateway 通过 HTTP/3 `/control` 与控制服务通信完成认证与状态同步，数据转发由独立 gateway 集群负责。
 
 从产品语义上看，这个项目更贴近 **SDL (Software Defined LAN)**：通过控制平面把分散在 WAN / Internet 上的节点组织成一个 overlay LAN，而不是传统 SD-WAN 的选路优化产品。
 
@@ -14,7 +14,7 @@
   - 数据包转发与中继
   - 横向扩展与高可用
 - `sdl` 客户端：
-  - 通过 QUIC 与控制面交互
+  - 通过 HTTP/3 `/control` 与控制面交互
   - 按控制面下发信息选择/切换数据路径
 
 > 过渡说明：仓库、二进制与主要运行时命名已经切到 `sdl*`；仍有少量内部实现/历史术语保留旧命名，后续会继续收口。
@@ -29,9 +29,9 @@
 
 ## 目录结构
 
-- `main.go`：服务启动入口，加载配置、初始化 TLS、启动 QUIC 服务。
+- `main.go`：服务启动入口，加载配置、初始化 TLS、启动 HTTP/3 服务。
 - `config/`：配置定义与默认配置文件。
-- `handlers/`：QUIC / WebSocket / 状态接口处理。
+- `handlers/`：HTTP/3 / WebSocket / 状态接口处理。
 - `control/`：握手、注册、虚拟 IP 分配等核心控制逻辑。
 - `protocol/`、`proto/`：协议定义与 protobuf 生成代码。
 
@@ -105,7 +105,7 @@ make build
 
 当未提供 `TLS_CERT` / `TLS_KEY` 或 `tls_cert_path` / `tls_key_path` 时，`sdl-control` 会自动进入内置 ACME 模式：
 
-- QUIC 服务继续监听 `listen_addr`
+- HTTP/3 控制面继续监听 `listen_addr`
 - 同时额外启动一个 `HTTP-01` challenge server 在 `autocert_http_addr`（默认 `:80`）
 - 证书与 ACME 账户缓存保存在 `cert_cache_dir`
 
@@ -113,7 +113,7 @@ make build
 
 - `autocert_domain` 指向当前 control 公网域名
 - 该域名的 80 端口能到达 `sdl-control`
-- `listen_addr` 对应的 QUIC 端口能被客户端访问
+- `listen_addr` 对应的 HTTP/3 UDP 端口能被客户端访问
 
 示例：
 
@@ -182,5 +182,5 @@ go test ./...
 ## 迁移方向（简要）
 
 1. 继续补齐与 `vnts` 对齐的控制面协议行为（认证、注册、状态同步）。
-2. 以 QUIC + 证书校验作为控制面主链路。
+2. 以 HTTP/3 `/control` + 证书校验作为控制面主链路。
 3. 将数据转发能力下沉到可集群化的 gateway 服务，实现控制面与转发面独立扩缩容。

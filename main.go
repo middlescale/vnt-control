@@ -71,7 +71,6 @@ func main() {
 		tlsConfig = &tls.Config{
 			Certificates: []tls.Certificate{cert},
 			MinVersion:   tls.VersionTLS13,
-			NextProtos:   []string{"sdl-control"},
 		}
 	} else {
 		domain := firstNonEmpty(os.Getenv("AUTOCERT_DOMAIN"), cfg.AutoCertDomain, cfg.EffectiveDefaultDomain())
@@ -96,7 +95,6 @@ func main() {
 
 		tlsConfig = m.TLSConfig()
 		tlsConfig.MinVersion = tls.VersionTLS13
-		tlsConfig.NextProtos = []string{"sdl-control"}
 		autocertHTTPHandler = m.HTTPHandler(nil)
 		log.Infof(
 			"ACME enabled for domain=%s, http_challenge_addr=%s, cache_dir=%s",
@@ -146,7 +144,7 @@ func main() {
 		ctrl.Stop()
 	}()
 
-	handlers.StartQuicServer(ctx, ctrl, listenAddr, tlsConfig)
+	handlers.StartHTTP3Server(ctx, ctrl, listenAddr, tlsConfig)
 }
 
 func firstNonEmpty(values ...string) string {
