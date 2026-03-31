@@ -26,6 +26,7 @@ import (
 type Controller struct {
 	nc  NetworkControl
 	um  *UserManager
+	gs  *JSONGatewayStore
 	cfg *config.Config
 	mu  sync.Mutex
 
@@ -118,6 +119,7 @@ func NewController(cfg *config.Config) (*Controller, error) {
 		return nil, err
 	}
 	um := newUserManagerFromStore()
+	gatewayAllow, gatewayStore := newGatewayApprovalStateFromStore()
 	return &Controller{
 		nc: NetworkControl{
 			VirtualNetwork:    *NewExpireMap[string, *NetworkInfo](7 * 24 * time.Hour),
@@ -128,10 +130,11 @@ func NewController(cfg *config.Config) (*Controller, error) {
 			PunchPairRetry:    *NewExpireMap[string, PunchRetryState](30 * time.Minute),
 		},
 		um:             um,
+		gs:             gatewayStore,
 		cfg:            cfg,
 		authChallenges: make(map[string]deviceAuthChallengeState),
 		gatewayNodes:   make(map[string]GatewayNodeInfo),
-		gatewayAllow:   make(map[string]string),
+		gatewayAllow:   gatewayAllow,
 		gatewaySeen:    make(map[string]GatewayNodeInfo),
 		gatewayNonce:   make(map[string]map[string]int64),
 	}, nil
@@ -148,6 +151,49 @@ func newUserManagerFromStore() *UserManager {
 		return NewUserManager()
 	}
 	return um
+}
+
+func newGatewayApprovalStateFromStore() (map[string]string, *JSONGatewayStore) {
+	path := os.Getenv("GATEWAY_STORE_JSON_PATH")
+	if path == "" {
+		path = "./data/gateways.json"
+	}
+	store := NewJSONGatewayStore(path)
+	snapshot, err := store.Load()
+	if err != nil {
+		log.Warnf("load gateway approval store failed (%s): %v; fallback to memory", path, err)
+		return map[string]string{}, store
+	}
+	approved := make(map[string]string, len(snapshot.Approved))
+	for gatewayID, endpoint := range snapshot.Approved {
+		gatewayID = strings.TrimSpace(gatewayID)
+		endpoint = strings.TrimSpace(endpoint)
+		if gatewayID == "" || endpoint == "" {
+			continue
+		}
+		approved[gatewayID] = endpoint
+	}
+	return approved, store
+}
+
+func (c *Controller) persistGatewayApprovalLocked() {
+	if c.gs == nil {
+		return
+	}
+	snapshot := GatewayStoreSnapshot{
+		Approved: make(map[string]string, len(c.gatewayAllow)),
+	}
+	for gatewayID, endpoint := range c.gatewayAllow {
+		gatewayID = strings.TrimSpace(gatewayID)
+		endpoint = strings.TrimSpace(endpoint)
+		if gatewayID == "" || endpoint == "" {
+			continue
+		}
+		snapshot.Approved[gatewayID] = endpoint
+	}
+	if err := c.gs.Save(snapshot); err != nil {
+		log.Warnf("persist gateway approval store failed: %v", err)
+	}
 }
 
 func (c *Controller) Stop() {
@@ -1227,6 +1273,7 @@ func (c *Controller) buildGatewayReportAck(packet *protocol.Packet, ack *pb.Gate
 func (c *Controller) ApproveGatewayNode(gatewayID, endpoint string) {
 	c.gatewayMu.Lock()
 	c.gatewayAllow[gatewayID] = endpoint
+	c.persistGatewayApprovalLocked()
 	c.gatewayMu.Unlock()
 }
 
@@ -1249,6 +1296,7 @@ func (c *Controller) ApproveGatewayNodeByID(gatewayID string) error {
 		return fmt.Errorf("gateway %s has no pending report", gatewayID)
 	}
 	c.gatewayAllow[gatewayID] = seen.Endpoint
+	c.persistGatewayApprovalLocked()
 	return nil
 }
 

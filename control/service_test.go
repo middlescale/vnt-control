@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"net"
+	"path/filepath"
 	"sdl-control/config"
 	"sdl-control/protocol"
 	"sdl-control/protocol/pb"
@@ -1052,6 +1053,33 @@ func TestGatewayReportAllowsConfiguredDefaultGateway(t *testing.T) {
 	}
 	if !ack.GetOk() {
 		t.Fatalf("expected default gateway auto-allowed, ack=%+v", ack)
+	}
+}
+
+func TestGatewayApprovalPersistsAcrossControllerRestart(t *testing.T) {
+	t.Setenv("GATEWAY_STORE_JSON_PATH", filepath.Join(t.TempDir(), "gateways.json"))
+	ctrl := newTestController(t)
+	report := newSignedGatewayReport(t, testGatewayTicketSecret, "gw-persist", "127.0.0.1:51821", []string{"udp_blind_relay_v1"}, time.Now(), randomGatewayNonce(t))
+	resp, err := ctrl.HandleGatewayReportPacket(newGatewayReportPacket(t, report))
+	if err != nil {
+		t.Fatalf("HandleGatewayReportPacket failed: %v", err)
+	}
+	var ack pb.GatewayReportAck
+	if err := proto.Unmarshal(resp.Payload, &ack); err != nil {
+		t.Fatalf("unmarshal gateway report ack failed: %v", err)
+	}
+	if ack.GetOk() {
+		t.Fatalf("expected report to wait for approval")
+	}
+	if err := ctrl.ApproveGatewayNodeByID("gw-persist"); err != nil {
+		t.Fatalf("ApproveGatewayNodeByID failed: %v", err)
+	}
+	ctrl.Stop()
+
+	reloaded := newTestController(t)
+	defer reloaded.Stop()
+	if !reloaded.isGatewayAllowed("gw-persist", "127.0.0.1:51821") {
+		t.Fatalf("expected approved gateway to persist across restart")
 	}
 }
 
