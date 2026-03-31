@@ -92,6 +92,15 @@ message GatewayReportRequest {
     reserved 3;
     repeated string capabilities = 4;
     int64 report_unix_ms = 5;
+    bytes nonce = 6;
+    bytes signature = 7;
+}
+message GatewayReportProof {
+    string gateway_id = 1;
+    string endpoint = 2;
+    repeated string capabilities = 3;
+    int64 report_unix_ms = 4;
+    bytes nonce = 5;
 }
 message GatewayReportAck {
     bool ok = 1;

@@ -1,6 +1,9 @@
 package control
 
 import (
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
 	"fmt"
 	"net"
 	"sdl-control/config"
@@ -14,13 +17,19 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+const testGatewayTicketSecret = "test-gateway-ticket-secret"
+
 func TestHandleHandshakePacketSuccess(t *testing.T) {
 	cfg := &config.Config{
-		Gateway: net.ParseIP("10.26.0.1"),
-		Domain:  "ms.net",
-		Netmask: "255.255.255.0",
+		Gateway:             net.ParseIP("10.26.0.1"),
+		Domain:              "ms.net",
+		Netmask:             "255.255.255.0",
+		GatewayTicketSecret: testGatewayTicketSecret,
 	}
-	ctrl := NewController(cfg)
+	ctrl, err := NewController(cfg)
+	if err != nil {
+		t.Fatalf("NewController failed: %v", err)
+	}
 	defer ctrl.Stop()
 
 	req := &pb.HandshakeRequest{
@@ -84,11 +93,15 @@ func TestHandleHandshakePacketSuccess(t *testing.T) {
 
 func TestHandleHandshakePacketInvalidPayload(t *testing.T) {
 	cfg := &config.Config{
-		Gateway: net.ParseIP("10.26.0.1"),
-		Domain:  "ms.net",
-		Netmask: "255.255.255.0",
+		Gateway:             net.ParseIP("10.26.0.1"),
+		Domain:              "ms.net",
+		Netmask:             "255.255.255.0",
+		GatewayTicketSecret: testGatewayTicketSecret,
 	}
-	ctrl := NewController(cfg)
+	ctrl, err := NewController(cfg)
+	if err != nil {
+		t.Fatalf("NewController failed: %v", err)
+	}
 	defer ctrl.Stop()
 
 	reqPacket := &protocol.Packet{
@@ -105,7 +118,7 @@ func TestHandleHandshakePacketInvalidPayload(t *testing.T) {
 }
 
 func TestHandleHandshakePacketUnsupportedCapabilities(t *testing.T) {
-	ctrl := newTestController()
+	ctrl := newTestController(t)
 	defer ctrl.Stop()
 	req := &pb.HandshakeRequest{
 		Version:      "test-client",
@@ -209,7 +222,7 @@ func TestPunchCoordProtoContractRoundTrip(t *testing.T) {
 }
 
 func TestPunchSessionLifecycleHandlers(t *testing.T) {
-	ctrl := newTestController()
+	ctrl := newTestController(t)
 	defer ctrl.Stop()
 	srcReg := mustRegister(t, ctrl, newBaseRegisterReq("dev-a", "node-a"), &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1111})
 	dstReg := mustRegister(t, ctrl, newBaseRegisterReq("dev-b", "node-b"), &net.UDPAddr{IP: net.ParseIP("1.1.1.2"), Port: 2222})
@@ -301,7 +314,7 @@ func TestPunchSessionLifecycleHandlers(t *testing.T) {
 }
 
 func TestBuildPunchStartPackets(t *testing.T) {
-	ctrl := newTestController()
+	ctrl := newTestController(t)
 	defer ctrl.Stop()
 	srcReg := mustRegister(t, ctrl, newBaseRegisterReq("dev-a", "node-a"), &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1111})
 	dstReg := mustRegister(t, ctrl, newBaseRegisterReq("dev-b", "node-b"), &net.UDPAddr{IP: net.ParseIP("1.1.1.2"), Port: 2222})
@@ -347,7 +360,7 @@ func TestBuildPunchStartPackets(t *testing.T) {
 }
 
 func TestHandlePunchAckAndResultInitializeSessionMaps(t *testing.T) {
-	ctrl := newTestController()
+	ctrl := newTestController(t)
 	defer ctrl.Stop()
 
 	srcIP := util.IpToUint32(net.ParseIP("10.26.0.2"))
@@ -419,7 +432,7 @@ func TestHandlePunchAckAndResultInitializeSessionMaps(t *testing.T) {
 }
 
 func TestBuildPunchStartPacketsFromStatus(t *testing.T) {
-	ctrl := newTestController()
+	ctrl := newTestController(t)
 	defer ctrl.Stop()
 	srcReg := mustRegister(t, ctrl, newBaseRegisterReq("dev-a", "node-a"), &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1111})
 	dstReg := mustRegister(t, ctrl, newBaseRegisterReq("dev-b", "node-b"), &net.UDPAddr{IP: net.ParseIP("1.1.1.2"), Port: 2222})
@@ -493,7 +506,7 @@ func TestBuildPunchStartPacketsFromStatus(t *testing.T) {
 }
 
 func TestReconcilePunchSessionsTimeoutMarksFallback(t *testing.T) {
-	ctrl := newTestController()
+	ctrl := newTestController(t)
 	defer ctrl.Stop()
 	sessionID := uint64(9001)
 	attempt := uint32(1)
@@ -535,7 +548,7 @@ func TestReconcilePunchSessionsTimeoutMarksFallback(t *testing.T) {
 }
 
 func TestBuildPunchStartPacketsFromStatusHonorsRetryPolicy(t *testing.T) {
-	ctrl := newTestController()
+	ctrl := newTestController(t)
 	defer ctrl.Stop()
 	srcReg := mustRegister(t, ctrl, newBaseRegisterReq("dev-a", "node-a"), &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1111})
 	dstReg := mustRegister(t, ctrl, newBaseRegisterReq("dev-b", "node-b"), &net.UDPAddr{IP: net.ParseIP("1.1.1.2"), Port: 2222})
@@ -599,7 +612,7 @@ func TestBuildPunchStartPacketsFromStatusHonorsRetryPolicy(t *testing.T) {
 }
 
 func TestHandleRegistrationPacketConflictAndAllowIpChange(t *testing.T) {
-	ctrl := newTestController()
+	ctrl := newTestController(t)
 	defer ctrl.Stop()
 
 	resp1 := mustRegister(t, ctrl, &pb.RegistrationRequest{
@@ -659,7 +672,7 @@ func TestHandleRegistrationPacketConflictAndAllowIpChange(t *testing.T) {
 }
 
 func TestHandleRegistrationPacketReuseSameDeviceIP(t *testing.T) {
-	ctrl := newTestController()
+	ctrl := newTestController(t)
 	defer ctrl.Stop()
 
 	resp1 := mustRegister(t, ctrl, &pb.RegistrationRequest{
@@ -686,7 +699,7 @@ func TestHandleRegistrationPacketReuseSameDeviceIP(t *testing.T) {
 }
 
 func TestHandleRegistrationPacketInvalidRequestedIP(t *testing.T) {
-	ctrl := newTestController()
+	ctrl := newTestController(t)
 	defer ctrl.Stop()
 
 	_, err := ctrl.HandleRegistrationPacket(newRegistrationPacket(t, &pb.RegistrationRequest{
@@ -703,7 +716,7 @@ func TestHandleRegistrationPacketInvalidRequestedIP(t *testing.T) {
 }
 
 func TestHandlePullDeviceListPacket(t *testing.T) {
-	ctrl := newTestController()
+	ctrl := newTestController(t)
 	defer ctrl.Stop()
 	resp1 := mustRegister(t, ctrl, newBaseRegisterReq("dev-a", "node-a"), &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1111})
 	resp2 := mustRegister(t, ctrl, newBaseRegisterReq("dev-b", "node-b"), &net.UDPAddr{IP: net.ParseIP("1.1.1.2"), Port: 2222})
@@ -746,7 +759,7 @@ func TestHandlePullDeviceListPacket(t *testing.T) {
 }
 
 func TestHandleClientStatusInfoPacket(t *testing.T) {
-	ctrl := newTestController()
+	ctrl := newTestController(t)
 	defer ctrl.Stop()
 	resp := mustRegister(t, ctrl, newBaseRegisterReq("dev-a", "node-a"), &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1111})
 	status := &pb.ClientStatusInfo{
@@ -796,7 +809,7 @@ func TestHandleClientStatusInfoPacket(t *testing.T) {
 }
 
 func TestHandleClientStatusInfoPacketNoP2PRoute(t *testing.T) {
-	ctrl := newTestController()
+	ctrl := newTestController(t)
 	defer ctrl.Stop()
 	resp := mustRegister(t, ctrl, newBaseRegisterReq("dev-a", "node-a"), &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1111})
 	status := &pb.ClientStatusInfo{
@@ -828,7 +841,7 @@ func TestHandleClientStatusInfoPacketNoP2PRoute(t *testing.T) {
 }
 
 func TestLeaveByRemoteAddrMarksControlOffline(t *testing.T) {
-	ctrl := newTestController()
+	ctrl := newTestController(t)
 	defer ctrl.Stop()
 	remoteAddr := &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1111}
 	resp := mustRegister(t, ctrl, newBaseRegisterReq("dev-a", "node-a"), remoteAddr)
@@ -843,7 +856,7 @@ func TestLeaveByRemoteAddrMarksControlOffline(t *testing.T) {
 }
 
 func TestGenerateIPReusesOfflineIPAfterSessionExpiry(t *testing.T) {
-	ctrl := newTestController()
+	ctrl := newTestController(t)
 	defer ctrl.Stop()
 	remoteAddr := &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1111}
 	resp1 := mustRegister(t, ctrl, newBaseRegisterReq("dev-a", "node-a"), remoteAddr)
@@ -856,7 +869,7 @@ func TestGenerateIPReusesOfflineIPAfterSessionExpiry(t *testing.T) {
 }
 
 func TestRegistrationRequiresAuthedDeviceWhenTicketIssued(t *testing.T) {
-	ctrl := newTestController()
+	ctrl := newTestController(t)
 	defer ctrl.Stop()
 	deviceID := fmt.Sprintf("dev-preauth-%d", time.Now().UnixNano())
 	user, err := ctrl.UMCreateUser("alice")
@@ -879,7 +892,7 @@ func TestRegistrationRequiresAuthedDeviceWhenTicketIssued(t *testing.T) {
 }
 
 func TestHandleDeviceAuthPacket(t *testing.T) {
-	ctrl := newTestController()
+	ctrl := newTestController(t)
 	defer ctrl.Stop()
 	user, err := ctrl.UMCreateUser("alice")
 	if err != nil {
@@ -906,24 +919,11 @@ func TestHandleDeviceAuthPacket(t *testing.T) {
 }
 
 func TestGatewayReportAndRegistrationGrant(t *testing.T) {
-	ctrl := newTestController()
+	ctrl := newTestController(t)
 	defer ctrl.Stop()
 	ctrl.ApproveGatewayNode("gw-1", "127.0.0.1:51820")
-	report := &pb.GatewayReportRequest{
-		GatewayId:    "gw-1",
-		Endpoint:     "127.0.0.1:51820",
-		Capabilities: []string{"udp_blind_relay_v1"},
-		ReportUnixMs: time.Now().UnixMilli(),
-	}
-	b, _ := proto.Marshal(report)
-	packet := &protocol.Packet{
-		Proto:    protocol.ProtocolService,
-		AppProto: protocol.AppProtoGatewayReportRequest,
-		SrcIP:    net.ParseIP("10.0.0.2"),
-		DstIP:    net.ParseIP("0.0.0.1"),
-		Gateway:  true,
-		Payload:  b,
-	}
+	report := newSignedGatewayReport(t, testGatewayTicketSecret, "gw-1", "127.0.0.1:51820", []string{"udp_blind_relay_v1"}, time.Now(), randomGatewayNonce(t))
+	packet := newGatewayReportPacket(t, report)
 	resp, err := ctrl.HandleGatewayReportPacket(packet)
 	if err != nil {
 		t.Fatalf("HandleGatewayReportPacket failed: %v", err)
@@ -947,26 +947,42 @@ func TestGatewayReportAndRegistrationGrant(t *testing.T) {
 	if len(grant.GetTicket()) == 0 || grant.GetTicketExpireUnixMs() <= 0 {
 		t.Fatalf("expected short-lived ticket in grant: %+v", grant)
 	}
+	var ticket pb.SignedGatewayTicket
+	if err := proto.Unmarshal(grant.GetTicket(), &ticket); err != nil {
+		t.Fatalf("unmarshal signed gateway ticket failed: %v", err)
+	}
+	if ticket.GetAlg() != "hmac-sha256" {
+		t.Fatalf("unexpected ticket alg: %s", ticket.GetAlg())
+	}
+	if !verifyHMACTicketSignature(testGatewayTicketSecret, &ticket) {
+		t.Fatalf("expected HMAC-signed gateway ticket")
+	}
+}
+
+func TestGatewayReportRejectsInvalidSignature(t *testing.T) {
+	ctrl := newTestController(t)
+	defer ctrl.Stop()
+	ctrl.ApproveGatewayNode("gw-bad-sig", "127.0.0.1:51820")
+	report := newSignedGatewayReport(t, testGatewayTicketSecret, "gw-bad-sig", "127.0.0.1:51820", []string{"udp_blind_relay_v1"}, time.Now(), randomGatewayNonce(t))
+	report.Signature[0] ^= 0xff
+	resp, err := ctrl.HandleGatewayReportPacket(newGatewayReportPacket(t, report))
+	if err != nil {
+		t.Fatalf("HandleGatewayReportPacket failed: %v", err)
+	}
+	var ack pb.GatewayReportAck
+	if err := proto.Unmarshal(resp.Payload, &ack); err != nil {
+		t.Fatalf("unmarshal gateway report ack failed: %v", err)
+	}
+	if ack.GetOk() || ack.GetReason() != "invalid_signature" {
+		t.Fatalf("expected invalid signature reject, ack=%+v", ack)
+	}
 }
 
 func TestGatewayReportRequiresApprovalForNonDefaultGateway(t *testing.T) {
-	ctrl := newTestController()
+	ctrl := newTestController(t)
 	defer ctrl.Stop()
-	report := &pb.GatewayReportRequest{
-		GatewayId:    "gw-denied",
-		Endpoint:     "127.0.0.1:51820",
-		Capabilities: []string{"udp_blind_relay_v1"},
-		ReportUnixMs: time.Now().UnixMilli(),
-	}
-	b, _ := proto.Marshal(report)
-	packet := &protocol.Packet{
-		Proto:    protocol.ProtocolService,
-		AppProto: protocol.AppProtoGatewayReportRequest,
-		SrcIP:    net.ParseIP("10.0.0.2"),
-		DstIP:    net.ParseIP("0.0.0.1"),
-		Gateway:  true,
-		Payload:  b,
-	}
+	report := newSignedGatewayReport(t, testGatewayTicketSecret, "gw-denied", "127.0.0.1:51820", []string{"udp_blind_relay_v1"}, time.Now(), randomGatewayNonce(t))
+	packet := newGatewayReportPacket(t, report)
 	resp, err := ctrl.HandleGatewayReportPacket(packet)
 	if err != nil {
 		t.Fatalf("HandleGatewayReportPacket failed: %v", err)
@@ -975,29 +991,16 @@ func TestGatewayReportRequiresApprovalForNonDefaultGateway(t *testing.T) {
 	if err := proto.Unmarshal(resp.Payload, &ack); err != nil {
 		t.Fatalf("unmarshal gateway report ack failed: %v", err)
 	}
-	if ack.GetOk() {
-		t.Fatalf("expected gateway report reject without admin approval")
+	if ack.GetOk() || ack.GetReason() != "gateway not approved" {
+		t.Fatalf("expected gateway report reject without admin approval, ack=%+v", ack)
 	}
 }
 
 func TestGatewayApproveByIDAfterPendingReport(t *testing.T) {
-	ctrl := newTestController()
+	ctrl := newTestController(t)
 	defer ctrl.Stop()
-	report := &pb.GatewayReportRequest{
-		GatewayId:    "gw-pending",
-		Endpoint:     "127.0.0.1:51821",
-		Capabilities: []string{"udp_blind_relay_v1"},
-		ReportUnixMs: time.Now().UnixMilli(),
-	}
-	b, _ := proto.Marshal(report)
-	packet := &protocol.Packet{
-		Proto:    protocol.ProtocolService,
-		AppProto: protocol.AppProtoGatewayReportRequest,
-		SrcIP:    net.ParseIP("10.0.0.2"),
-		DstIP:    net.ParseIP("0.0.0.1"),
-		Gateway:  true,
-		Payload:  b,
-	}
+	report := newSignedGatewayReport(t, testGatewayTicketSecret, "gw-pending", "127.0.0.1:51821", []string{"udp_blind_relay_v1"}, time.Now(), randomGatewayNonce(t))
+	packet := newGatewayReportPacket(t, report)
 	resp, err := ctrl.HandleGatewayReportPacket(packet)
 	if err != nil {
 		t.Fatalf("HandleGatewayReportPacket failed: %v", err)
@@ -1012,7 +1015,8 @@ func TestGatewayApproveByIDAfterPendingReport(t *testing.T) {
 	if err := ctrl.ApproveGatewayNodeByID("gw-pending"); err != nil {
 		t.Fatalf("ApproveGatewayNodeByID failed: %v", err)
 	}
-	resp, err = ctrl.HandleGatewayReportPacket(packet)
+	keepalive := newSignedGatewayReport(t, testGatewayTicketSecret, "gw-pending", "127.0.0.1:51821", []string{"udp_blind_relay_v1"}, time.Now(), randomGatewayNonce(t))
+	resp, err = ctrl.HandleGatewayReportPacket(newGatewayReportPacket(t, keepalive))
 	if err != nil {
 		t.Fatalf("HandleGatewayReportPacket after approve failed: %v", err)
 	}
@@ -1025,28 +1029,19 @@ func TestGatewayApproveByIDAfterPendingReport(t *testing.T) {
 }
 
 func TestGatewayReportAllowsConfiguredDefaultGateway(t *testing.T) {
-	ctrl := NewController(&config.Config{
-		Gateway:        net.ParseIP("10.26.0.1"),
-		Domain:         "ms.net",
-		Netmask:        "255.255.255.0",
-		DefaultGateway: "gateway.middlescale.net:433",
+	ctrl, err := NewController(&config.Config{
+		Gateway:             net.ParseIP("10.26.0.1"),
+		Domain:              "ms.net",
+		Netmask:             "255.255.255.0",
+		DefaultGateway:      "gateway.middlescale.net:433",
+		GatewayTicketSecret: testGatewayTicketSecret,
 	})
+	if err != nil {
+		t.Fatalf("NewController failed: %v", err)
+	}
 	defer ctrl.Stop()
-	report := &pb.GatewayReportRequest{
-		GatewayId:    "gw-default",
-		Endpoint:     "gateway.middlescale.net:433",
-		Capabilities: []string{"udp_blind_relay_v1"},
-		ReportUnixMs: time.Now().UnixMilli(),
-	}
-	b, _ := proto.Marshal(report)
-	packet := &protocol.Packet{
-		Proto:    protocol.ProtocolService,
-		AppProto: protocol.AppProtoGatewayReportRequest,
-		SrcIP:    net.ParseIP("10.0.0.2"),
-		DstIP:    net.ParseIP("0.0.0.1"),
-		Gateway:  true,
-		Payload:  b,
-	}
+	report := newSignedGatewayReport(t, testGatewayTicketSecret, "gw-default", "gateway.middlescale.net:433", []string{"udp_blind_relay_v1"}, time.Now(), randomGatewayNonce(t))
+	packet := newGatewayReportPacket(t, report)
 	resp, err := ctrl.HandleGatewayReportPacket(packet)
 	if err != nil {
 		t.Fatalf("HandleGatewayReportPacket failed: %v", err)
@@ -1060,8 +1055,58 @@ func TestGatewayReportAllowsConfiguredDefaultGateway(t *testing.T) {
 	}
 }
 
+func TestGatewaySignedKeepaliveReplayRejected(t *testing.T) {
+	ctrl := newTestController(t)
+	defer ctrl.Stop()
+	ctrl.ApproveGatewayNode("gw-replay", "127.0.0.1:51822")
+	first := newSignedGatewayReport(t, testGatewayTicketSecret, "gw-replay", "127.0.0.1:51822", []string{"udp_blind_relay_v1"}, time.Now(), randomGatewayNonce(t))
+	resp, err := ctrl.HandleGatewayReportPacket(newGatewayReportPacket(t, first))
+	if err != nil {
+		t.Fatalf("first HandleGatewayReportPacket failed: %v", err)
+	}
+	var ack pb.GatewayReportAck
+	if err := proto.Unmarshal(resp.Payload, &ack); err != nil {
+		t.Fatalf("unmarshal gateway report ack failed: %v", err)
+	}
+	if !ack.GetOk() {
+		t.Fatalf("expected first report accepted, ack=%+v", ack)
+	}
+	resp, err = ctrl.HandleGatewayReportPacket(newGatewayReportPacket(t, first))
+	if err != nil {
+		t.Fatalf("replay HandleGatewayReportPacket failed: %v", err)
+	}
+	if err := proto.Unmarshal(resp.Payload, &ack); err != nil {
+		t.Fatalf("unmarshal replay ack failed: %v", err)
+	}
+	if ack.GetOk() || ack.GetReason() != "replayed_nonce" {
+		t.Fatalf("expected replay rejection, ack=%+v", ack)
+	}
+}
+
+func TestGatewaySignedKeepaliveRejectsStaleTimestamp(t *testing.T) {
+	ctrl := newTestController(t)
+	defer ctrl.Stop()
+	ctrl.ApproveGatewayNode("gw-stale", "127.0.0.1:51823")
+	first := newSignedGatewayReport(t, testGatewayTicketSecret, "gw-stale", "127.0.0.1:51823", []string{"udp_blind_relay_v1"}, time.Now(), randomGatewayNonce(t))
+	if _, err := ctrl.HandleGatewayReportPacket(newGatewayReportPacket(t, first)); err != nil {
+		t.Fatalf("first HandleGatewayReportPacket failed: %v", err)
+	}
+	stale := newSignedGatewayReport(t, testGatewayTicketSecret, "gw-stale", "127.0.0.1:51823", []string{"udp_blind_relay_v1"}, time.Now().Add(-3*gatewayReportFreshnessWindow), randomGatewayNonce(t))
+	resp, err := ctrl.HandleGatewayReportPacket(newGatewayReportPacket(t, stale))
+	if err != nil {
+		t.Fatalf("stale HandleGatewayReportPacket failed: %v", err)
+	}
+	var ack pb.GatewayReportAck
+	if err := proto.Unmarshal(resp.Payload, &ack); err != nil {
+		t.Fatalf("unmarshal stale ack failed: %v", err)
+	}
+	if ack.GetOk() || ack.GetReason() != "stale_report_timestamp" {
+		t.Fatalf("expected stale timestamp rejection, ack=%+v", ack)
+	}
+}
+
 func TestRegistrationSkipsExpiredGatewayLease(t *testing.T) {
-	ctrl := newTestController()
+	ctrl := newTestController(t)
 	defer ctrl.Stop()
 	ctrl.gatewayNodes["gw-expired"] = GatewayNodeInfo{
 		GatewayID:    "gw-expired",
@@ -1080,7 +1125,7 @@ func TestRegistrationSkipsExpiredGatewayLease(t *testing.T) {
 }
 
 func TestRefreshGatewayGrantPacket(t *testing.T) {
-	ctrl := newTestController()
+	ctrl := newTestController(t)
 	defer ctrl.Stop()
 
 	regReq := newBaseRegisterReq("dev-refresh-a", "node-refresh-a")
@@ -1128,12 +1173,16 @@ func TestRefreshGatewayGrantPacket(t *testing.T) {
 }
 
 func TestRegistrationUsesConfiguredGroupNetwork(t *testing.T) {
-	ctrl := NewController(&config.Config{
+	ctrl, err := NewController(&config.Config{
 		Groups: map[string]config.GroupConfig{
 			"g1.net": {Gateway: net.ParseIP("10.26.1.1"), Netmask: "255.255.255.0"},
 			"g2.net": {Gateway: net.ParseIP("10.27.0.1"), Netmask: "255.255.0.0"},
 		},
+		GatewayTicketSecret: testGatewayTicketSecret,
 	})
+	if err != nil {
+		t.Fatalf("NewController failed: %v", err)
+	}
 	defer ctrl.Stop()
 	req := newBaseRegisterReq("dev-g1-a", "node-g1-a")
 	req.Token = "g1.net"
@@ -1146,12 +1195,18 @@ func TestRegistrationUsesConfiguredGroupNetwork(t *testing.T) {
 	}
 }
 
-func newTestController() *Controller {
-	return NewController(&config.Config{
-		Gateway: net.ParseIP("10.26.0.1"),
-		Domain:  "ms.net",
-		Netmask: "255.255.255.0",
+func newTestController(t *testing.T) *Controller {
+	t.Helper()
+	ctrl, err := NewController(&config.Config{
+		Gateway:             net.ParseIP("10.26.0.1"),
+		Domain:              "ms.net",
+		Netmask:             "255.255.255.0",
+		GatewayTicketSecret: testGatewayTicketSecret,
 	})
+	if err != nil {
+		t.Fatalf("NewController failed: %v", err)
+	}
+	return ctrl
 }
 
 func mustRegister(t *testing.T, ctrl *Controller, req *pb.RegistrationRequest, remoteAddr net.Addr) *pb.RegistrationResponse {
@@ -1189,6 +1244,68 @@ func mustRegister(t *testing.T, ctrl *Controller, req *pb.RegistrationRequest, r
 		t.Fatalf("virtual ip should not be gateway/broadcast: %s", util.Uint32ToIP(virtualIP))
 	}
 	return &resp
+}
+
+func randomGatewayNonce(t *testing.T) []byte {
+	t.Helper()
+	nonce := make([]byte, 32)
+	if _, err := rand.Read(nonce); err != nil {
+		t.Fatalf("generate gateway nonce failed: %v", err)
+	}
+	return nonce
+}
+
+func newSignedGatewayReport(
+	t *testing.T,
+	secret string,
+	gatewayID string,
+	endpoint string,
+	capabilities []string,
+	reportTime time.Time,
+	nonce []byte,
+) *pb.GatewayReportRequest {
+	t.Helper()
+	report := &pb.GatewayReportRequest{
+		GatewayId:    gatewayID,
+		Endpoint:     endpoint,
+		Capabilities: append([]string{}, capabilities...),
+		ReportUnixMs: reportTime.UnixMilli(),
+		Nonce:        append([]byte(nil), nonce...),
+	}
+	proofBytes, err := marshalGatewayReportProof(report)
+	if err != nil {
+		t.Fatalf("marshalGatewayReportProof failed: %v", err)
+	}
+	mac := hmac.New(sha256.New, []byte(secret))
+	if _, err := mac.Write(proofBytes); err != nil {
+		t.Fatalf("build gateway report signature failed: %v", err)
+	}
+	report.Signature = mac.Sum(nil)
+	return report
+}
+
+func verifyHMACTicketSignature(secret string, ticket *pb.SignedGatewayTicket) bool {
+	mac := hmac.New(sha256.New, []byte(secret))
+	if _, err := mac.Write(ticket.GetClaims()); err != nil {
+		return false
+	}
+	return hmac.Equal(mac.Sum(nil), ticket.GetSignature())
+}
+
+func newGatewayReportPacket(t *testing.T, report *pb.GatewayReportRequest) *protocol.Packet {
+	t.Helper()
+	payload, err := proto.Marshal(report)
+	if err != nil {
+		t.Fatalf("marshal gateway report failed: %v", err)
+	}
+	return &protocol.Packet{
+		Proto:    protocol.ProtocolService,
+		AppProto: protocol.AppProtoGatewayReportRequest,
+		SrcIP:    net.ParseIP("10.0.0.2"),
+		DstIP:    net.ParseIP("0.0.0.1"),
+		Gateway:  true,
+		Payload:  payload,
+	}
 }
 
 func ensureAuthed(t *testing.T, ctrl *Controller, group, deviceID string, devicePubKey []byte) {

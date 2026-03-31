@@ -39,7 +39,14 @@ func main() {
 	if err != nil {
 		log.Fatalf("加载配置失败: %v", err)
 	}
-	log.Infof("Config: %+v", cfg)
+	log.Infof(
+		"Config loaded: listen_addr=%s default_domain=%s default_gateway=%s domains=%d require_client_cert=%t",
+		cfg.ListenAddr,
+		cfg.EffectiveDefaultDomain(),
+		cfg.DefaultGateway,
+		len(cfg.Domains),
+		cfg.RequireClientCert,
+	)
 
 	listenAddr := firstNonEmpty(os.Getenv("LISTEN_ADDR"), cfg.ListenAddr)
 	if listenAddr == "" {
@@ -126,7 +133,10 @@ func main() {
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 	ctx, cancel := context.WithCancel(context.Background())
 
-	ctrl := control.NewController(cfg)
+	ctrl, err := control.NewController(cfg)
+	if err != nil {
+		log.Fatalf("create controller failed: %v", err)
+	}
 
 	adminSocket := firstNonEmpty(os.Getenv("ADMIN_SOCKET_PATH"), "/tmp/sdl-control-admin.sock")
 	if err := handlers.StartAdminUnixServer(ctx, ctrl, adminSocket); err != nil {

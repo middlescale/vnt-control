@@ -72,7 +72,7 @@
 - `autocert_email`：ACME 账户联系邮箱，可选但推荐配置。
 - `default_domain`：创建用户时未指定域名时使用，默认建议 `ms.net`。
 - `default_gateway`：无动态上报 gateway 时用于下发的默认网关地址，默认 `gateway.middlescale.net:433`。
-- `gateway_ticket_secret`：gateway 访问票据的 HMAC 密钥，默认 `dev-gateway-ticket-secret-change-me`（生产请替换）。
+- `gateway_ticket_secret`：control 与 gateway 共享的密钥；control 用它对下发给客户端的 gateway ticket 做 HMAC-SHA256 签名，也用它校验 gateway 上报的 `GatewayReportRequest.signature`。
 - `domains`：多域名配置，`domains.<domain>.groups.<group>` 对应子域配置，例如 `sales.ms.net`。
 - `tls_cert_path` / `tls_key_path`：使用本地证书文件。
 - `client_ca_path`：客户端 CA 文件路径（PEM）。
@@ -156,7 +156,12 @@ make proto   # 重新生成 proto Go 代码（需安装 protoc 与插件）
 
 说明：`--group` 可传短名（如 `sales`，会自动补全为用户所属域名下的 `sales.<user-domain>`）；若传 FQDN（如 `sales.ms.net`），会校验其必须属于该用户所属域名。
 
-Gateway 注册后，control 会在客户端注册响应 `RegistrationResponse.gateway_access_grant` 下发可用 gateway 信息（endpoint/public_key/capabilities）与短期 ticket。ticket 由 `gateway_ticket_secret` 进行 HMAC 签名，绑定 `virtual_ip + session_id + expire + nonce`。除配置中的 `default_gateway` 外，其他 gateway 需先经 `sdl-admin --register_gateway --gateway_id <id>` 批准后，其 `GatewayReportRequest` 才会被接受。`sdl-admin --list_gateway` 可查看缺省网关、待批准上报与已批准网关状态（含 `alive` 保活状态）。control 对已批准网关采用租约保活（90 秒），超时未上报的网关不会继续被下发给客户端。
+Gateway 注册/保活分为两层：
+
+- **HMAC 鉴权**：gateway 每次发送 `GatewayReportRequest` 都必须携带 `nonce + signature`。signature 覆盖 `GatewayReportProof`（`gateway_id + endpoint + capabilities + report_unix_ms + nonce` 的 protobuf 编码），由 control 使用 `gateway_ticket_secret` 做 HMAC-SHA256 校验；control 同时对 `report_unix_ms + nonce` 执行新鲜度/重放保护。
+- **管理批准**：鉴权通过后，除配置中的 `default_gateway` 外，其他 gateway 仍需先经 `sdl-admin --register_gateway --gateway_id <id>` 批准，其 `GatewayReportRequest` 才会返回成功。`sdl-admin --list_gateway` 可查看缺省网关、待批准上报与已批准网关状态（含 `alive` 保活状态）。
+
+control 对已批准网关采用租约保活（90 秒），并基于 `report_unix_ms + nonce` 做有限时间窗内的重放保护；超时未上报的网关不会继续被下发给客户端。
 
 设备认证（auth device）由 `sdl auth` 发起：客户端输入 `user_id/group/ticket` 发送到 `sdl-control`，认证成功后设备才可注册入网。
 

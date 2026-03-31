@@ -92,7 +92,7 @@ The `sdl-admin` tool provides administrative functionality through a Unix Domain
 
 Note: The `--group` parameter can accept short names (e.g., `sales`, which gets automatically completed to `sales.<user-domain>`) or FQDN (e.g., `sales.ms.net`, which gets validated to ensure it belongs to the user's domain).
 
-Gateway registration: After registration, control sends available gateway information in the client's `RegistrationResponse.gateway_access_grant` with temporary tickets signed via HMAC using `gateway_ticket_secret`, binding `virtual_ip + session_id + expire + nonce`. Apart from the configured `default_gateway`, other gateways must first be approved with `sdl-admin --register_gateway --gateway_id <id>` before their `GatewayReportRequest` is accepted. `sdl-admin --list_gateway` shows default gateways, pending approvals, and approved gateways status (including `alive` status). Control uses lease-based keepalive (90 seconds) for approved gateways, and gateways that fail to report in time are no longer distributed to clients.
+Gateway registration/keepalive uses shared-secret HMAC auth plus separate admin approval: every `GatewayReportRequest` must carry `nonce + signature`, where signature is HMAC-SHA256 over the protobuf proof `(gateway_id, endpoint, capabilities, report_unix_ms, nonce)` using `gateway_ticket_secret`. Admin approval via `--register_gateway` remains separate from authentication, and replay/freshness failures must be rejected explicitly.
 
 ### Configuration Example
 ```json

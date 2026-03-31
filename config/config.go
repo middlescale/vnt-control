@@ -14,25 +14,23 @@ import (
 // netmask: IPv4 子网掩码
 // domain: 域名字符串
 type Config struct {
-	Gateway                     net.IP                  `json:"gateway"`
-	Domain                      string                  `json:"domain"`
-	Netmask                     string                  `json:"netmask"`
-	Groups                      map[string]GroupConfig  `json:"groups"`
-	DefaultDomain               string                  `json:"default_domain"`
-	Domains                     map[string]DomainConfig `json:"domains"`
-	DefaultGateway              string                  `json:"default_gateway"`
-	GatewayTicketSecret         string                  `json:"gateway_ticket_secret"`
-	GatewayTicketKeyID          string                  `json:"gateway_ticket_key_id"`
-	GatewayTicketPrivateKeyPath string                  `json:"gateway_ticket_private_key_path"`
-	ListenAddr                  string                  `json:"listen_addr"`
-	AutoCertDomain              string                  `json:"autocert_domain"`
-	AutoCertHTTPAddr            string                  `json:"autocert_http_addr"`
-	AutoCertEmail               string                  `json:"autocert_email"`
-	CertCacheDir                string                  `json:"cert_cache_dir"`
-	TLSCertPath                 string                  `json:"tls_cert_path"`
-	TLSKeyPath                  string                  `json:"tls_key_path"`
-	ClientCAPath                string                  `json:"client_ca_path"`
-	RequireClientCert           bool                    `json:"require_client_cert"`
+	Gateway             net.IP                  `json:"gateway"`
+	Domain              string                  `json:"domain"`
+	Netmask             string                  `json:"netmask"`
+	Groups              map[string]GroupConfig  `json:"groups"`
+	DefaultDomain       string                  `json:"default_domain"`
+	Domains             map[string]DomainConfig `json:"domains"`
+	DefaultGateway      string                  `json:"default_gateway"`
+	GatewayTicketSecret string                  `json:"gateway_ticket_secret"`
+	ListenAddr          string                  `json:"listen_addr"`
+	AutoCertDomain      string                  `json:"autocert_domain"`
+	AutoCertHTTPAddr    string                  `json:"autocert_http_addr"`
+	AutoCertEmail       string                  `json:"autocert_email"`
+	CertCacheDir        string                  `json:"cert_cache_dir"`
+	TLSCertPath         string                  `json:"tls_cert_path"`
+	TLSKeyPath          string                  `json:"tls_key_path"`
+	ClientCAPath        string                  `json:"client_ca_path"`
+	RequireClientCert   bool                    `json:"require_client_cert"`
 }
 
 type GroupConfig struct {
@@ -65,13 +63,10 @@ func LoadConfig(path string) (*Config, error) {
 // Validate 校验配置字段格式
 func (c *Config) Validate() error {
 	if strings.TrimSpace(c.DefaultGateway) == "" {
-		c.DefaultGateway = "gateway.middlescale.net:433"
+		c.DefaultGateway = "gateway.middlescale.net:443"
 	}
 	if strings.TrimSpace(c.GatewayTicketSecret) == "" {
-		c.GatewayTicketSecret = "dev-gateway-ticket-secret-change-me"
-	}
-	if strings.TrimSpace(c.GatewayTicketKeyID) == "" {
-		c.GatewayTicketKeyID = "gateway-ticket-v1"
+		return errors.New("gateway_ticket_secret 不能为空")
 	}
 	if strings.TrimSpace(c.AutoCertHTTPAddr) == "" {
 		c.AutoCertHTTPAddr = ":80"

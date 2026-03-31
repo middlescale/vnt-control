@@ -9,7 +9,7 @@ import (
 )
 
 func TestHandleControlPacketPingPong(t *testing.T) {
-	ctrl := newTestController()
+	ctrl := newTestController(t)
 	defer ctrl.Stop()
 
 	resp := mustRegister(t, ctrl, newBaseRegisterReq("dev-a", "node-a"), &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1111})
@@ -62,7 +62,7 @@ func TestHandleControlPacketPingPong(t *testing.T) {
 }
 
 func TestHandleControlPacketInvalidPingPayload(t *testing.T) {
-	ctrl := newTestController()
+	ctrl := newTestController(t)
 	defer ctrl.Stop()
 	_, err := ctrl.HandleControlPacket(&protocol.Packet{
 		Proto:    protocol.ProtocolControl,
@@ -75,7 +75,7 @@ func TestHandleControlPacketInvalidPingPayload(t *testing.T) {
 }
 
 func TestHandleControlPacketAddrRequest(t *testing.T) {
-	ctrl := newTestController()
+	ctrl := newTestController(t)
 	defer ctrl.Stop()
 	req := &protocol.Packet{
 		Ver:       protocol.V2,

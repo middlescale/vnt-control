@@ -6,7 +6,7 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/x509"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"os"
@@ -19,7 +19,6 @@ import (
 	"sync"
 	"time"
 
-	"encoding/pem"
 	log "github.com/sirupsen/logrus"
 	"google.golang.org/protobuf/proto"
 )
@@ -37,9 +36,7 @@ type Controller struct {
 	gatewayNodes map[string]GatewayNodeInfo
 	gatewayAllow map[string]string
 	gatewaySeen  map[string]GatewayNodeInfo
-
-	gatewayTicketSigner ed25519.PrivateKey
-	gatewayTicketKeyID  string
+	gatewayNonce map[string]map[string]int64
 }
 
 type GatewayNodeInfo struct {
@@ -74,6 +71,7 @@ type GatewayAdminView struct {
 const maxPunchAttemptsPerPair = 3
 const gatewayNodeLease = 90 * time.Second
 const deviceAuthChallengeTTL = 60 * time.Second
+const gatewayReportFreshnessWindow = 2 * time.Minute
 
 type PunchSessionState string
 
@@ -112,12 +110,14 @@ var supportedHandshakeCapabilities = map[string]struct{}{
 	"gateway_ticket_v1":      {},
 }
 
-func NewController(cfg *config.Config) *Controller {
-	if strings.TrimSpace(cfg.DefaultGateway) == "" {
-		cfg.DefaultGateway = "gateway.middlescale.net:433"
+func NewController(cfg *config.Config) (*Controller, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("config is required")
+	}
+	if err := cfg.Validate(); err != nil {
+		return nil, err
 	}
 	um := newUserManagerFromStore()
-	privateKey, keyID := loadGatewayTicketSigner(cfg)
 	return &Controller{
 		nc: NetworkControl{
 			VirtualNetwork:    *NewExpireMap[string, *NetworkInfo](7 * 24 * time.Hour),
@@ -127,50 +127,14 @@ func NewController(cfg *config.Config) *Controller {
 			PunchPairCooldown: *NewExpireMap[string, struct{}](20 * time.Second),
 			PunchPairRetry:    *NewExpireMap[string, PunchRetryState](30 * time.Minute),
 		},
-		um:                  um,
-		cfg:                 cfg,
-		authChallenges:      make(map[string]deviceAuthChallengeState),
-		gatewayNodes:        make(map[string]GatewayNodeInfo),
-		gatewayAllow:        make(map[string]string),
-		gatewaySeen:         make(map[string]GatewayNodeInfo),
-		gatewayTicketSigner: privateKey,
-		gatewayTicketKeyID:  keyID,
-	}
-}
-
-func loadGatewayTicketSigner(cfg *config.Config) (ed25519.PrivateKey, string) {
-	keyID := strings.TrimSpace(cfg.GatewayTicketKeyID)
-	path := strings.TrimSpace(cfg.GatewayTicketPrivateKeyPath)
-	if path == "" {
-		return nil, keyID
-	}
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		log.Warnf("read gateway ticket private key failed (%s): %v", path, err)
-		return nil, keyID
-	}
-	if block, _ := pem.Decode(raw); block != nil {
-		raw = block.Bytes
-	}
-	privateKey, err := parseEd25519PrivateKey(raw)
-	if err != nil {
-		log.Warnf("parse gateway ticket private key failed (%s): %v", path, err)
-		return nil, keyID
-	}
-	log.Infof("loaded gateway ticket Ed25519 signer from %s", path)
-	return privateKey, keyID
-}
-
-func parseEd25519PrivateKey(raw []byte) (ed25519.PrivateKey, error) {
-	key, err := x509.ParsePKCS8PrivateKey(raw)
-	if err != nil {
-		return nil, err
-	}
-	privateKey, ok := key.(ed25519.PrivateKey)
-	if !ok {
-		return nil, fmt.Errorf("pkcs8 key is not ed25519")
-	}
-	return privateKey, nil
+		um:             um,
+		cfg:            cfg,
+		authChallenges: make(map[string]deviceAuthChallengeState),
+		gatewayNodes:   make(map[string]GatewayNodeInfo),
+		gatewayAllow:   make(map[string]string),
+		gatewaySeen:    make(map[string]GatewayNodeInfo),
+		gatewayNonce:   make(map[string]map[string]int64),
+	}, nil
 }
 
 func newUserManagerFromStore() *UserManager {
@@ -1143,13 +1107,24 @@ func (c *Controller) HandleGatewayReportPacket(packet *protocol.Packet) (*protoc
 	if strings.TrimSpace(req.GetEndpoint()) == "" {
 		return nil, fmt.Errorf("endpoint is required")
 	}
+	if req.GetReportUnixMs() == 0 {
+		return nil, fmt.Errorf("report_unix_ms is required")
+	}
+	now := time.Now()
+	if err := c.authenticateGatewayReport(&req, now); err != nil {
+		return c.buildGatewayReportAck(packet, &pb.GatewayReportAck{
+			Ok:           false,
+			Reason:       err.Error(),
+			GatewayId:    req.GetGatewayId(),
+			ExpireUnixMs: now.Add(2 * time.Minute).UnixMilli(),
+		})
+	}
 	c.recordGatewaySeen(GatewayNodeInfo{
 		GatewayID:    req.GetGatewayId(),
 		Endpoint:     req.GetEndpoint(),
 		Capabilities: append([]string{}, req.GetCapabilities()...),
-		UpdatedAt:    time.Now(),
+		UpdatedAt:    now,
 	})
-	now := time.Now()
 	if !c.isGatewayAllowed(req.GetGatewayId(), req.GetEndpoint()) {
 		return c.buildGatewayReportAck(packet, &pb.GatewayReportAck{
 			Ok:           false,
@@ -1167,6 +1142,68 @@ func (c *Controller) HandleGatewayReportPacket(packet *protocol.Packet) (*protoc
 		ExpireUnixMs: now.Add(2 * time.Minute).UnixMilli(),
 	}
 	return c.buildGatewayReportAck(packet, ack)
+}
+
+func (c *Controller) authenticateGatewayReport(req *pb.GatewayReportRequest, now time.Time) error {
+	if len(req.GetNonce()) == 0 {
+		return fmt.Errorf("nonce is required")
+	}
+	if len(req.GetSignature()) == 0 {
+		return fmt.Errorf("signature is required")
+	}
+	proofBytes, err := marshalGatewayReportProof(req)
+	if err != nil {
+		return fmt.Errorf("invalid_gateway_report_proof: %w", err)
+	}
+	gatewayID := strings.TrimSpace(req.GetGatewayId())
+	mac := hmac.New(sha256.New, []byte(c.cfg.GatewayTicketSecret))
+	if _, err := mac.Write(proofBytes); err != nil {
+		return fmt.Errorf("invalid_gateway_report_proof: %w", err)
+	}
+	if !hmac.Equal(mac.Sum(nil), req.GetSignature()) {
+		return fmt.Errorf("invalid_signature")
+	}
+	return c.validateGatewayReplayWindow(gatewayID, req.GetReportUnixMs(), req.GetNonce(), now)
+}
+
+func marshalGatewayReportProof(req *pb.GatewayReportRequest) ([]byte, error) {
+	return proto.MarshalOptions{Deterministic: true}.Marshal(&pb.GatewayReportProof{
+		GatewayId:    req.GetGatewayId(),
+		Endpoint:     req.GetEndpoint(),
+		Capabilities: append([]string{}, req.GetCapabilities()...),
+		ReportUnixMs: req.GetReportUnixMs(),
+		Nonce:        append([]byte(nil), req.GetNonce()...),
+	})
+}
+
+func (c *Controller) validateGatewayReplayWindow(gatewayID string, reportUnixMs int64, nonce []byte, now time.Time) error {
+	reportTime := time.UnixMilli(reportUnixMs)
+	if now.Sub(reportTime) > gatewayReportFreshnessWindow || reportTime.Sub(now) > gatewayReportFreshnessWindow {
+		return fmt.Errorf("stale_report_timestamp")
+	}
+	nonceKey := hex.EncodeToString(nonce)
+	expireAt := reportTime.Add(gatewayReportFreshnessWindow).UnixMilli()
+	if expireAt < now.UnixMilli() {
+		expireAt = now.Add(gatewayReportFreshnessWindow).UnixMilli()
+	}
+	c.gatewayMu.Lock()
+	defer c.gatewayMu.Unlock()
+	cache := c.gatewayNonce[gatewayID]
+	if cache == nil {
+		cache = make(map[string]int64)
+		c.gatewayNonce[gatewayID] = cache
+	}
+	nowUnixMs := now.UnixMilli()
+	for key, nonceExpireAt := range cache {
+		if nonceExpireAt <= nowUnixMs {
+			delete(cache, key)
+		}
+	}
+	if _, ok := cache[nonceKey]; ok {
+		return fmt.Errorf("replayed_nonce")
+	}
+	cache[nonceKey] = expireAt
+	return nil
 }
 
 func (c *Controller) buildGatewayReportAck(packet *protocol.Packet, ack *pb.GatewayReportAck) (*protocol.Packet, error) {
@@ -1344,8 +1381,6 @@ func (c *Controller) buildGatewayAccessGrant(virtualIP uint32, deviceID string) 
 	graceSecs := uint32(30)
 	ticket, err := newGatewayTicket(
 		c.cfg.GatewayTicketSecret,
-		c.gatewayTicketSigner,
-		c.gatewayTicketKeyID,
 		deviceID,
 		virtualIP,
 		sessionID,
@@ -1387,8 +1422,6 @@ func defaultGatewayServerName(endpoint string) string {
 
 func newGatewayTicket(
 	secret string,
-	privateKey ed25519.PrivateKey,
-	keyID string,
 	deviceID string,
 	virtualIP uint32,
 	sessionID uint64,
@@ -1418,23 +1451,23 @@ func newGatewayTicket(
 		LeaseCapSecs:    leaseCapSecs,
 		GraceCapSecs:    graceCapSecs,
 	}
-	claimsBytes, err := proto.Marshal(claims)
+	claimsBytes, err := proto.MarshalOptions{Deterministic: true}.Marshal(claims)
 	if err != nil {
 		return nil, err
 	}
-	ticket := &pb.SignedGatewayTicket{Claims: claimsBytes}
-	if len(privateKey) > 0 {
-		ticket.Alg = "ed25519"
-		ticket.KeyId = keyID
-		ticket.Signature = ed25519.Sign(privateKey, claimsBytes)
-	} else {
-		mac := hmac.New(sha256.New, []byte(secret))
-		_, _ = mac.Write(claimsBytes)
-		ticket.Alg = "hmac-sha256"
-		ticket.KeyId = "gateway-hmac-v1"
-		ticket.Signature = mac.Sum(nil)
+	if strings.TrimSpace(secret) == "" {
+		return nil, fmt.Errorf("gateway ticket secret is required")
 	}
-	return proto.Marshal(ticket)
+	mac := hmac.New(sha256.New, []byte(secret))
+	if _, err := mac.Write(claimsBytes); err != nil {
+		return nil, err
+	}
+	ticket := &pb.SignedGatewayTicket{
+		Alg:       "hmac-sha256",
+		Claims:    claimsBytes,
+		Signature: mac.Sum(nil),
+	}
+	return proto.MarshalOptions{Deterministic: true}.Marshal(ticket)
 }
 
 func matchDomainAndGroup(token string, domains map[string]config.DomainConfig) (string, string, bool) {
