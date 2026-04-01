@@ -937,6 +937,9 @@ func TestGatewayReportAndRegistrationGrant(t *testing.T) {
 	if grant == nil {
 		t.Fatalf("expected gateway access grant in registration response")
 	}
+	if grant.GetGatewayServerName() != "127.0.0.1" {
+		t.Fatalf("unexpected gateway server name: %s", grant.GetGatewayServerName())
+	}
 	if len(grant.GetGatewayCapabilities()) == 0 || grant.GetGatewayCapabilities()[0] != "udp_blind_relay_v1" {
 		t.Fatalf("unexpected grant capabilities: %+v", grant.GetGatewayCapabilities())
 	}
@@ -1154,6 +1157,9 @@ func TestRegistrationSkipsExpiredGatewayLease(t *testing.T) {
 	}
 	if len(grant.GetGatewayAddrs()) == 0 || grant.GetGatewayAddrs()[0] != "quic://127.0.0.1:51824" {
 		t.Fatalf("expected expired gateway to be skipped")
+	}
+	if grant.GetGatewayServerName() != "127.0.0.1" {
+		t.Fatalf("unexpected gateway server name: %s", grant.GetGatewayServerName())
 	}
 }
 

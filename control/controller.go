@@ -1433,7 +1433,7 @@ func (c *Controller) buildGatewayAccessGrant(virtualIP uint32, deviceID string) 
 	}
 	return &pb.GatewayAccessGrant{
 		GatewayAddrs:        []string{"quic://" + picked.Endpoint},
-		GatewayServerName:   gatewayServerName(picked.GatewayID, picked.Endpoint),
+		GatewayServerName:   gatewayServerName(picked.Endpoint),
 		Ticket:              []byte(ticket),
 		TicketExpireUnixMs:  expire.UnixMilli(),
 		SessionId:           sessionID,
@@ -1444,11 +1444,7 @@ func (c *Controller) buildGatewayAccessGrant(virtualIP uint32, deviceID string) 
 	}
 }
 
-func gatewayServerName(gatewayID, endpoint string) string {
-	gatewayID = strings.TrimSpace(gatewayID)
-	if gatewayID != "" {
-		return gatewayID
-	}
+func gatewayServerName(endpoint string) string {
 	host := endpoint
 	if h, _, err := net.SplitHostPort(endpoint); err == nil {
 		host = h
