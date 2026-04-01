@@ -1,6 +1,6 @@
 {
     "default_domain": "ms.net",
-    "default_gateway": "gateway.middlescale.net:443",
+    "default_gateway_id": "default-gateway",
     "gateway_ticket_secret": "dev-gateway-ticket-secret-change-me",
     "domains": {
         "ms.net": {

@@ -40,10 +40,10 @@ func main() {
 		log.Fatalf("加载配置失败: %v", err)
 	}
 	log.Infof(
-		"Config loaded: listen_addr=%s default_domain=%s default_gateway=%s domains=%d require_client_cert=%t",
+		"Config loaded: listen_addr=%s default_domain=%s default_gateway_id=%s domains=%d require_client_cert=%t",
 		cfg.ListenAddr,
 		cfg.EffectiveDefaultDomain(),
-		cfg.DefaultGateway,
+		cfg.DefaultGatewayID,
 		len(cfg.Domains),
 		cfg.RequireClientCert,
 	)
@@ -146,6 +146,14 @@ func main() {
 		if err := handlers.StartHTTPServer(ctx, autocertHTTPAddr, autocertHTTPHandler); err != nil {
 			log.Fatalf("start autocert http challenge server failed: %v", err)
 		}
+	}
+	healthMux := http.NewServeMux()
+	healthMux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("content-type", "text/plain; charset=utf-8")
+		_, _ = w.Write([]byte("ok"))
+	})
+	if err := handlers.StartHTTPSServer(ctx, listenAddr, tlsConfig.Clone(), healthMux); err != nil {
+		log.Fatalf("start https health server failed: %v", err)
 	}
 
 	go func() {

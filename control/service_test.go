@@ -25,12 +25,10 @@ func TestHandleHandshakePacketSuccess(t *testing.T) {
 		Gateway:             net.ParseIP("10.26.0.1"),
 		Domain:              "ms.net",
 		Netmask:             "255.255.255.0",
+		DefaultGatewayID:    "gw-default",
 		GatewayTicketSecret: testGatewayTicketSecret,
 	}
-	ctrl, err := NewController(cfg)
-	if err != nil {
-		t.Fatalf("NewController failed: %v", err)
-	}
+	ctrl := newControllerWithConfig(t, cfg)
 	defer ctrl.Stop()
 
 	req := &pb.HandshakeRequest{
@@ -97,12 +95,10 @@ func TestHandleHandshakePacketInvalidPayload(t *testing.T) {
 		Gateway:             net.ParseIP("10.26.0.1"),
 		Domain:              "ms.net",
 		Netmask:             "255.255.255.0",
+		DefaultGatewayID:    "gw-default",
 		GatewayTicketSecret: testGatewayTicketSecret,
 	}
-	ctrl, err := NewController(cfg)
-	if err != nil {
-		t.Fatalf("NewController failed: %v", err)
-	}
+	ctrl := newControllerWithConfig(t, cfg)
 	defer ctrl.Stop()
 
 	reqPacket := &protocol.Packet{
@@ -922,8 +918,7 @@ func TestHandleDeviceAuthPacket(t *testing.T) {
 func TestGatewayReportAndRegistrationGrant(t *testing.T) {
 	ctrl := newTestController(t)
 	defer ctrl.Stop()
-	ctrl.ApproveGatewayNode("gw-1", "127.0.0.1:51820")
-	report := newSignedGatewayReport(t, testGatewayTicketSecret, "gw-1", "127.0.0.1:51820", []string{"udp_blind_relay_v1"}, time.Now(), randomGatewayNonce(t))
+	report := newSignedGatewayReport(t, testGatewayTicketSecret, "gw-default", "127.0.0.1:51820", []string{"udp_blind_relay_v1"}, time.Now(), randomGatewayNonce(t))
 	packet := newGatewayReportPacket(t, report)
 	resp, err := ctrl.HandleGatewayReportPacket(packet)
 	if err != nil {
@@ -933,7 +928,7 @@ func TestGatewayReportAndRegistrationGrant(t *testing.T) {
 	if err := proto.Unmarshal(resp.Payload, &ack); err != nil {
 		t.Fatalf("unmarshal gateway report ack failed: %v", err)
 	}
-	if !ack.GetOk() || ack.GetGatewayId() != "gw-1" {
+	if !ack.GetOk() || ack.GetGatewayId() != "gw-default" {
 		t.Fatalf("unexpected gateway report ack: %+v", ack)
 	}
 
@@ -1030,16 +1025,13 @@ func TestGatewayApproveByIDAfterPendingReport(t *testing.T) {
 }
 
 func TestGatewayReportAllowsConfiguredDefaultGateway(t *testing.T) {
-	ctrl, err := NewController(&config.Config{
+	ctrl := newControllerWithConfig(t, &config.Config{
 		Gateway:             net.ParseIP("10.26.0.1"),
 		Domain:              "ms.net",
 		Netmask:             "255.255.255.0",
-		DefaultGateway:      "gateway.middlescale.net:433",
+		DefaultGatewayID:    "gw-default",
 		GatewayTicketSecret: testGatewayTicketSecret,
 	})
-	if err != nil {
-		t.Fatalf("NewController failed: %v", err)
-	}
 	defer ctrl.Stop()
 	report := newSignedGatewayReport(t, testGatewayTicketSecret, "gw-default", "gateway.middlescale.net:433", []string{"udp_blind_relay_v1"}, time.Now(), randomGatewayNonce(t))
 	packet := newGatewayReportPacket(t, report)
@@ -1057,8 +1049,14 @@ func TestGatewayReportAllowsConfiguredDefaultGateway(t *testing.T) {
 }
 
 func TestGatewayApprovalPersistsAcrossControllerRestart(t *testing.T) {
-	t.Setenv("GATEWAY_STORE_JSON_PATH", filepath.Join(t.TempDir(), "gateways.json"))
-	ctrl := newTestController(t)
+	stateDir := t.TempDir()
+	ctrl := newControllerWithStateDir(t, &config.Config{
+		Gateway:             net.ParseIP("10.26.0.1"),
+		Domain:              "ms.net",
+		Netmask:             "255.255.255.0",
+		DefaultGatewayID:    "gw-default",
+		GatewayTicketSecret: testGatewayTicketSecret,
+	}, stateDir)
 	report := newSignedGatewayReport(t, testGatewayTicketSecret, "gw-persist", "127.0.0.1:51821", []string{"udp_blind_relay_v1"}, time.Now(), randomGatewayNonce(t))
 	resp, err := ctrl.HandleGatewayReportPacket(newGatewayReportPacket(t, report))
 	if err != nil {
@@ -1076,7 +1074,13 @@ func TestGatewayApprovalPersistsAcrossControllerRestart(t *testing.T) {
 	}
 	ctrl.Stop()
 
-	reloaded := newTestController(t)
+	reloaded := newControllerWithStateDir(t, &config.Config{
+		Gateway:             net.ParseIP("10.26.0.1"),
+		Domain:              "ms.net",
+		Netmask:             "255.255.255.0",
+		DefaultGatewayID:    "gw-default",
+		GatewayTicketSecret: testGatewayTicketSecret,
+	}, stateDir)
 	defer reloaded.Stop()
 	if !reloaded.isGatewayAllowed("gw-persist", "127.0.0.1:51821") {
 		t.Fatalf("expected approved gateway to persist across restart")
@@ -1136,8 +1140,9 @@ func TestGatewaySignedKeepaliveRejectsStaleTimestamp(t *testing.T) {
 func TestRegistrationSkipsExpiredGatewayLease(t *testing.T) {
 	ctrl := newTestController(t)
 	defer ctrl.Stop()
-	ctrl.gatewayNodes["gw-expired"] = GatewayNodeInfo{
-		GatewayID:    "gw-expired",
+	ctrl.gatewayAllow["gw-default"] = "127.0.0.1:51824"
+	ctrl.gatewayNodes["gw-default"] = GatewayNodeInfo{
+		GatewayID:    "gw-default",
 		Endpoint:     "127.0.0.1:51822",
 		Capabilities: []string{"udp_blind_relay_v1"},
 		UpdatedAt:    time.Now().Add(-2 * gatewayNodeLease),
@@ -1147,7 +1152,7 @@ func TestRegistrationSkipsExpiredGatewayLease(t *testing.T) {
 	if grant == nil {
 		t.Fatalf("expected gateway access grant in registration response")
 	}
-	if len(grant.GetGatewayAddrs()) > 0 && grant.GetGatewayAddrs()[0] == "quic://127.0.0.1:51822" {
+	if len(grant.GetGatewayAddrs()) == 0 || grant.GetGatewayAddrs()[0] != "quic://127.0.0.1:51824" {
 		t.Fatalf("expected expired gateway to be skipped")
 	}
 }
@@ -1155,6 +1160,7 @@ func TestRegistrationSkipsExpiredGatewayLease(t *testing.T) {
 func TestRefreshGatewayGrantPacket(t *testing.T) {
 	ctrl := newTestController(t)
 	defer ctrl.Stop()
+	ctrl.RegisterGatewayNode("gw-default", "127.0.0.1:51820", []string{"udp_blind_relay_v1"})
 
 	regReq := newBaseRegisterReq("dev-refresh-a", "node-refresh-a")
 	regResp := mustRegister(t, ctrl, regReq, &net.UDPAddr{IP: net.ParseIP("1.1.1.30"), Port: 3030})
@@ -1201,16 +1207,14 @@ func TestRefreshGatewayGrantPacket(t *testing.T) {
 }
 
 func TestRegistrationUsesConfiguredGroupNetwork(t *testing.T) {
-	ctrl, err := NewController(&config.Config{
+	ctrl := newControllerWithConfig(t, &config.Config{
 		Groups: map[string]config.GroupConfig{
 			"g1.net": {Gateway: net.ParseIP("10.26.1.1"), Netmask: "255.255.255.0"},
 			"g2.net": {Gateway: net.ParseIP("10.27.0.1"), Netmask: "255.255.0.0"},
 		},
+		DefaultGatewayID:    "gw-default",
 		GatewayTicketSecret: testGatewayTicketSecret,
 	})
-	if err != nil {
-		t.Fatalf("NewController failed: %v", err)
-	}
 	defer ctrl.Stop()
 	req := newBaseRegisterReq("dev-g1-a", "node-g1-a")
 	req.Token = "g1.net"
@@ -1225,12 +1229,26 @@ func TestRegistrationUsesConfiguredGroupNetwork(t *testing.T) {
 
 func newTestController(t *testing.T) *Controller {
 	t.Helper()
-	ctrl, err := NewController(&config.Config{
+	return newControllerWithConfig(t, &config.Config{
 		Gateway:             net.ParseIP("10.26.0.1"),
 		Domain:              "ms.net",
 		Netmask:             "255.255.255.0",
+		DefaultGatewayID:    "gw-default",
 		GatewayTicketSecret: testGatewayTicketSecret,
 	})
+}
+
+func newControllerWithConfig(t *testing.T, cfg *config.Config) *Controller {
+	t.Helper()
+	stateDir := t.TempDir()
+	return newControllerWithStateDir(t, cfg, stateDir)
+}
+
+func newControllerWithStateDir(t *testing.T, cfg *config.Config, stateDir string) *Controller {
+	t.Helper()
+	t.Setenv("UM_STORE_JSON_PATH", filepath.Join(stateDir, "um.json"))
+	t.Setenv("GATEWAY_STORE_JSON_PATH", filepath.Join(stateDir, "gateways.json"))
+	ctrl, err := NewController(cfg)
 	if err != nil {
 		t.Fatalf("NewController failed: %v", err)
 	}

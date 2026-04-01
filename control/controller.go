@@ -1284,8 +1284,7 @@ func (c *Controller) ApproveGatewayNodeByID(gatewayID string) error {
 	if gatewayID == "" {
 		return fmt.Errorf("gateway_id is required")
 	}
-	defaultEndpoint := strings.TrimSpace(c.cfg.DefaultGateway)
-	if gatewayID == defaultGatewayServerName(defaultEndpoint) {
+	if gatewayID == strings.TrimSpace(c.cfg.DefaultGatewayID) {
 		return nil
 	}
 	if endpoint, ok := c.gatewayAllow[gatewayID]; ok && strings.TrimSpace(endpoint) != "" {
@@ -1305,25 +1304,27 @@ func (c *Controller) ListGateways() []GatewayAdminView {
 	defer c.gatewayMu.RUnlock()
 	now := time.Now()
 	byID := map[string]GatewayAdminView{}
-	defaultEndpoint := strings.TrimSpace(c.cfg.DefaultGateway)
-	if defaultEndpoint != "" {
-		defaultID := defaultGatewayServerName(defaultEndpoint)
-		byID[defaultID] = GatewayAdminView{
+	defaultID := strings.TrimSpace(c.cfg.DefaultGatewayID)
+	if defaultID != "" {
+		item := GatewayAdminView{
 			GatewayID: defaultID,
-			Endpoint:  defaultEndpoint,
 			Approved:  true,
 			Default:   true,
 		}
+		if endpoint, ok := c.gatewayAllow[defaultID]; ok {
+			item.Endpoint = endpoint
+		}
+		byID[defaultID] = item
 	}
 	for gatewayID, endpoint := range c.gatewayAllow {
-		if strings.TrimSpace(endpoint) == defaultEndpoint {
-			continue
+		item := byID[gatewayID]
+		item.GatewayID = gatewayID
+		item.Endpoint = endpoint
+		item.Approved = true
+		if gatewayID == defaultID {
+			item.Default = true
 		}
-		byID[gatewayID] = GatewayAdminView{
-			GatewayID: gatewayID,
-			Endpoint:  endpoint,
-			Approved:  true,
-		}
+		byID[gatewayID] = item
 	}
 	for gatewayID, seen := range c.gatewaySeen {
 		item, ok := byID[gatewayID]
@@ -1333,30 +1334,18 @@ func (c *Controller) ListGateways() []GatewayAdminView {
 				Endpoint:  seen.Endpoint,
 			}
 		}
+		if strings.TrimSpace(item.Endpoint) == "" {
+			item.Endpoint = seen.Endpoint
+		}
 		item.Reported = true
 		item.Alive = now.Sub(seen.UpdatedAt) <= gatewayNodeLease
 		item.Capabilities = append([]string{}, seen.Capabilities...)
 		item.UpdatedAtUnix = seen.UpdatedAt.Unix()
 		byID[gatewayID] = item
 	}
-	if defaultEndpoint != "" {
-		defaultID := defaultGatewayServerName(defaultEndpoint)
-		item := byID[defaultID]
-		if !item.Reported {
-			for _, seen := range c.gatewaySeen {
-				if strings.TrimSpace(seen.Endpoint) == defaultEndpoint {
-					item.Reported = true
-					item.Alive = now.Sub(seen.UpdatedAt) <= gatewayNodeLease
-					item.Capabilities = append([]string{}, seen.Capabilities...)
-					item.UpdatedAtUnix = seen.UpdatedAt.Unix()
-					break
-				}
-			}
-		}
-		byID[defaultID] = item
-	}
 	for gatewayID, item := range byID {
-		if node, ok := c.gatewayNodes[gatewayID]; ok && strings.TrimSpace(node.Endpoint) == strings.TrimSpace(item.Endpoint) {
+		if node, ok := c.gatewayNodes[gatewayID]; ok && (strings.TrimSpace(item.Endpoint) == "" || strings.TrimSpace(node.Endpoint) == strings.TrimSpace(item.Endpoint)) {
+			item.Endpoint = node.Endpoint
 			item.Reported = true
 			item.Alive = now.Sub(node.UpdatedAt) <= gatewayNodeLease
 			item.Capabilities = append([]string{}, node.Capabilities...)
@@ -1374,7 +1363,7 @@ func (c *Controller) ListGateways() []GatewayAdminView {
 func (c *Controller) isGatewayAllowed(gatewayID, endpoint string) bool {
 	c.gatewayMu.RLock()
 	defer c.gatewayMu.RUnlock()
-	if endpoint == strings.TrimSpace(c.cfg.DefaultGateway) {
+	if strings.TrimSpace(gatewayID) == strings.TrimSpace(c.cfg.DefaultGatewayID) {
 		return true
 	}
 	allowedEndpoint, ok := c.gatewayAllow[gatewayID]
@@ -1391,6 +1380,7 @@ func (c *Controller) RegisterGatewayNode(gatewayID, endpoint string, capabilitie
 		UpdatedAt:    time.Now(),
 	}
 	delete(c.gatewaySeen, gatewayID)
+	c.persistGatewayApprovalLocked()
 	c.gatewayMu.Unlock()
 }
 
@@ -1404,24 +1394,22 @@ func (c *Controller) buildGatewayAccessGrant(virtualIP uint32, deviceID string) 
 	c.gatewayMu.RLock()
 	defer c.gatewayMu.RUnlock()
 	now := time.Now()
+	defaultID := strings.TrimSpace(c.cfg.DefaultGatewayID)
+	if defaultID == "" {
+		return nil
+	}
 	var picked *GatewayNodeInfo
-	for _, node := range c.gatewayNodes {
-		if now.Sub(node.UpdatedAt) > gatewayNodeLease {
-			continue
-		}
+	if node, ok := c.gatewayNodes[defaultID]; ok && now.Sub(node.UpdatedAt) <= gatewayNodeLease {
 		n := node
 		picked = &n
-		break
+	} else if endpoint, ok := c.gatewayAllow[defaultID]; ok && strings.TrimSpace(endpoint) != "" {
+		picked = &GatewayNodeInfo{
+			GatewayID: defaultID,
+			Endpoint:  endpoint,
+		}
 	}
 	if picked == nil {
-		defaultEndpoint := strings.TrimSpace(c.cfg.DefaultGateway)
-		if defaultEndpoint == "" {
-			return nil
-		}
-		picked = &GatewayNodeInfo{
-			GatewayID: defaultGatewayServerName(defaultEndpoint),
-			Endpoint:  defaultEndpoint,
-		}
+		return nil
 	}
 	expire := time.Now().Add(2 * time.Minute)
 	sessionID := uint64(time.Now().UnixNano())
@@ -1445,7 +1433,7 @@ func (c *Controller) buildGatewayAccessGrant(virtualIP uint32, deviceID string) 
 	}
 	return &pb.GatewayAccessGrant{
 		GatewayAddrs:        []string{"quic://" + picked.Endpoint},
-		GatewayServerName:   defaultGatewayServerName(picked.Endpoint),
+		GatewayServerName:   gatewayServerName(picked.GatewayID, picked.Endpoint),
 		Ticket:              []byte(ticket),
 		TicketExpireUnixMs:  expire.UnixMilli(),
 		SessionId:           sessionID,
@@ -1456,7 +1444,11 @@ func (c *Controller) buildGatewayAccessGrant(virtualIP uint32, deviceID string) 
 	}
 }
 
-func defaultGatewayServerName(endpoint string) string {
+func gatewayServerName(gatewayID, endpoint string) string {
+	gatewayID = strings.TrimSpace(gatewayID)
+	if gatewayID != "" {
+		return gatewayID
+	}
 	host := endpoint
 	if h, _, err := net.SplitHostPort(endpoint); err == nil {
 		host = h

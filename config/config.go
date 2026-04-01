@@ -20,7 +20,7 @@ type Config struct {
 	Groups              map[string]GroupConfig  `json:"groups"`
 	DefaultDomain       string                  `json:"default_domain"`
 	Domains             map[string]DomainConfig `json:"domains"`
-	DefaultGateway      string                  `json:"default_gateway"`
+	DefaultGatewayID    string                  `json:"default_gateway_id"`
 	GatewayTicketSecret string                  `json:"gateway_ticket_secret"`
 	ListenAddr          string                  `json:"listen_addr"`
 	AutoCertDomain      string                  `json:"autocert_domain"`
@@ -62,8 +62,8 @@ func LoadConfig(path string) (*Config, error) {
 
 // Validate 校验配置字段格式
 func (c *Config) Validate() error {
-	if strings.TrimSpace(c.DefaultGateway) == "" {
-		c.DefaultGateway = "gateway.middlescale.net:443"
+	if strings.TrimSpace(c.DefaultGatewayID) == "" {
+		return errors.New("default_gateway_id 不能为空")
 	}
 	if strings.TrimSpace(c.GatewayTicketSecret) == "" {
 		return errors.New("gateway_ticket_secret 不能为空")
