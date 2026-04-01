@@ -10,11 +10,13 @@ RUN go mod download
 COPY . .
 # Build static-like binary for the requested target platform.
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -ldflags='-s -w' -o /out/sdl-control ./
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -ldflags='-s -w' -o /out/sdl-admin ./cmd/sdl-admin
 
 # Final stage
 FROM alpine:3.18
 RUN apk add --no-cache ca-certificates
 COPY --from=builder /out/sdl-control /usr/local/bin/sdl-control
+COPY --from=builder /out/sdl-admin /usr/local/bin/sdl-admin
 # Optional directory for autocert cache
 RUN mkdir -p /var/lib/sdl-control && chown 1000:1000 /var/lib/sdl-control || true
 
