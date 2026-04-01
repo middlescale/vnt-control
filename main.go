@@ -147,15 +147,6 @@ func main() {
 			log.Fatalf("start autocert http challenge server failed: %v", err)
 		}
 	}
-	healthMux := http.NewServeMux()
-	healthMux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("content-type", "text/plain; charset=utf-8")
-		_, _ = w.Write([]byte("ok"))
-	})
-	if err := handlers.StartHTTPSServer(ctx, listenAddr, tlsConfig.Clone(), healthMux); err != nil {
-		log.Fatalf("start https health server failed: %v", err)
-	}
-
 	go func() {
 		<-sigs
 		cancel()
