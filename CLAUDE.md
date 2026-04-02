@@ -83,16 +83,16 @@ go test -v ./control          # Run tests with verbose output
 The `sdl-admin` tool provides administrative functionality through a Unix Domain Socket (default: `/tmp/sdl-control-admin.sock`):
 
 ```bash
-./sdl-admin --createUser user1 --domain ms.net
-./sdl-admin --issueDeviceTicket --userId <user_id> --group sales.ms.net --ttlSeconds 300
-./sdl-admin --issueDeviceTicket --userId <user_id> --group sales --ttlSeconds 300
-./sdl-admin --list_gateway
-./sdl-admin --register_gateway --gateway_id gw-1
+./sdl-admin createUser user1 --domain ms.net
+./sdl-admin issueDeviceTicket --userId <user_id> --group sales.ms.net --ttlSeconds 300
+./sdl-admin issueDeviceTicket -u <user_id> -g sales --ttlSeconds 300
+./sdl-admin listGateway
+./sdl-admin registerGateway --gateway-id gw-1
 ```
 
 Note: The `--group` parameter can accept short names (e.g., `sales`, which gets automatically completed to `sales.<user-domain>`) or FQDN (e.g., `sales.ms.net`, which gets validated to ensure it belongs to the user's domain).
 
-Gateway registration/keepalive uses shared-secret HMAC auth plus separate admin approval: every `GatewayReportRequest` must carry `nonce + signature`, where signature is HMAC-SHA256 over the protobuf proof `(gateway_id, endpoint, capabilities, report_unix_ms, nonce)` using `gateway_ticket_secret`. Admin approval via `--register_gateway` remains separate from authentication, and replay/freshness failures must be rejected explicitly.
+Gateway registration/keepalive uses shared-secret HMAC auth plus separate admin approval: every `GatewayReportRequest` must carry `nonce + signature`, where signature is HMAC-SHA256 over the protobuf proof `(gateway_id, endpoint, capabilities, report_unix_ms, nonce)` using `gateway_ticket_secret`. Admin approval via `registerGateway` remains separate from authentication, and replay/freshness failures must be rejected explicitly.
 
 ### Configuration Example
 ```json

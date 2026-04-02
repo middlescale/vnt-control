@@ -45,48 +45,27 @@ type gatewayInfo struct {
 }
 
 func main() {
-	createUser := flag.String("createUser", "", "create user by name")
-	domain := flag.String("domain", "ms.net", "domain fqdn for user (default ms.net)")
-	issueTicket := flag.Bool("issueDeviceTicket", false, "issue device ticket")
-	listGateway := flag.Bool("listGateway", false, "list default and approved gateways")
-	listGatewaySnake := flag.Bool("list_gateway", false, "list default and approved gateways")
-	registerGateway := flag.Bool("registerGateway", false, "approve gateway by id")
-	registerGatewaySnake := flag.Bool("register_gateway", false, "approve gateway")
-	gatewayID := flag.String("gatewayId", "", "gateway id")
-	gatewayIDSnake := flag.String("gateway_id", "", "gateway id")
-	endpoint := flag.String("endpoint", "", "gateway endpoint host:port (deprecated for approval)")
-	caps := flag.String("caps", "quic_stream_relay_v1", "comma-separated gateway capabilities")
-	userID := flag.String("userId", "", "user id")
-	group := flag.String("group", "", "group name")
-	ttlSeconds := flag.Int64("ttlSeconds", 600, "ticket ttl seconds")
-	socket := flag.String("socket", defaultSocketPath(), "admin unix socket path")
-	flag.Parse()
+	global := flag.NewFlagSet("sdl-admin", flag.ContinueOnError)
+	global.SetOutput(os.Stderr)
+	socket := global.String("socket", defaultSocketPath(), "admin unix socket path")
+	if err := global.Parse(os.Args[1:]); err != nil {
+		fatalUsage()
+	}
+	args := global.Args()
+	if len(args) == 0 {
+		fatalUsage()
+	}
 
 	var req adminRequest
-	switch {
-	case strings.TrimSpace(*createUser) != "":
-		req = adminRequest{Action: "create_user", Name: strings.TrimSpace(*createUser), Domain: strings.TrimSpace(*domain)}
-	case *issueTicket:
-		if strings.TrimSpace(*userID) == "" || strings.TrimSpace(*group) == "" {
-			fatalUsage()
-		}
-		req = adminRequest{Action: "issue_device_ticket", UserID: strings.TrimSpace(*userID), Group: strings.TrimSpace(*group), TTLSeconds: *ttlSeconds}
-	case *listGateway || *listGatewaySnake:
-		req = adminRequest{Action: "list_gateway"}
-	case *registerGateway || *registerGatewaySnake:
-		gid := strings.TrimSpace(*gatewayID)
-		if gid == "" {
-			gid = strings.TrimSpace(*gatewayIDSnake)
-		}
-		if gid == "" {
-			fatalUsage()
-		}
-		req = adminRequest{
-			Action:       "register_gateway",
-			GatewayID:    gid,
-			Endpoint:     strings.TrimSpace(*endpoint),
-			Capabilities: splitCSV(*caps),
-		}
+	switch args[0] {
+	case "createUser", "create_user":
+		req = parseCreateUser(args[1:])
+	case "issueDeviceTicket", "issue_device_ticket":
+		req = parseIssueDeviceTicket(args[1:])
+	case "listGateway", "list_gateway":
+		req = parseListGateway(args[1:])
+	case "registerGateway", "register_gateway":
+		req = parseRegisterGateway(args[1:])
 	default:
 		fatalUsage()
 	}
@@ -107,6 +86,88 @@ func main() {
 		for _, gw := range resp.Gateways {
 			fmt.Printf("gateway=%s endpoint=%s default=%t approved=%t reported=%t alive=%t updated_at_unix=%d\n", gw.GatewayID, gw.Endpoint, gw.Default, gw.Approved, gw.Reported, gw.Alive, gw.UpdatedAtUnix)
 		}
+	}
+}
+
+func parseCreateUser(args []string) adminRequest {
+	fs := flag.NewFlagSet("createUser", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	domain := fs.String("domain", "ms.net", "domain fqdn for user (default ms.net)")
+	fs.StringVar(domain, "d", "ms.net", "domain fqdn for user (default ms.net)")
+	if err := fs.Parse(args); err != nil {
+		fatalUsage()
+	}
+	if fs.NArg() != 1 {
+		fatalUsage()
+	}
+	return adminRequest{
+		Action: "create_user",
+		Name:   strings.TrimSpace(fs.Arg(0)),
+		Domain: strings.TrimSpace(*domain),
+	}
+}
+
+func parseIssueDeviceTicket(args []string) adminRequest {
+	fs := flag.NewFlagSet("issueDeviceTicket", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	var userID string
+	var group string
+	var ttlSeconds int64
+	fs.StringVar(&userID, "userId", "", "user id")
+	fs.StringVar(&userID, "u", "", "user id")
+	fs.StringVar(&group, "group", "", "group name")
+	fs.StringVar(&group, "g", "", "group name")
+	fs.Int64Var(&ttlSeconds, "ttlSeconds", 600, "ticket ttl seconds")
+	fs.Int64Var(&ttlSeconds, "t", 600, "ticket ttl seconds")
+	if err := fs.Parse(args); err != nil {
+		fatalUsage()
+	}
+	if strings.TrimSpace(userID) == "" || strings.TrimSpace(group) == "" || fs.NArg() != 0 {
+		fatalUsage()
+	}
+	return adminRequest{
+		Action:     "issue_device_ticket",
+		UserID:     strings.TrimSpace(userID),
+		Group:      strings.TrimSpace(group),
+		TTLSeconds: ttlSeconds,
+	}
+}
+
+func parseListGateway(args []string) adminRequest {
+	fs := flag.NewFlagSet("listGateway", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	if err := fs.Parse(args); err != nil {
+		fatalUsage()
+	}
+	if fs.NArg() != 0 {
+		fatalUsage()
+	}
+	return adminRequest{Action: "list_gateway"}
+}
+
+func parseRegisterGateway(args []string) adminRequest {
+	fs := flag.NewFlagSet("registerGateway", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	var gatewayID string
+	var endpoint string
+	var caps string
+	fs.StringVar(&gatewayID, "gatewayId", "", "gateway id")
+	fs.StringVar(&gatewayID, "gateway_id", "", "gateway id")
+	fs.StringVar(&gatewayID, "gateway-id", "", "gateway id")
+	fs.StringVar(&gatewayID, "g", "", "gateway id")
+	fs.StringVar(&endpoint, "endpoint", "", "gateway endpoint host:port (deprecated for approval)")
+	fs.StringVar(&caps, "caps", "quic_stream_relay_v1", "comma-separated gateway capabilities")
+	if err := fs.Parse(args); err != nil {
+		fatalUsage()
+	}
+	if strings.TrimSpace(gatewayID) == "" || fs.NArg() != 0 {
+		fatalUsage()
+	}
+	return adminRequest{
+		Action:       "register_gateway",
+		GatewayID:    strings.TrimSpace(gatewayID),
+		Endpoint:     strings.TrimSpace(endpoint),
+		Capabilities: splitCSV(caps),
 	}
 }
 
@@ -137,10 +198,10 @@ func call(socket string, req adminRequest) adminResponse {
 
 func fatalUsage() {
 	fmt.Fprintln(os.Stderr, "usage:")
-	fmt.Fprintln(os.Stderr, "  sdl-admin --createUser user1 [--domain ms.net]")
-	fmt.Fprintln(os.Stderr, "  sdl-admin --issueDeviceTicket --userId u-1 --group g1 [--ttlSeconds 600]")
-	fmt.Fprintln(os.Stderr, "  sdl-admin --list_gateway")
-	fmt.Fprintln(os.Stderr, "  sdl-admin --register_gateway --gateway_id gw-1")
+	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] createUser user1 [--domain/-d ms.net]")
+	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] issueDeviceTicket --userId/-u u-1 --group/-g g1 [--ttlSeconds/-t 600]")
+	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] listGateway")
+	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] registerGateway --gateway-id/-g gw-1")
 	os.Exit(2)
 }
 

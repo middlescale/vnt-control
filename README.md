@@ -147,11 +147,11 @@ make proto   # 重新生成 proto Go 代码（需安装 protoc 与插件）
 示例：
 
 ```bash
-./sdl-admin --createUser user1 --domain ms.net
-./sdl-admin --issueDeviceTicket --userId <user_id> --group sales.ms.net --ttlSeconds 300
-./sdl-admin --issueDeviceTicket --userId <user_id> --group sales --ttlSeconds 300
-./sdl-admin --list_gateway
-./sdl-admin --register_gateway --gateway_id gw-1
+./sdl-admin createUser user1 --domain ms.net
+./sdl-admin issueDeviceTicket --userId <user_id> --group sales.ms.net --ttlSeconds 300
+./sdl-admin issueDeviceTicket -u <user_id> -g sales --ttlSeconds 300
+./sdl-admin listGateway
+./sdl-admin registerGateway --gateway-id gw-1
 ```
 
 说明：`--group` 可传短名（如 `sales`，会自动补全为用户所属域名下的 `sales.<user-domain>`）；若传 FQDN（如 `sales.ms.net`），会校验其必须属于该用户所属域名。
@@ -159,7 +159,7 @@ make proto   # 重新生成 proto Go 代码（需安装 protoc 与插件）
 Gateway 注册/保活分为两层：
 
 - **HMAC 鉴权**：gateway 每次发送 `GatewayReportRequest` 都必须携带 `nonce + signature`。signature 覆盖 `GatewayReportProof`（`gateway_id + endpoint + capabilities + report_unix_ms + nonce` 的 protobuf 编码），由 control 使用 `gateway_ticket_secret` 做 HMAC-SHA256 校验；control 同时对 `report_unix_ms + nonce` 执行新鲜度/重放保护。
-- **管理批准**：鉴权通过后，除配置中的 `default_gateway_id` 对应 gateway 外，其他 gateway 仍需先经 `sdl-admin --register_gateway --gateway_id <id>` 批准，其 `GatewayReportRequest` 才会返回成功。默认 gateway 第一次成功上报后，control 会持久化保存该 `gateway_id` 当前的 `endpoint`，后续给客户端下发默认网关时直接读取这份映射。`sdl-admin --list_gateway` 可查看默认网关、待批准上报与已批准网关状态（含 `alive` 保活状态）。
+- **管理批准**：鉴权通过后，除配置中的 `default_gateway_id` 对应 gateway 外，其他 gateway 仍需先经 `sdl-admin registerGateway --gateway-id <id>` 批准，其 `GatewayReportRequest` 才会返回成功。默认 gateway 第一次成功上报后，control 会持久化保存该 `gateway_id` 当前的 `endpoint`，后续给客户端下发默认网关时直接读取这份映射。`sdl-admin listGateway` 可查看默认网关、待批准上报与已批准网关状态（含 `alive` 保活状态）。
 
 control 对已批准网关采用租约保活（90 秒），并基于 `report_unix_ms + nonce` 做有限时间窗内的重放保护；超时未上报的网关不会继续被下发给客户端。
 
