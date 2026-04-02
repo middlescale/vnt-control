@@ -25,6 +25,35 @@ func (c *Controller) UMCreateUser(name string, domain ...string) (UMUser, error)
 	return c.um.CreateUser(name, selectedDomain)
 }
 
+func (c *Controller) UMCreateUserWithID(userID string, group string, domain ...string) (UMUser, error) {
+	selectedDomain := ""
+	if len(domain) > 0 {
+		selectedDomain = strings.TrimSpace(domain[0])
+	}
+	if selectedDomain == "" {
+		trimmedGroup := strings.TrimSpace(group)
+		if len(c.cfg.Domains) > 0 {
+			if domainName, _, ok := matchDomainAndGroup(trimmedGroup, c.cfg.Domains); ok {
+				selectedDomain = domainName
+			}
+		} else if idx := strings.Index(trimmedGroup, "."); idx > 0 && idx+1 < len(trimmedGroup) {
+			selectedDomain = strings.TrimSpace(trimmedGroup[idx+1:])
+		}
+	}
+	if selectedDomain == "" {
+		selectedDomain = strings.TrimSpace(c.cfg.EffectiveDefaultDomain())
+	}
+	if selectedDomain == "" {
+		selectedDomain = "ms.net"
+	}
+	if len(c.cfg.Domains) > 0 {
+		if _, ok := c.cfg.Domains[selectedDomain]; !ok {
+			return UMUser{}, fmt.Errorf("domain %s not configured", selectedDomain)
+		}
+	}
+	return c.um.CreateUserWithID(userID, selectedDomain, group)
+}
+
 func (c *Controller) UMCreateEnrollment(userID string, ttl time.Duration) (UMEnrollment, error) {
 	return c.um.CreateEnrollment(userID, ttl)
 }

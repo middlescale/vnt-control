@@ -147,14 +147,15 @@ make proto   # 重新生成 proto Go 代码（需安装 protoc 与插件）
 示例：
 
 ```bash
-./sdl-admin createUser user1 --domain ms.net
+./sdl-admin createUser --userId user1 --group sales.ms.net
+./sdl-admin createUser -u user1
 ./sdl-admin issueDeviceTicket --userId <user_id> --group sales.ms.net --ttlSeconds 300
 ./sdl-admin issueDeviceTicket -u <user_id> -g sales --ttlSeconds 300
 ./sdl-admin listGateway
 ./sdl-admin registerGateway --gateway-id gw-1
 ```
 
-说明：`--group` 可传短名（如 `sales`，会自动补全为用户所属域名下的 `sales.<user-domain>`）；若传 FQDN（如 `sales.ms.net`），会校验其必须属于该用户所属域名。
+说明：`createUser` 里的 `--group` 不传时默认是 `default`（最终会落成默认域名下的 `default.<domain>`）。`--group` 可传短名（如 `sales`，会自动补全为用户所属域名下的 `sales.<user-domain>`）；若传 FQDN（如 `sales.ms.net`），会校验其必须属于该用户所属域名。
 
 Gateway 注册/保活分为两层：
 

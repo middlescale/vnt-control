@@ -82,7 +82,7 @@ func handleAdminConn(ctrl *control.Controller, conn net.Conn) {
 	}
 	switch req.Action {
 	case "create_user":
-		user, err := ctrl.UMCreateUser(strings.TrimSpace(req.Name), strings.TrimSpace(req.Domain))
+		user, err := ctrl.UMCreateUserWithID(strings.TrimSpace(req.UserID), strings.TrimSpace(req.Group), strings.TrimSpace(req.Domain))
 		if err != nil {
 			_ = json.NewEncoder(conn).Encode(adminResponse{OK: false, Error: err.Error()})
 			return
@@ -91,7 +91,7 @@ func handleAdminConn(ctrl *control.Controller, conn net.Conn) {
 	case "issue_device_ticket":
 		ttl := req.TTLSeconds
 		if ttl <= 0 {
-			ttl = 600
+			ttl = 300
 		}
 		t, err := ctrl.UMIssueDeviceTicket(strings.TrimSpace(req.UserID), strings.TrimSpace(req.Group), time.Duration(ttl)*time.Second)
 		if err != nil {

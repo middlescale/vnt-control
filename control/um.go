@@ -111,7 +111,14 @@ func (m *UserManager) CreateUser(name string, domain ...string) (UMUser, error) 
 	if len(domain) > 0 && strings.TrimSpace(domain[0]) != "" {
 		userDomain = strings.TrimSpace(domain[0])
 	}
-	id := fmt.Sprintf("u-%d", m.userSeq.Add(1))
+	id := ""
+	for {
+		candidate := fmt.Sprintf("u-%d", m.userSeq.Add(1))
+		if _, exists := m.users[candidate]; !exists {
+			id = candidate
+			break
+		}
+	}
 	user := UMUser{
 		UserID:    id,
 		Name:      name,
@@ -122,6 +129,47 @@ func (m *UserManager) CreateUser(name string, domain ...string) (UMUser, error) 
 	m.users[id] = user
 	m.policies[id] = m.generateBasicPolicyLocked(id)
 	err := m.saveLocked()
+	m.mu.Unlock()
+	if err != nil {
+		return UMUser{}, err
+	}
+	return user, nil
+}
+
+func (m *UserManager) CreateUserWithID(userID string, domain string, group string) (UMUser, error) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return UMUser{}, fmt.Errorf("user id is empty")
+	}
+	userDomain := "ms.net"
+	if strings.TrimSpace(domain) != "" {
+		userDomain = strings.TrimSpace(domain)
+	}
+	defaultGroup := strings.TrimSpace(group)
+	if defaultGroup == "" {
+		defaultGroup = "default"
+	}
+	normalizedGroup, err := normalizeGroupForUser(defaultGroup, userDomain)
+	if err != nil {
+		return UMUser{}, err
+	}
+	user := UMUser{
+		UserID:    userID,
+		Name:      userID,
+		Domain:    userDomain,
+		CreatedAt: time.Now(),
+	}
+	m.mu.Lock()
+	if _, exists := m.users[userID]; exists {
+		m.mu.Unlock()
+		return UMUser{}, fmt.Errorf("user %s already exists", userID)
+	}
+	m.users[userID] = user
+	policy := m.generateBasicPolicyLocked(userID)
+	policy.GroupName = normalizedGroup
+	policy.UpdatedAt = time.Now()
+	m.policies[userID] = policy
+	err = m.saveLocked()
 	m.mu.Unlock()
 	if err != nil {
 		return UMUser{}, err
