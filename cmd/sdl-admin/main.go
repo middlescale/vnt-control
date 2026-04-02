@@ -119,14 +119,14 @@ func parseIssueDeviceTicket(args []string) adminRequest {
 	var ttlSeconds int64
 	fs.StringVar(&userID, "userId", "", "user id")
 	fs.StringVar(&userID, "u", "", "user id")
-	fs.StringVar(&group, "group", "", "group name")
-	fs.StringVar(&group, "g", "", "group name")
+	fs.StringVar(&group, "group", "default.ms.net", "group name")
+	fs.StringVar(&group, "g", "default.ms.net", "group name")
 	fs.Int64Var(&ttlSeconds, "ttlSeconds", 300, "ticket ttl seconds")
 	fs.Int64Var(&ttlSeconds, "t", 300, "ticket ttl seconds")
 	if err := fs.Parse(args); err != nil {
 		fatalUsage()
 	}
-	if strings.TrimSpace(userID) == "" || strings.TrimSpace(group) == "" || fs.NArg() != 0 {
+	if strings.TrimSpace(userID) == "" || fs.NArg() != 0 {
 		fatalUsage()
 	}
 	return adminRequest{
@@ -203,7 +203,7 @@ func call(socket string, req adminRequest) adminResponse {
 func fatalUsage() {
 	fmt.Fprintln(os.Stderr, "usage:")
 	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] createUser --userId/-u user1 [--group/-g sales.ms.net]")
-	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] issueDeviceTicket --userId/-u u-1 --group/-g g1 [--ttlSeconds/-t 300]")
+	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] issueDeviceTicket --userId/-u u-1 [--group/-g default.ms.net] [--ttlSeconds/-t 300]")
 	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] listGateway")
 	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] registerGateway --gateway-id/-g gw-1")
 	os.Exit(2)

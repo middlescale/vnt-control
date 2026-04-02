@@ -89,11 +89,15 @@ func handleAdminConn(ctrl *control.Controller, conn net.Conn) {
 		}
 		_ = json.NewEncoder(conn).Encode(adminResponse{OK: true, UserID: user.UserID, Name: user.Name, Domain: user.Domain})
 	case "issue_device_ticket":
+		group := strings.TrimSpace(req.Group)
+		if group == "" {
+			group = "default.ms.net"
+		}
 		ttl := req.TTLSeconds
 		if ttl <= 0 {
 			ttl = 300
 		}
-		t, err := ctrl.UMIssueDeviceTicket(strings.TrimSpace(req.UserID), strings.TrimSpace(req.Group), time.Duration(ttl)*time.Second)
+		t, err := ctrl.UMIssueDeviceTicket(strings.TrimSpace(req.UserID), group, time.Duration(ttl)*time.Second)
 		if err != nil {
 			_ = json.NewEncoder(conn).Encode(adminResponse{OK: false, Error: err.Error()})
 			return

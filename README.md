@@ -149,13 +149,13 @@ make proto   # 重新生成 proto Go 代码（需安装 protoc 与插件）
 ```bash
 ./sdl-admin createUser --userId user1 --group sales.ms.net
 ./sdl-admin createUser -u user1
-./sdl-admin issueDeviceTicket --userId <user_id> --group sales.ms.net --ttlSeconds 300
-./sdl-admin issueDeviceTicket -u <user_id> -g sales --ttlSeconds 300
+./sdl-admin issueDeviceTicket --userId <user_id>
+./sdl-admin issueDeviceTicket -u <user_id> -g sales.ms.net
 ./sdl-admin listGateway
 ./sdl-admin registerGateway --gateway-id gw-1
 ```
 
-说明：`createUser` 里的 `--group` 不传时默认是 `default`（最终会落成默认域名下的 `default.<domain>`）。`--group` 可传短名（如 `sales`，会自动补全为用户所属域名下的 `sales.<user-domain>`）；若传 FQDN（如 `sales.ms.net`），会校验其必须属于该用户所属域名。
+说明：`createUser` 里的 `--group` 不传时默认是 `default`（最终会落成默认域名下的 `default.<domain>`）。`--group` 可传短名（如 `sales`，会自动补全为用户所属域名下的 `sales.<user-domain>`）；若传 FQDN（如 `sales.ms.net`），会校验其必须属于该用户所属域名。`issueDeviceTicket` 里的 `--group` 可省略，默认是 `default.ms.net`；`--ttlSeconds` 也可省略，默认是 `300`。
 
 Gateway 注册/保活分为两层：
 
@@ -164,7 +164,7 @@ Gateway 注册/保活分为两层：
 
 control 对已批准网关采用租约保活（90 秒），并基于 `report_unix_ms + nonce` 做有限时间窗内的重放保护；超时未上报的网关不会继续被下发给客户端。
 
-设备认证（auth device）由 `sdl auth` 发起：客户端输入 `user_id/group/ticket` 发送到 `sdl-control`，认证成功后设备才可注册入网。
+设备认证（auth device）由 `sdl auth` 发起：客户端输入 `--userId`、可选 `--group`（默认 `default.ms.net`）和 `ticket` 发送到 `sdl-control`，认证成功后设备才可注册入网。
 
 可选参数：
 
