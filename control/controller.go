@@ -41,10 +41,14 @@ type Controller struct {
 }
 
 type GatewayNodeInfo struct {
-	GatewayID    string
-	Endpoint     string
-	Capabilities []string
-	UpdatedAt    time.Time
+	GatewayID      string
+	Endpoint       string
+	Capabilities   []string
+	Channels       []*pb.GatewayChannel
+	DefaultChannel pb.GatewayChannelKind
+	UDPKeyID       string
+	UDPPublicKey   []byte
+	UpdatedAt      time.Time
 }
 
 type deviceAuthChallengeState struct {
@@ -1150,11 +1154,15 @@ func (c *Controller) HandleGatewayReportPacket(packet *protocol.Packet) (*protoc
 	if strings.TrimSpace(req.GetGatewayId()) == "" {
 		return nil, fmt.Errorf("gateway_id is required")
 	}
-	if strings.TrimSpace(req.GetEndpoint()) == "" {
-		return nil, fmt.Errorf("endpoint is required")
+	if len(req.GetGatewayChannels()) == 0 {
+		return nil, fmt.Errorf("gateway_channels is required")
 	}
 	if req.GetReportUnixMs() == 0 {
 		return nil, fmt.Errorf("report_unix_ms is required")
+	}
+	primaryEndpoint := primaryGatewayEndpoint(req.GetGatewayChannels())
+	if primaryEndpoint == "" {
+		return nil, fmt.Errorf("gateway_channels must include at least one valid addr")
 	}
 	now := time.Now()
 	if err := c.authenticateGatewayReport(&req, now); err != nil {
@@ -1166,12 +1174,16 @@ func (c *Controller) HandleGatewayReportPacket(packet *protocol.Packet) (*protoc
 		})
 	}
 	c.recordGatewaySeen(GatewayNodeInfo{
-		GatewayID:    req.GetGatewayId(),
-		Endpoint:     req.GetEndpoint(),
-		Capabilities: append([]string{}, req.GetCapabilities()...),
-		UpdatedAt:    now,
+		GatewayID:      req.GetGatewayId(),
+		Endpoint:       primaryEndpoint,
+		Capabilities:   append([]string{}, req.GetCapabilities()...),
+		Channels:       cloneGatewayChannels(req.GetGatewayChannels()),
+		DefaultChannel: normalizeGatewayChannelKind(req.GetDefaultGatewayChannel()),
+		UDPKeyID:       strings.TrimSpace(req.GetGatewayUdpKeyId()),
+		UDPPublicKey:   append([]byte(nil), req.GetGatewayUdpPublicKey()...),
+		UpdatedAt:      now,
 	})
-	if !c.isGatewayAllowed(req.GetGatewayId(), req.GetEndpoint()) {
+	if !c.isGatewayAllowed(req.GetGatewayId(), primaryEndpoint) {
 		return c.buildGatewayReportAck(packet, &pb.GatewayReportAck{
 			Ok:           false,
 			Reason:       "gateway not approved",
@@ -1179,7 +1191,14 @@ func (c *Controller) HandleGatewayReportPacket(packet *protocol.Packet) (*protoc
 			ExpireUnixMs: now.Add(2 * time.Minute).UnixMilli(),
 		})
 	}
-	c.RegisterGatewayNode(req.GetGatewayId(), req.GetEndpoint(), req.GetCapabilities())
+	c.RegisterGatewayNodeWithTransport(
+		req.GetGatewayId(),
+		req.GetCapabilities(),
+		req.GetGatewayChannels(),
+		req.GetDefaultGatewayChannel(),
+		req.GetGatewayUdpKeyId(),
+		req.GetGatewayUdpPublicKey(),
+	)
 
 	ack := &pb.GatewayReportAck{
 		Ok:           true,
@@ -1214,11 +1233,14 @@ func (c *Controller) authenticateGatewayReport(req *pb.GatewayReportRequest, now
 
 func marshalGatewayReportProof(req *pb.GatewayReportRequest) ([]byte, error) {
 	return proto.MarshalOptions{Deterministic: true}.Marshal(&pb.GatewayReportProof{
-		GatewayId:    req.GetGatewayId(),
-		Endpoint:     req.GetEndpoint(),
-		Capabilities: append([]string{}, req.GetCapabilities()...),
-		ReportUnixMs: req.GetReportUnixMs(),
-		Nonce:        append([]byte(nil), req.GetNonce()...),
+		GatewayId:             req.GetGatewayId(),
+		Capabilities:          append([]string{}, req.GetCapabilities()...),
+		ReportUnixMs:          req.GetReportUnixMs(),
+		Nonce:                 append([]byte(nil), req.GetNonce()...),
+		GatewayChannels:       cloneGatewayChannels(req.GetGatewayChannels()),
+		DefaultGatewayChannel: req.GetDefaultGatewayChannel(),
+		GatewayUdpPublicKey:   append([]byte(nil), req.GetGatewayUdpPublicKey()...),
+		GatewayUdpKeyId:       req.GetGatewayUdpKeyId(),
 	})
 }
 
@@ -1370,14 +1392,49 @@ func (c *Controller) isGatewayAllowed(gatewayID, endpoint string) bool {
 	return ok && strings.TrimSpace(allowedEndpoint) == strings.TrimSpace(endpoint)
 }
 
-func (c *Controller) RegisterGatewayNode(gatewayID, endpoint string, capabilities []string) {
+func (c *Controller) RegisterGatewayNode(gatewayID, endpoint string, capabilities []string, _ string, _ []byte) {
+	c.RegisterGatewayNodeWithTransport(
+		gatewayID,
+		capabilities,
+		[]*pb.GatewayChannel{{
+			Kind:       pb.GatewayChannelKind_GATEWAY_CHANNEL_QUIC,
+			Addr:       "quic://" + strings.TrimSpace(endpoint),
+			ServerName: gatewayServerName(endpoint),
+		}},
+		pb.GatewayChannelKind_GATEWAY_CHANNEL_UNKNOWN,
+		"",
+		nil,
+	)
+}
+
+func (c *Controller) RegisterGatewayNodeWithTransport(
+	gatewayID string,
+	capabilities []string,
+	channels []*pb.GatewayChannel,
+	defaultChannel pb.GatewayChannelKind,
+	udpKeyID string,
+	udpPublicKey []byte,
+) {
 	c.gatewayMu.Lock()
+	endpoint := primaryGatewayEndpoint(channels)
 	c.gatewayAllow[gatewayID] = endpoint
+	normalizedChannels := cloneGatewayChannels(channels)
+	if len(normalizedChannels) == 0 && strings.TrimSpace(endpoint) != "" {
+		normalizedChannels = []*pb.GatewayChannel{{
+			Kind:       pb.GatewayChannelKind_GATEWAY_CHANNEL_QUIC,
+			Addr:       "quic://" + strings.TrimSpace(endpoint),
+			ServerName: gatewayServerName(endpoint),
+		}}
+	}
 	c.gatewayNodes[gatewayID] = GatewayNodeInfo{
-		GatewayID:    gatewayID,
-		Endpoint:     endpoint,
-		Capabilities: append([]string{}, capabilities...),
-		UpdatedAt:    time.Now(),
+		GatewayID:      gatewayID,
+		Endpoint:       endpoint,
+		Capabilities:   append([]string{}, capabilities...),
+		Channels:       normalizedChannels,
+		DefaultChannel: normalizeGatewayChannelKind(defaultChannel),
+		UDPKeyID:       strings.TrimSpace(udpKeyID),
+		UDPPublicKey:   append([]byte(nil), udpPublicKey...),
+		UpdatedAt:      time.Now(),
 	}
 	delete(c.gatewaySeen, gatewayID)
 	c.persistGatewayApprovalLocked()
@@ -1415,6 +1472,11 @@ func (c *Controller) buildGatewayAccessGrant(virtualIP uint32, deviceID string) 
 	sessionID := uint64(time.Now().UnixNano())
 	leaseSecs := uint32(60)
 	graceSecs := uint32(30)
+	gatewayCAPem, err := c.loadGatewayCAPem()
+	if err != nil {
+		log.Warnf("load gateway CA PEM failed: %v", err)
+		return nil
+	}
 	ticket, err := newGatewayTicket(
 		c.cfg.GatewayTicketSecret,
 		deviceID,
@@ -1431,17 +1493,128 @@ func (c *Controller) buildGatewayAccessGrant(virtualIP uint32, deviceID string) 
 		log.Warnf("build gateway ticket failed: %v", err)
 		return nil
 	}
-	return &pb.GatewayAccessGrant{
-		GatewayAddrs:        []string{"quic://" + picked.Endpoint},
-		GatewayServerName:   gatewayServerName(picked.Endpoint),
-		Ticket:              []byte(ticket),
-		TicketExpireUnixMs:  expire.UnixMilli(),
-		SessionId:           sessionID,
-		PolicyRev:           1,
-		GatewayCapabilities: append([]string{}, picked.Capabilities...),
-		LeaseSecs:           leaseSecs,
-		GraceSecs:           graceSecs,
+	grantChannels := cloneGatewayChannels(picked.Channels)
+	if len(grantChannels) == 0 && strings.TrimSpace(picked.Endpoint) != "" {
+		grantChannels = []*pb.GatewayChannel{{
+			Kind:       pb.GatewayChannelKind_GATEWAY_CHANNEL_QUIC,
+			Addr:       "quic://" + strings.TrimSpace(picked.Endpoint),
+			ServerName: gatewayServerName(picked.Endpoint),
+			CaPem:      append([]byte(nil), gatewayCAPem...),
+		}}
 	}
+	defaultChannel := normalizeGatewayChannelKind(picked.DefaultChannel)
+	if defaultChannel == pb.GatewayChannelKind_GATEWAY_CHANNEL_UNKNOWN {
+		if hasGatewayChannelKind(grantChannels, pb.GatewayChannelKind_GATEWAY_CHANNEL_UDP) {
+			defaultChannel = pb.GatewayChannelKind_GATEWAY_CHANNEL_UDP
+		} else {
+			defaultChannel = pb.GatewayChannelKind_GATEWAY_CHANNEL_QUIC
+		}
+	}
+	return &pb.GatewayAccessGrant{
+		Ticket:                []byte(ticket),
+		TicketExpireUnixMs:    expire.UnixMilli(),
+		SessionId:             sessionID,
+		PolicyRev:             1,
+		GatewayCapabilities:   append([]string{}, picked.Capabilities...),
+		LeaseSecs:             leaseSecs,
+		GraceSecs:             graceSecs,
+		GatewayChannels:       attachGatewayCAPem(grantChannels, gatewayCAPem),
+		DefaultGatewayChannel: defaultChannel,
+		GatewayUdpPublicKey:   append([]byte(nil), picked.UDPPublicKey...),
+		GatewayUdpKeyId:       picked.UDPKeyID,
+	}
+}
+
+func (c *Controller) loadGatewayCAPem() ([]byte, error) {
+	path := strings.TrimSpace(c.cfg.GatewayCAPath)
+	if path == "" {
+		return nil, nil
+	}
+	pem, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read gateway_ca_path %s failed: %w", path, err)
+	}
+	return pem, nil
+}
+
+func cloneGatewayChannels(channels []*pb.GatewayChannel) []*pb.GatewayChannel {
+	if len(channels) == 0 {
+		return nil
+	}
+	cloned := make([]*pb.GatewayChannel, 0, len(channels))
+	for _, channel := range channels {
+		if channel == nil {
+			continue
+		}
+		addr := strings.TrimSpace(channel.GetAddr())
+		if addr == "" {
+			continue
+		}
+		cloned = append(cloned, &pb.GatewayChannel{
+			Kind:       normalizeGatewayChannelKind(channel.GetKind()),
+			Addr:       addr,
+			ServerName: strings.TrimSpace(channel.GetServerName()),
+			CaPem:      append([]byte(nil), channel.GetCaPem()...),
+		})
+	}
+	return cloned
+}
+
+func normalizeGatewayChannelKind(kind pb.GatewayChannelKind) pb.GatewayChannelKind {
+	switch kind {
+	case pb.GatewayChannelKind_GATEWAY_CHANNEL_UDP, pb.GatewayChannelKind_GATEWAY_CHANNEL_QUIC:
+		return kind
+	default:
+		return pb.GatewayChannelKind_GATEWAY_CHANNEL_UNKNOWN
+	}
+}
+
+func hasGatewayChannelKind(channels []*pb.GatewayChannel, kind pb.GatewayChannelKind) bool {
+	for _, channel := range channels {
+		if channel != nil && normalizeGatewayChannelKind(channel.GetKind()) == kind {
+			return true
+		}
+	}
+	return false
+}
+
+func attachGatewayCAPem(channels []*pb.GatewayChannel, gatewayCAPem []byte) []*pb.GatewayChannel {
+	if len(channels) == 0 {
+		return nil
+	}
+	cloned := cloneGatewayChannels(channels)
+	for _, channel := range cloned {
+		if channel != nil && normalizeGatewayChannelKind(channel.GetKind()) == pb.GatewayChannelKind_GATEWAY_CHANNEL_QUIC && len(channel.GetCaPem()) == 0 && len(gatewayCAPem) > 0 {
+			channel.CaPem = append([]byte(nil), gatewayCAPem...)
+		}
+	}
+	return cloned
+}
+
+func primaryGatewayEndpoint(channels []*pb.GatewayChannel) string {
+	for _, channel := range channels {
+		if channel == nil {
+			continue
+		}
+		addr := strings.TrimSpace(channel.GetAddr())
+		switch normalizeGatewayChannelKind(channel.GetKind()) {
+		case pb.GatewayChannelKind_GATEWAY_CHANNEL_UDP:
+			if strings.HasPrefix(addr, "udp://") {
+				endpoint := strings.TrimPrefix(addr, "udp://")
+				if endpoint != "" {
+					return endpoint
+				}
+			}
+		case pb.GatewayChannelKind_GATEWAY_CHANNEL_QUIC:
+			if strings.HasPrefix(addr, "quic://") {
+				endpoint := strings.TrimPrefix(addr, "quic://")
+				if endpoint != "" {
+					return endpoint
+				}
+			}
+		}
+	}
+	return ""
 }
 
 func gatewayServerName(endpoint string) string {

@@ -1,11 +1,13 @@
 package control
 
 import (
+	"bytes"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"fmt"
 	"net"
+	"os"
 	"path/filepath"
 	"sdl-control/config"
 	"sdl-control/protocol"
@@ -937,14 +939,17 @@ func TestGatewayReportAndRegistrationGrant(t *testing.T) {
 	if grant == nil {
 		t.Fatalf("expected gateway access grant in registration response")
 	}
-	if grant.GetGatewayServerName() != "127.0.0.1" {
-		t.Fatalf("unexpected gateway server name: %s", grant.GetGatewayServerName())
+	if len(grant.GetGatewayChannels()) != 1 || grant.GetGatewayChannels()[0].GetAddr() != "quic://127.0.0.1:51820" {
+		t.Fatalf("unexpected gateway channels: %+v", grant.GetGatewayChannels())
 	}
 	if len(grant.GetGatewayCapabilities()) == 0 || grant.GetGatewayCapabilities()[0] != "udp_blind_relay_v1" {
 		t.Fatalf("unexpected grant capabilities: %+v", grant.GetGatewayCapabilities())
 	}
 	if len(grant.GetTicket()) == 0 || grant.GetTicketExpireUnixMs() <= 0 {
 		t.Fatalf("expected short-lived ticket in grant: %+v", grant)
+	}
+	if grant.GetDefaultGatewayChannel() != pb.GatewayChannelKind_GATEWAY_CHANNEL_QUIC {
+		t.Fatalf("unexpected default gateway channel: %v", grant.GetDefaultGatewayChannel())
 	}
 	var ticket pb.SignedGatewayTicket
 	if err := proto.Unmarshal(grant.GetTicket(), &ticket); err != nil {
@@ -1048,6 +1053,34 @@ func TestGatewayReportAllowsConfiguredDefaultGateway(t *testing.T) {
 	}
 	if !ack.GetOk() {
 		t.Fatalf("expected default gateway auto-allowed, ack=%+v", ack)
+	}
+}
+
+func TestGatewayGrantIncludesConfiguredCAPem(t *testing.T) {
+	dir := t.TempDir()
+	caPath := filepath.Join(dir, "gateway-ca.pem")
+	expected := []byte("-----BEGIN CERTIFICATE-----\nTEST\n-----END CERTIFICATE-----\n")
+	if err := os.WriteFile(caPath, expected, 0o600); err != nil {
+		t.Fatalf("write gateway ca failed: %v", err)
+	}
+	ctrl := newControllerWithConfig(t, &config.Config{
+		Gateway:             net.ParseIP("10.26.0.1"),
+		Domain:              "ms.net",
+		Netmask:             "255.255.255.0",
+		DefaultGatewayID:    "gw-ca",
+		GatewayTicketSecret: testGatewayTicketSecret,
+		GatewayCAPath:       caPath,
+	})
+	defer ctrl.Stop()
+	ctrl.RegisterGatewayNode("gw-ca", "127.0.0.1:51826", []string{"udp_blind_relay_v1"}, "", nil)
+
+	regResp := mustRegister(t, ctrl, newBaseRegisterReq("dev-ca-a", "node-ca-a"), &net.UDPAddr{IP: net.ParseIP("1.1.1.32"), Port: 3232})
+	grant := regResp.GetGatewayAccessGrant()
+	if grant == nil {
+		t.Fatalf("expected gateway access grant in registration response")
+	}
+	if len(grant.GetGatewayChannels()) != 1 || !bytes.Equal(grant.GetGatewayChannels()[0].GetCaPem(), expected) {
+		t.Fatalf("unexpected gateway channel ca pem: %+v", grant.GetGatewayChannels())
 	}
 }
 
@@ -1155,18 +1188,18 @@ func TestRegistrationSkipsExpiredGatewayLease(t *testing.T) {
 	if grant == nil {
 		t.Fatalf("expected gateway access grant in registration response")
 	}
-	if len(grant.GetGatewayAddrs()) == 0 || grant.GetGatewayAddrs()[0] != "quic://127.0.0.1:51824" {
+	if len(grant.GetGatewayChannels()) == 0 || grant.GetGatewayChannels()[0].GetAddr() != "quic://127.0.0.1:51824" {
 		t.Fatalf("expected expired gateway to be skipped")
 	}
-	if grant.GetGatewayServerName() != "127.0.0.1" {
-		t.Fatalf("unexpected gateway server name: %s", grant.GetGatewayServerName())
+	if grant.GetGatewayChannels()[0].GetServerName() != "127.0.0.1" {
+		t.Fatalf("unexpected gateway server name: %s", grant.GetGatewayChannels()[0].GetServerName())
 	}
 }
 
 func TestRefreshGatewayGrantPacket(t *testing.T) {
 	ctrl := newTestController(t)
 	defer ctrl.Stop()
-	ctrl.RegisterGatewayNode("gw-default", "127.0.0.1:51820", []string{"udp_blind_relay_v1"})
+	ctrl.RegisterGatewayNode("gw-default", "127.0.0.1:51820", []string{"udp_blind_relay_v1"}, "", nil)
 
 	regReq := newBaseRegisterReq("dev-refresh-a", "node-refresh-a")
 	regResp := mustRegister(t, ctrl, regReq, &net.UDPAddr{IP: net.ParseIP("1.1.1.30"), Port: 3030})
@@ -1319,11 +1352,22 @@ func newSignedGatewayReport(
 	t.Helper()
 	report := &pb.GatewayReportRequest{
 		GatewayId:    gatewayID,
-		Endpoint:     endpoint,
 		Capabilities: append([]string{}, capabilities...),
 		ReportUnixMs: reportTime.UnixMilli(),
 		Nonce:        append([]byte(nil), nonce...),
+		GatewayChannels: []*pb.GatewayChannel{{
+			Kind:       pb.GatewayChannelKind_GATEWAY_CHANNEL_QUIC,
+			Addr:       "quic://" + endpoint,
+			ServerName: "127.0.0.1",
+		}},
+		DefaultGatewayChannel: pb.GatewayChannelKind_GATEWAY_CHANNEL_QUIC,
 	}
+	signGatewayReportForTest(t, secret, report)
+	return report
+}
+
+func signGatewayReportForTest(t *testing.T, secret string, report *pb.GatewayReportRequest) {
+	t.Helper()
 	proofBytes, err := marshalGatewayReportProof(report)
 	if err != nil {
 		t.Fatalf("marshalGatewayReportProof failed: %v", err)
@@ -1333,7 +1377,6 @@ func newSignedGatewayReport(
 		t.Fatalf("build gateway report signature failed: %v", err)
 	}
 	report.Signature = mac.Sum(nil)
-	return report
 }
 
 func verifyHMACTicketSignature(secret string, ticket *pb.SignedGatewayTicket) bool {

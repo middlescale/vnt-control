@@ -61,7 +61,8 @@
   "listen_addr": ":4433",
   "autocert_http_addr": ":80",
   "autocert_email": "admin@example.com",
-  "cert_cache_dir": "./cert-cache"
+  "cert_cache_dir": "./cert-cache",
+  "gateway_ca_path": "./gateway-ca.pem"
 }
 ```
 
@@ -73,6 +74,7 @@
 - `default_domain`：创建用户时未指定域名时使用，默认建议 `ms.net`。
 - `default_gateway_id`：默认下发给客户端的 gateway 身份标识。control 只按这个 `gateway_id` 选择默认网关，实际地址来自 gateway 上报并持久化保存的 `gateway_id -> endpoint` 记录。
 - `gateway_ticket_secret`：control 与 gateway 共享的密钥；control 用它对下发给客户端的 gateway ticket 做 HMAC-SHA256 签名，也用它校验 gateway 上报的 `GatewayReportRequest.signature`。
+- `gateway_ca_path`：可选。若 gateway 的 QUIC fallback 使用私有 CA / 自签链，control 会读取这个 PEM 文件并把 CA PEM 附到下发给客户端的 QUIC channel 元数据中。
 - `domains`：多域名配置，`domains.<domain>.groups.<group>` 对应子域配置，例如 `sales.ms.net`。
 - `tls_cert_path` / `tls_key_path`：使用本地证书文件。
 - `client_ca_path`：客户端 CA 文件路径（PEM）。
@@ -159,10 +161,16 @@ make proto   # 重新生成 proto Go 代码（需安装 protoc 与插件）
 
 Gateway 注册/保活分为两层：
 
-- **HMAC 鉴权**：gateway 每次发送 `GatewayReportRequest` 都必须携带 `nonce + signature`。signature 覆盖 `GatewayReportProof`（`gateway_id + endpoint + capabilities + report_unix_ms + nonce` 的 protobuf 编码），由 control 使用 `gateway_ticket_secret` 做 HMAC-SHA256 校验；control 同时对 `report_unix_ms + nonce` 执行新鲜度/重放保护。
+- **HMAC 鉴权**：gateway 每次发送 `GatewayReportRequest` 都必须携带 `nonce + signature`。signature 覆盖 `GatewayReportProof`（`gateway_id + capabilities + report_unix_ms + nonce + gateway_channels + default_gateway_channel + gateway_udp_public_key + gateway_udp_key_id` 的 protobuf 编码），由 control 使用 `gateway_ticket_secret` 做 HMAC-SHA256 校验；control 同时对 `report_unix_ms + nonce` 执行新鲜度/重放保护。
 - **管理批准**：鉴权通过后，除配置中的 `default_gateway_id` 对应 gateway 外，其他 gateway 仍需先经 `sdl-admin registerGateway --gateway-id <id>` 批准，其 `GatewayReportRequest` 才会返回成功。默认 gateway 第一次成功上报后，control 会持久化保存该 `gateway_id` 当前的 `endpoint`，后续给客户端下发默认网关时直接读取这份映射。`sdl-admin listGateway` 可查看默认网关、待批准上报与已批准网关状态（含 `alive` 保活状态）。
 
 control 对已批准网关采用租约保活（90 秒），并基于 `report_unix_ms + nonce` 做有限时间窗内的重放保护；超时未上报的网关不会继续被下发给客户端。
+
+当前 gateway 下发模型是 channel-aware 的：
+
+- `client -> gateway` 默认使用 UDP secure channel
+- control 下发 `gateway_udp_public_key` / `gateway_udp_key_id` 给客户端完成 UDP bootstrap
+- 若 gateway 同时上报 QUIC channel，control 也会把对应的 `server_name` 和可选 CA PEM 一并下发，供客户端做 QUIC fallback
 
 设备认证（auth device）由 `sdl auth` 发起：客户端输入 `--userId`、可选 `--group`（默认 `default.ms.net`）和 `ticket` 发送到 `sdl-control`，认证成功后设备才可注册入网。
 

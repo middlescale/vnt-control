@@ -4,10 +4,12 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/binary"
+	"errors"
 	"io"
 	"net"
 	"sdl-control/control"
 	"sdl-control/protocol"
+	"strings"
 	"sync"
 	"time"
 
@@ -132,7 +134,10 @@ func serveControlSession(ctrl *control.Controller, remoteAddr net.Addr, session 
 	for {
 		n, err := session.Read(buf)
 		if err != nil && !(err == io.EOF && n > 0) {
-			log.Printf("Read error: %v", err)
+			if isExpectedSessionReadClose(err) {
+				break
+			}
+			log.Warnf("Read error: %v", err)
 			break
 		}
 		if n > 0 {
@@ -308,6 +313,19 @@ func serveControlSession(ctrl *control.Controller, remoteAddr net.Addr, session 
 		}
 
 	}
+}
+
+func isExpectedSessionReadClose(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) || errors.Is(err, context.Canceled) {
+		return true
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "NO_ERROR") ||
+		strings.Contains(msg, "Application error 0x0") ||
+		strings.Contains(msg, "closed network connection")
 }
 
 func writeFramedStream(stream *quic.Stream, payload []byte) error {

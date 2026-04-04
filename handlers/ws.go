@@ -1,6 +1,8 @@
 package handlers
 
 import (
+	"errors"
+	"io"
 	"log"
 	"net/http"
 
@@ -22,6 +24,9 @@ func WSHandler(w http.ResponseWriter, r *http.Request) {
 	for {
 		mt, message, err := conn.ReadMessage()
 		if err != nil {
+			if isExpectedWebSocketClose(err) {
+				break
+			}
 			log.Println("Read error:", err)
 			break
 		}
@@ -33,4 +38,9 @@ func WSHandler(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 	}
+}
+
+func isExpectedWebSocketClose(err error) bool {
+	return errors.Is(err, io.EOF) ||
+		websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway, websocket.CloseNoStatusReceived)
 }
