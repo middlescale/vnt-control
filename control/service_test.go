@@ -50,8 +50,9 @@ func TestHandleHandshakePacketSuccess(t *testing.T) {
 		Gateway:  true,
 		Payload:  payload,
 	}
+	remoteAddr := &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1111}
 
-	respPacket, err := ctrl.HandleHandshakePacket(reqPacket)
+	respPacket, err := ctrl.HandleHandshakePacket(reqPacket, remoteAddr)
 	if err != nil {
 		t.Fatalf("HandleHandshakePacket failed: %v", err)
 	}
@@ -111,7 +112,7 @@ func TestHandleHandshakePacketInvalidPayload(t *testing.T) {
 		Payload:  []byte{0x01, 0x02},
 	}
 
-	if _, err := ctrl.HandleHandshakePacket(reqPacket); err == nil {
+	if _, err := ctrl.HandleHandshakePacket(reqPacket, &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1111}); err == nil {
 		t.Fatalf("expected error for invalid payload")
 	}
 }
@@ -134,7 +135,7 @@ func TestHandleHandshakePacketUnsupportedCapabilities(t *testing.T) {
 		DstIP:    net.ParseIP("0.0.0.1"),
 		Gateway:  true,
 		Payload:  payload,
-	})
+	}, &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1111})
 	if err != nil {
 		t.Fatalf("HandleHandshakePacket failed: %v", err)
 	}
@@ -144,6 +145,84 @@ func TestHandleHandshakePacketUnsupportedCapabilities(t *testing.T) {
 	}
 	if len(resp.GetCapabilities()) != 0 {
 		t.Fatalf("expected empty negotiated capabilities, got: %v", resp.GetCapabilities())
+	}
+}
+
+func TestRegistrationPersistsNegotiatedCapabilities(t *testing.T) {
+	ctrl := newTestController(t)
+	defer ctrl.Stop()
+
+	remoteAddr := &net.UDPAddr{IP: net.ParseIP("1.1.1.10"), Port: 1111}
+	req := &pb.HandshakeRequest{
+		Version:      "test-client",
+		Capabilities: []string{"udp_endpoint_report_v1", "punch_coord_v1", "unknown_cap"},
+	}
+	payload, err := proto.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal handshake request failed: %v", err)
+	}
+	if _, err := ctrl.HandleHandshakePacket(&protocol.Packet{
+		Proto:    protocol.ProtocolService,
+		AppProto: protocol.AppProtoHandshakeRequest,
+		SrcIP:    net.ParseIP("10.26.0.2"),
+		DstIP:    net.ParseIP("0.0.0.1"),
+		Gateway:  true,
+		Payload:  payload,
+	}, remoteAddr); err != nil {
+		t.Fatalf("HandleHandshakePacket failed: %v", err)
+	}
+
+	regReq := newBaseRegisterReq("dev-cap-a", "node-cap-a")
+	ensureAuthed(t, ctrl, regReq.GetToken(), regReq.GetDeviceId(), regReq.GetDevicePubKey())
+	respPacket, err := ctrl.HandleRegistrationPacket(newRegistrationPacket(t, regReq), remoteAddr)
+	if err != nil {
+		t.Fatalf("HandleRegistrationPacket failed: %v", err)
+	}
+	var regResp pb.RegistrationResponse
+	if err := proto.Unmarshal(respPacket.Payload, &regResp); err != nil {
+		t.Fatalf("unmarshal registration response failed: %v", err)
+	}
+	netInfo, ok := ctrl.nc.VirtualNetwork.Get(regReq.GetToken())
+	if !ok {
+		t.Fatalf("expected network info for %s", regReq.GetToken())
+	}
+	clientInfo, ok := netInfo.Clients[regResp.GetVirtualIp()]
+	if !ok {
+		t.Fatalf("expected client info for virtual ip %v", util.Uint32ToIP(regResp.GetVirtualIp()))
+	}
+	if len(clientInfo.Capabilities) != 2 || clientInfo.Capabilities[0] != "udp_endpoint_report_v1" || clientInfo.Capabilities[1] != "punch_coord_v1" {
+		t.Fatalf("unexpected client capabilities: %+v", clientInfo.Capabilities)
+	}
+}
+
+func TestRegistrationRequiresUDPEndpointReportCapability(t *testing.T) {
+	ctrl := newTestController(t)
+	defer ctrl.Stop()
+
+	remoteAddr := &net.UDPAddr{IP: net.ParseIP("1.1.1.11"), Port: 1112}
+	req := &pb.HandshakeRequest{
+		Version:      "test-client",
+		Capabilities: []string{"punch_coord_v1"},
+	}
+	payload, err := proto.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal handshake request failed: %v", err)
+	}
+	if _, err := ctrl.HandleHandshakePacket(&protocol.Packet{
+		Proto:    protocol.ProtocolService,
+		AppProto: protocol.AppProtoHandshakeRequest,
+		SrcIP:    net.ParseIP("10.26.0.2"),
+		DstIP:    net.ParseIP("0.0.0.1"),
+		Gateway:  true,
+		Payload:  payload,
+	}, remoteAddr); err != nil {
+		t.Fatalf("HandleHandshakePacket failed: %v", err)
+	}
+
+	regReq := newBaseRegisterReq("dev-cap-bad", "node-cap-bad")
+	ensureAuthed(t, ctrl, regReq.GetToken(), regReq.GetDeviceId(), regReq.GetDevicePubKey())
+	if _, err := ctrl.HandleRegistrationPacket(newRegistrationPacket(t, regReq), remoteAddr); err == nil || !strings.Contains(err.Error(), "udp_endpoint_report_v1") {
+		t.Fatalf("expected missing capability error, got %v", err)
 	}
 }
 
@@ -488,8 +567,11 @@ func TestBuildPunchStartPacketsFromStatus(t *testing.T) {
 			foundLocal = true
 		}
 	}
-	if !foundPublic || !foundLocal {
-		t.Fatalf("expected public and local endpoints in punch start, got %+v", start.GetPeerEndpoints())
+	if !foundPublic {
+		t.Fatalf("expected public endpoint in punch start, got %+v", start.GetPeerEndpoints())
+	}
+	if foundLocal {
+		t.Fatalf("unexpected local endpoint for public remote address: %+v", start.GetPeerEndpoints())
 	}
 	next, err := ctrl.BuildPunchStartPacketsFromStatus(&protocol.Packet{
 		Proto: protocol.ProtocolService,
@@ -501,6 +583,69 @@ func TestBuildPunchStartPacketsFromStatus(t *testing.T) {
 	}
 	if len(next) != 0 {
 		t.Fatalf("expected cooldown to suppress immediate re-trigger, got %d packets", len(next))
+	}
+}
+
+func TestBuildPunchStartPacketsFromStatusIncludesLocalEndpointsForPrivateRemoteAddr(t *testing.T) {
+	ctrl := newTestController(t)
+	defer ctrl.Stop()
+	srcReg := mustRegister(t, ctrl, newBaseRegisterReq("dev-a", "node-a"), &net.UDPAddr{IP: net.ParseIP("192.168.10.11"), Port: 1111})
+	dstReg := mustRegister(t, ctrl, newBaseRegisterReq("dev-b", "node-b"), &net.UDPAddr{IP: net.ParseIP("192.168.10.12"), Port: 2222})
+	srcStatus := &pb.ClientStatusInfo{
+		Source:         srcReg.GetVirtualIp(),
+		NatType:        pb.PunchNatType_Cone,
+		PublicIpList:   []uint32{util.IpToUint32(net.ParseIP("8.8.8.8"))},
+		PublicUdpPorts: []uint32{30001},
+		LocalUdpPorts:  []uint32{1111},
+	}
+	dstStatus := &pb.ClientStatusInfo{
+		Source:         dstReg.GetVirtualIp(),
+		NatType:        pb.PunchNatType_Cone,
+		PublicIpList:   []uint32{util.IpToUint32(net.ParseIP("9.9.9.9"))},
+		PublicUdpPorts: []uint32{30002},
+		LocalUdpPorts:  []uint32{2222},
+	}
+	srcPayload, err := proto.Marshal(srcStatus)
+	if err != nil {
+		t.Fatalf("marshal src status failed: %v", err)
+	}
+	dstPayload, err := proto.Marshal(dstStatus)
+	if err != nil {
+		t.Fatalf("marshal dst status failed: %v", err)
+	}
+	if err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(srcReg.GetVirtualIp()), Payload: srcPayload}); err != nil {
+		t.Fatalf("update src status failed: %v", err)
+	}
+	if err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(dstReg.GetVirtualIp()), Payload: dstPayload}); err != nil {
+		t.Fatalf("update dst status failed: %v", err)
+	}
+	startPackets, err := ctrl.BuildPunchStartPacketsFromStatus(&protocol.Packet{
+		Proto:   protocol.ProtocolService,
+		SrcIP:   util.Uint32ToIP(srcReg.GetVirtualIp()),
+		DstIP:   util.Uint32ToIP(srcReg.GetVirtualGateway()),
+		Gateway: true,
+	})
+	if err != nil {
+		t.Fatalf("BuildPunchStartPacketsFromStatus failed: %v", err)
+	}
+	if len(startPackets) != 2 {
+		t.Fatalf("expected 2 start packets, got %d", len(startPackets))
+	}
+	var start pb.PunchStart
+	if err := proto.Unmarshal(startPackets[0].Payload, &start); err != nil {
+		t.Fatalf("unmarshal punch start failed: %v", err)
+	}
+	var foundPublic, foundLocal bool
+	for _, ep := range start.GetPeerEndpoints() {
+		switch {
+		case ep.GetIp() == util.IpToUint32(net.ParseIP("9.9.9.9")) && ep.GetPort() == 30002:
+			foundPublic = true
+		case ep.GetIp() == util.IpToUint32(net.ParseIP("192.168.10.12")) && ep.GetPort() == 2222:
+			foundLocal = true
+		}
+	}
+	if !foundPublic || !foundLocal {
+		t.Fatalf("expected public and local endpoints for private remote addr, got %+v", start.GetPeerEndpoints())
 	}
 }
 
@@ -764,7 +909,7 @@ func TestHandleRegistrationPacketConflictAndAllowIpChange(t *testing.T) {
 		AllowIpChange: false,
 		DevicePubKey:  []byte("pk-dev-b"),
 		OnlineKxPub:   testOnlineKxPub("dev-b-v1"),
-	}), &net.UDPAddr{IP: net.ParseIP("5.6.7.8"), Port: 7788})
+	}), handshakeRemote(t, ctrl, &net.UDPAddr{IP: net.ParseIP("5.6.7.8"), Port: 7788}))
 	if err == nil {
 		t.Fatalf("expected conflict error")
 	}
@@ -827,7 +972,7 @@ func TestHandleRegistrationPacketInvalidRequestedIP(t *testing.T) {
 		VirtualIp:    util.IpToUint32(net.ParseIP("10.27.0.1")),
 		DevicePubKey: []byte("pk-dev-a"),
 		OnlineKxPub:  testOnlineKxPub("dev-a-v1"),
-	}), &net.UDPAddr{IP: net.ParseIP("9.9.9.9"), Port: 9999})
+	}), handshakeRemote(t, ctrl, &net.UDPAddr{IP: net.ParseIP("9.9.9.9"), Port: 9999}))
 	if err == nil {
 		t.Fatalf("expected invalid requested ip error")
 	}
@@ -999,7 +1144,7 @@ func TestRegistrationRequiresAuthedDeviceWhenTicketIssued(t *testing.T) {
 		t.Fatalf("UMIssueDeviceTicket failed: %v", err)
 	}
 	req := newBaseRegisterReq(deviceID, "node-a")
-	_, err = ctrl.HandleRegistrationPacket(newRegistrationPacket(t, req), &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1111})
+	_, err = ctrl.HandleRegistrationPacket(newRegistrationPacket(t, req), handshakeRemote(t, ctrl, &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1111}))
 	if err == nil {
 		t.Fatalf("expected registration rejected before certification")
 	}
@@ -1419,6 +1564,7 @@ func mustRegister(t *testing.T, ctrl *Controller, req *pb.RegistrationRequest, r
 		req.DevicePubKey = []byte("pk-" + req.GetDeviceId())
 	}
 	ensureAuthed(t, ctrl, req.GetToken(), req.GetDeviceId(), req.GetDevicePubKey())
+	remoteAddr = handshakeRemote(t, ctrl, remoteAddr)
 	respPacket, err := ctrl.HandleRegistrationPacket(newRegistrationPacket(t, req), remoteAddr)
 	if err != nil {
 		t.Fatalf("HandleRegistrationPacket failed: %v", err)
@@ -1448,6 +1594,29 @@ func mustRegister(t *testing.T, ctrl *Controller, req *pb.RegistrationRequest, r
 		t.Fatalf("virtual ip should not be gateway/broadcast: %s", util.Uint32ToIP(virtualIP))
 	}
 	return &resp
+}
+
+func handshakeRemote(t *testing.T, ctrl *Controller, remoteAddr net.Addr) net.Addr {
+	t.Helper()
+	req := &pb.HandshakeRequest{
+		Version:      "test-client",
+		Capabilities: []string{"udp_endpoint_report_v1", "punch_coord_v1", "gateway_ticket_v1"},
+	}
+	payload, err := proto.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal handshake request failed: %v", err)
+	}
+	if _, err := ctrl.HandleHandshakePacket(&protocol.Packet{
+		Proto:    protocol.ProtocolService,
+		AppProto: protocol.AppProtoHandshakeRequest,
+		SrcIP:    net.ParseIP("10.26.0.2"),
+		DstIP:    net.ParseIP("0.0.0.1"),
+		Gateway:  true,
+		Payload:  payload,
+	}, remoteAddr); err != nil {
+		t.Fatalf("HandleHandshakePacket failed: %v", err)
+	}
+	return remoteAddr
 }
 
 func randomGatewayNonce(t *testing.T) []byte {

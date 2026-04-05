@@ -27,6 +27,7 @@ type ClientInfo struct {
 	DataPlaneReachable bool
 	DataPlaneLastSeen  int64 // Unix时间戳 (timestamp)
 	Version            string
+	Capabilities       []string
 
 	VirtualIp uint32 // 虚拟IP，IPv4大端表示
 	Address   net.Addr

@@ -33,6 +33,7 @@ type Controller struct {
 
 	authChallengeMu sync.Mutex
 	authChallenges  map[string]deviceAuthChallengeState
+	handshakeCaps   map[string][]string
 
 	gatewayMu    sync.RWMutex
 	gatewayNodes map[string]GatewayNodeInfo
@@ -127,6 +128,8 @@ var supportedHandshakeCapabilities = map[string]struct{}{
 	"gateway_ticket_v1":      {},
 }
 
+const capabilityUDPEndpointReportV1 = "udp_endpoint_report_v1"
+
 func NewController(cfg *config.Config) (*Controller, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("config is required")
@@ -149,6 +152,7 @@ func NewController(cfg *config.Config) (*Controller, error) {
 		gs:             gatewayStore,
 		cfg:            cfg,
 		authChallenges: make(map[string]deviceAuthChallengeState),
+		handshakeCaps:  make(map[string][]string),
 		gatewayNodes:   make(map[string]GatewayNodeInfo),
 		gatewayAllow:   gatewayAllow,
 		gatewaySeen:    make(map[string]GatewayNodeInfo),
@@ -221,17 +225,19 @@ func (c *Controller) Stop() {
 	c.nc.PunchPairRetry.Stop()
 }
 
-func (c *Controller) HandleHandshakePacket(reqPacket *protocol.Packet) (*protocol.Packet, error) {
+func (c *Controller) HandleHandshakePacket(reqPacket *protocol.Packet, remoteAddr net.Addr) (*protocol.Packet, error) {
 	log.Debugf("收到客户端 HandshakeRequest Packet: %s", reqPacket.DebugString())
 	var req pb.HandshakeRequest
 	if err := proto.Unmarshal(reqPacket.Payload, &req); err != nil {
 		log.Errorf("HandshakeRequest unmarshal error: %v", err)
 		return nil, err
 	}
+	negotiatedCapabilities := negotiateHandshakeCapabilities(req.GetCapabilities())
+	c.setPendingHandshakeCapabilities(remoteAddr, negotiatedCapabilities)
 
 	rsp := &pb.HandshakeResponse{
 		Version:      "goversion-1.0.0",
-		Capabilities: negotiateHandshakeCapabilities(req.GetCapabilities()),
+		Capabilities: negotiatedCapabilities,
 	}
 	playload, err := proto.Marshal(rsp)
 	if err != nil {
@@ -293,6 +299,10 @@ func (c *Controller) HandleRegistrationPacketWithVirtualIP(request *protocol.Pac
 		return nil, 0, fmt.Errorf("invalid remote port: %q", portStr)
 	}
 	pubPort := uint32(port)
+	negotiatedCapabilities := c.consumeHandshakeCapabilities(remoteAddr)
+	if !hasCapability(negotiatedCapabilities, capabilityUDPEndpointReportV1) {
+		return nil, 0, fmt.Errorf("client %v missing required handshake capability %q", remoteAddr, capabilityUDPEndpointReportV1)
+	}
 
 	registrationResp := &pb.RegistrationResponse{
 		PublicPort: pubPort,
@@ -333,6 +343,7 @@ func (c *Controller) HandleRegistrationPacketWithVirtualIP(request *protocol.Pac
 	clientInfo.DeviceId = registration.GetDeviceId()
 	clientInfo.Name = registration.GetName()
 	clientInfo.Version = registration.GetVersion()
+	clientInfo.Capabilities = negotiatedCapabilities
 	clientInfo.ControlOnline = true
 	clientInfo.ControlLastSeen = now
 	clientInfo.DataPlaneReachable = false
@@ -1118,12 +1129,50 @@ func buildPunchEndpoints(client ClientInfo) []*pb.PunchEndpoint {
 			appendEndpoint(ip, port)
 		}
 	}
-	if udpAddr, ok := client.Address.(*net.UDPAddr); ok {
+	if udpAddr, ok := client.Address.(*net.UDPAddr); ok && shouldIncludeLocalUDPCandidates(udpAddr.IP) {
 		for _, port := range status.LocalUDPPorts {
 			appendEndpoint(udpAddr.IP, port)
 		}
 	}
 	return endpoints
+}
+
+func shouldIncludeLocalUDPCandidates(ip net.IP) bool {
+	ipv4 := ip.To4()
+	if ipv4 == nil {
+		return false
+	}
+	return !ipv4.IsGlobalUnicast() || ipv4.IsPrivate()
+}
+
+func (c *Controller) setPendingHandshakeCapabilities(remoteAddr net.Addr, capabilities []string) {
+	if remoteAddr == nil {
+		return
+	}
+	c.mu.Lock()
+	c.handshakeCaps[remoteAddr.String()] = append([]string(nil), capabilities...)
+	c.mu.Unlock()
+}
+
+func (c *Controller) consumeHandshakeCapabilities(remoteAddr net.Addr) []string {
+	if remoteAddr == nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	key := remoteAddr.String()
+	capabilities := append([]string(nil), c.handshakeCaps[key]...)
+	delete(c.handshakeCaps, key)
+	return capabilities
+}
+
+func hasCapability(capabilities []string, capability string) bool {
+	for _, item := range capabilities {
+		if item == capability {
+			return true
+		}
+	}
+	return false
 }
 
 type NetworkControl struct {

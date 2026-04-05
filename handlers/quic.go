@@ -175,7 +175,7 @@ func serveControlSession(ctrl *control.Controller, remoteAddr net.Addr, session 
 
 				switch packet.AppProto {
 				case protocol.AppProtoHandshakeRequest:
-					respPacket, err = ctrl.HandleHandshakePacket(packet)
+					respPacket, err = ctrl.HandleHandshakePacket(packet, remoteAddr)
 					if err != nil {
 						log.Errorf("HandleHandshakePacket error: %v", err)
 						continue
