@@ -978,6 +978,14 @@ func (c *Controller) HandlePunchAckPacket(request *protocol.Packet) error {
 	if session.Results == nil {
 		session.Results = make(map[uint32]*pb.PunchResult)
 	}
+	log.Infof(
+		"PunchAck detail src=%s session_id=%d attempt=%d accepted=%v reason=%q",
+		request.SrcIP,
+		ack.GetSessionId(),
+		ack.GetAttempt(),
+		ack.GetAccepted(),
+		ack.GetReason(),
+	)
 	session.Ack[source] = ack.GetAccepted()
 	pairKey := punchPairKey(session.Source, session.Target)
 	if !ack.GetAccepted() {
@@ -1013,6 +1021,14 @@ func (c *Controller) HandlePunchResultPacket(request *protocol.Packet) error {
 	if session.Results == nil {
 		session.Results = make(map[uint32]*pb.PunchResult)
 	}
+	log.Infof(
+		"PunchResult detail src=%s session_id=%d attempt=%d code=%s reason=%q",
+		request.SrcIP,
+		result.GetSessionId(),
+		result.GetAttempt(),
+		result.GetCode().String(),
+		result.GetReason(),
+	)
 	session.Results[source] = &result
 	pairKey := punchPairKey(session.Source, session.Target)
 	switch result.GetCode() {

@@ -286,6 +286,8 @@ func serveControlSession(ctrl *control.Controller, remoteAddr net.Addr, session 
 					err = ctrl.HandlePunchResultPacket(packet)
 					if err != nil {
 						log.Errorf("HandlePunchResultPacket error: %v", err)
+					} else {
+						log.Infof("PunchResult received from %s", packet.SrcIP)
 					}
 					continue
 				default:
