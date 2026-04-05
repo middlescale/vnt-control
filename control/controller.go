@@ -267,6 +267,7 @@ func (c *Controller) HandleRegistrationPacketWithVirtualIP(request *protocol.Pac
 		return nil, 0, err
 	}
 	if err := c.UMCheckAuthedDevice(domain, registration.GetDeviceId(), registration.GetDevicePubKey()); err != nil {
+		c.clearStaleClientStateByDeviceID(domain, registration.GetDeviceId())
 		return nil, 0, fmt.Errorf("device %s auth check failed for group %s: %w", registration.GetDeviceId(), domain, err)
 	}
 
@@ -357,6 +358,37 @@ func (c *Controller) HandleRegistrationPacketWithVirtualIP(request *protocol.Pac
 	}
 
 	return respPacket, virtualIP, nil
+}
+
+func (c *Controller) clearStaleClientStateByDeviceID(domain, deviceID string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	netInfo, ok := c.nc.VirtualNetwork.Get(domain)
+	if !ok {
+		return
+	}
+	changed := false
+	now := time.Now().Unix()
+	for virtualIP, clientInfo := range netInfo.Clients {
+		if clientInfo.DeviceId != deviceID {
+			continue
+		}
+		if !clientInfo.ControlOnline && clientInfo.ClientStatus == nil && !clientInfo.DataPlaneReachable {
+			continue
+		}
+		clientInfo.ControlOnline = false
+		clientInfo.ControlLastSeen = now
+		clientInfo.DataPlaneReachable = false
+		clientInfo.DataPlaneLastSeen = 0
+		clientInfo.ClientStatus = nil
+		netInfo.Clients[virtualIP] = clientInfo
+		c.nc.IPSessions.Set(NewIpSessionKey(domain, util.Uint32ToIP(virtualIP)), clientInfo.Address)
+		changed = true
+	}
+	if changed {
+		netInfo.Epoch++
+	}
 }
 
 func (c *Controller) BuildRegistrationErrorPacket(request *protocol.Packet, err error) (*protocol.Packet, error) {

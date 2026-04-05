@@ -610,6 +610,62 @@ func TestBuildPunchStartPacketsFromStatusHonorsRetryPolicy(t *testing.T) {
 	}
 }
 
+func TestFailedRegistrationClearsStalePunchCandidateState(t *testing.T) {
+	ctrl := newTestController(t)
+	defer ctrl.Stop()
+
+	srcReg := mustRegister(t, ctrl, newBaseRegisterReq("dev-a", "node-a"), &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1111})
+	dstReq := newBaseRegisterReq("dev-b", "node-b")
+	dstRemote := &net.UDPAddr{IP: net.ParseIP("1.1.1.2"), Port: 2222}
+	dstReg := mustRegister(t, ctrl, dstReq, dstRemote)
+
+	srcStatus := &pb.ClientStatusInfo{
+		Source:         srcReg.GetVirtualIp(),
+		NatType:        pb.PunchNatType_Cone,
+		PublicIpList:   []uint32{util.IpToUint32(net.ParseIP("8.8.8.8"))},
+		PublicUdpPorts: []uint32{30001},
+		LocalUdpPorts:  []uint32{1111},
+	}
+	dstStatus := &pb.ClientStatusInfo{
+		Source:         dstReg.GetVirtualIp(),
+		NatType:        pb.PunchNatType_Cone,
+		PublicIpList:   []uint32{util.IpToUint32(net.ParseIP("9.9.9.9"))},
+		PublicUdpPorts: []uint32{30002},
+		LocalUdpPorts:  []uint32{2222},
+	}
+	srcPayload, err := proto.Marshal(srcStatus)
+	if err != nil {
+		t.Fatalf("marshal src status failed: %v", err)
+	}
+	dstPayload, err := proto.Marshal(dstStatus)
+	if err != nil {
+		t.Fatalf("marshal dst status failed: %v", err)
+	}
+	if err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(srcReg.GetVirtualIp()), Payload: srcPayload}); err != nil {
+		t.Fatalf("update src status failed: %v", err)
+	}
+	if err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(dstReg.GetVirtualIp()), Payload: dstPayload}); err != nil {
+		t.Fatalf("update dst status failed: %v", err)
+	}
+
+	delete(ctrl.um.authedDevices, "ms.net|dev-b")
+	if _, _, err := ctrl.HandleRegistrationPacketWithVirtualIP(newRegistrationPacket(t, dstReq), dstRemote); err == nil {
+		t.Fatalf("expected registration auth failure")
+	}
+
+	packets, err := ctrl.BuildPunchStartPacketsFromStatus(&protocol.Packet{
+		Proto: protocol.ProtocolService,
+		SrcIP: util.Uint32ToIP(srcReg.GetVirtualIp()),
+		DstIP: util.Uint32ToIP(srcReg.GetVirtualGateway()),
+	})
+	if err != nil {
+		t.Fatalf("BuildPunchStartPacketsFromStatus failed: %v", err)
+	}
+	if len(packets) != 0 {
+		t.Fatalf("expected stale unauthenticated peer to be excluded from punch, got %d packets", len(packets))
+	}
+}
+
 func TestHandleRegistrationPacketConflictAndAllowIpChange(t *testing.T) {
 	ctrl := newTestController(t)
 	defer ctrl.Stop()
