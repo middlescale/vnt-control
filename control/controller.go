@@ -446,7 +446,7 @@ func (c *Controller) HandlePullDeviceListPacket(request *protocol.Packet) (*prot
 	selfIP := util.IpToUint32(request.SrcIP)
 	deviceList, ok := c.nc.DeviceListByIP(selfIP)
 	if !ok {
-		return nil, fmt.Errorf("client %s not registered", request.SrcIP)
+		return c.buildDisconnectPacket(request), nil
 	}
 	payload, err := proto.Marshal(deviceList)
 	if err != nil {
@@ -463,6 +463,19 @@ func (c *Controller) HandlePullDeviceListPacket(request *protocol.Packet) (*prot
 		Gateway:   true,
 		Payload:   payload,
 	}, nil
+}
+
+func (c *Controller) buildDisconnectPacket(request *protocol.Packet) *protocol.Packet {
+	return &protocol.Packet{
+		Ver:       protocol.V3,
+		Proto:     protocol.ProtocolError,
+		AppProto:  protocol.AppProtocol(2),
+		SourceTTL: protocol.MAX_TTL,
+		TTL:       protocol.MAX_TTL,
+		SrcIP:     request.DstIP,
+		DstIP:     request.SrcIP,
+		Gateway:   true,
+	}
 }
 
 func (c *Controller) HandleDeviceAuthPacket(request *protocol.Packet) (*protocol.Packet, error) {
@@ -1000,6 +1013,9 @@ func (c *Controller) HandleControlPacket(request *protocol.Packet, remoteAddr ne
 			return nil, err
 		}
 		epoch := c.nc.TouchClientByIP(request.SrcIP)
+		if epoch == 0 {
+			return c.buildDisconnectPacket(request), nil
+		}
 		payload := protocol.BuildPingPayload(pingTime, epoch)
 		return &protocol.Packet{
 			Ver:       protocol.V3,

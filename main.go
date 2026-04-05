@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"sdl-control/config"
 	"sdl-control/control"
 	"sdl-control/handlers"
@@ -18,6 +19,8 @@ import (
 	"golang.org/x/crypto/acme/autocert"
 )
 
+var Version = "dev"
+
 func main() {
 	levelStr := os.Getenv("LOG_LEVEL")
 	level, err := log.ParseLevel(strings.ToLower(levelStr))
@@ -25,6 +28,7 @@ func main() {
 		level = log.InfoLevel // 默认 info
 	}
 	log.SetLevel(level)
+	log.Infof("sdl-control starting version=%s", buildVersion())
 
 	// support overriding config path via CONFIG_PATH env (useful in docker-compose / CI)
 	cfgPath := os.Getenv("CONFIG_PATH")
@@ -163,4 +167,25 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func buildVersion() string {
+	if strings.TrimSpace(Version) != "" && Version != "dev" {
+		return Version
+	}
+	if info, ok := debug.ReadBuildInfo(); ok {
+		if v := strings.TrimSpace(info.Main.Version); v != "" && v != "(devel)" {
+			return v
+		}
+		for _, setting := range info.Settings {
+			if setting.Key == "vcs.revision" && strings.TrimSpace(setting.Value) != "" {
+				rev := strings.TrimSpace(setting.Value)
+				if len(rev) > 12 {
+					rev = rev[:12]
+				}
+				return "dev+" + rev
+			}
+		}
+	}
+	return "dev"
 }

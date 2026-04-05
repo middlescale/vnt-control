@@ -74,6 +74,30 @@ func TestHandleControlPacketInvalidPingPayload(t *testing.T) {
 	}
 }
 
+func TestHandleControlPacketPingUnknownClientReturnsDisconnect(t *testing.T) {
+	ctrl := newTestController(t)
+	defer ctrl.Stop()
+
+	req := &protocol.Packet{
+		Ver:       protocol.V3,
+		Proto:     protocol.ProtocolControl,
+		AppProto:  protocol.AppProtocol(protocol.ControlPing),
+		SourceTTL: protocol.MAX_TTL,
+		TTL:       protocol.MAX_TTL,
+		SrcIP:     net.IPv4(10, 26, 0, 99),
+		DstIP:     net.IPv4(10, 26, 0, 1),
+		Gateway:   true,
+		Payload:   protocol.BuildPingPayload(1234, 0),
+	}
+	resp, err := ctrl.HandleControlPacket(req, &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1111})
+	if err != nil {
+		t.Fatalf("HandleControlPacket failed: %v", err)
+	}
+	if resp.Proto != protocol.ProtocolError || resp.AppProto != protocol.AppProtocol(2) {
+		t.Fatalf("expected disconnect error packet, got proto/app=%v/%v", resp.Proto, resp.AppProto)
+	}
+}
+
 func TestHandleControlPacketAddrRequest(t *testing.T) {
 	ctrl := newTestController(t)
 	defer ctrl.Stop()
@@ -100,6 +124,29 @@ func TestHandleControlPacketAddrRequest(t *testing.T) {
 	}
 	if !ip.Equal(net.IPv4(2, 3, 4, 5)) || port != 4567 {
 		t.Fatalf("unexpected addr response: %v:%d", ip, port)
+	}
+}
+
+func TestHandlePullDeviceListPacketUnknownClientReturnsDisconnect(t *testing.T) {
+	ctrl := newTestController(t)
+	defer ctrl.Stop()
+
+	req := &protocol.Packet{
+		Ver:       protocol.V3,
+		Proto:     protocol.ProtocolService,
+		AppProto:  protocol.AppProtoPullDeviceList,
+		SourceTTL: protocol.MAX_TTL,
+		TTL:       protocol.MAX_TTL,
+		SrcIP:     net.IPv4(10, 26, 0, 99),
+		DstIP:     net.IPv4(10, 26, 0, 1),
+		Gateway:   true,
+	}
+	resp, err := ctrl.HandlePullDeviceListPacket(req)
+	if err != nil {
+		t.Fatalf("HandlePullDeviceListPacket failed: %v", err)
+	}
+	if resp.Proto != protocol.ProtocolError || resp.AppProto != protocol.AppProtocol(2) {
+		t.Fatalf("expected disconnect error packet, got proto/app=%v/%v", resp.Proto, resp.AppProto)
 	}
 }
 
