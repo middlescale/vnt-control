@@ -172,6 +172,7 @@ func serveControlSession(ctrl *control.Controller, remoteAddr net.Addr, session 
 				var respPacket *protocol.Packet
 				var err error
 				var virtualIP uint32
+				var deferredPushPackets []*protocol.Packet
 
 				switch packet.AppProto {
 				case protocol.AppProtoHandshakeRequest:
@@ -195,6 +196,11 @@ func serveControlSession(ctrl *control.Controller, remoteAddr net.Addr, session 
 						continue
 					}
 					quicStreams.register(remoteAddr, virtualIP, session)
+					deferredPushPackets, err = ctrl.BuildPushDeviceListPacketsForPeerChange(virtualIP)
+					if err != nil {
+						log.Errorf("BuildPushDeviceListPacketsForPeerChange error: %v", err)
+						deferredPushPackets = nil
+					}
 				case protocol.AppProtoPullDeviceList:
 					respPacket, err = ctrl.HandlePullDeviceListPacket(packet)
 					if err != nil {
@@ -291,6 +297,17 @@ func serveControlSession(ctrl *control.Controller, remoteAddr net.Addr, session 
 				}
 				if err := writeFramedWriter(session, respPacket.Marshal()); err != nil {
 					log.Errorf("Write ServiceResponse error: %v", err)
+					continue
+				}
+				for _, push := range deferredPushPackets {
+					if push == nil || push.DstIP == nil {
+						continue
+					}
+					if !quicStreams.writeToIP(ipToUint32(push.DstIP), push.Marshal()) {
+						log.Warnf("PushDeviceList dispatch failed: %s", push.DstIP)
+					} else {
+						log.Infof("PushDeviceList dispatched: %s", push.DstIP)
+					}
 				}
 			} else if packet.Proto == protocol.ProtocolControl {
 				respPacket, err := ctrl.HandleControlPacket(packet, remoteAddr)

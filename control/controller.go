@@ -476,6 +476,48 @@ func (c *Controller) HandlePullDeviceListPacket(request *protocol.Packet) (*prot
 	}, nil
 }
 
+func (c *Controller) BuildPushDeviceListPacketsForPeerChange(changedIP uint32) ([]*protocol.Packet, error) {
+	c.nc.VirtualNetwork.mutex.RLock()
+	defer c.nc.VirtualNetwork.mutex.RUnlock()
+
+	for _, network := range c.nc.VirtualNetwork.data {
+		changedClient, ok := network.Clients[changedIP]
+		if !ok {
+			continue
+		}
+		if !changedClient.ControlOnline {
+			return nil, nil
+		}
+		packets := make([]*protocol.Packet, 0, len(network.Clients))
+		for targetIP, targetClient := range network.Clients {
+			if targetIP == changedIP || !targetClient.ControlOnline {
+				continue
+			}
+			push := &pb.DeviceList{
+				Epoch:          uint32(network.Epoch),
+				DeviceInfoList: buildDeviceInfoList(network.Clients, targetIP),
+			}
+			payload, err := proto.Marshal(push)
+			if err != nil {
+				return nil, fmt.Errorf("DeviceList marshal error: %v", err)
+			}
+			packets = append(packets, &protocol.Packet{
+				Ver:       protocol.V3,
+				Proto:     protocol.ProtocolService,
+				AppProto:  protocol.AppProtoPushDeviceList,
+				SourceTTL: protocol.MAX_TTL,
+				TTL:       protocol.MAX_TTL,
+				SrcIP:     net.ParseIP("0.0.0.1"),
+				DstIP:     util.Uint32ToIP(targetIP),
+				Gateway:   true,
+				Payload:   payload,
+			})
+		}
+		return packets, nil
+	}
+	return nil, nil
+}
+
 func (c *Controller) buildDisconnectPacket(request *protocol.Packet) *protocol.Packet {
 	return &protocol.Packet{
 		Ver:       protocol.V3,

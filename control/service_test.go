@@ -1021,6 +1021,47 @@ func TestHandlePullDeviceListPacket(t *testing.T) {
 	}
 }
 
+func TestBuildPushDeviceListPacketsForPeerChange(t *testing.T) {
+	ctrl := newTestController(t)
+	defer ctrl.Stop()
+
+	resp1 := mustRegister(t, ctrl, newBaseRegisterReq("dev-a", "node-a"), &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1111})
+	resp2 := mustRegister(t, ctrl, newBaseRegisterReq("dev-b", "node-b"), &net.UDPAddr{IP: net.ParseIP("1.1.1.2"), Port: 2222})
+
+	packets, err := ctrl.BuildPushDeviceListPacketsForPeerChange(resp2.GetVirtualIp())
+	if err != nil {
+		t.Fatalf("BuildPushDeviceListPacketsForPeerChange failed: %v", err)
+	}
+	if len(packets) != 1 {
+		t.Fatalf("expected 1 push packet, got %d", len(packets))
+	}
+	packet := packets[0]
+	if packet.AppProto != protocol.AppProtoPushDeviceList {
+		t.Fatalf("unexpected app proto: %v", packet.AppProto)
+	}
+	if !packet.DstIP.Equal(util.Uint32ToIP(resp1.GetVirtualIp())) {
+		t.Fatalf("unexpected dst ip: %v", packet.DstIP)
+	}
+	if !packet.SrcIP.Equal(net.ParseIP("0.0.0.1")) {
+		t.Fatalf("unexpected src ip: %v", packet.SrcIP)
+	}
+
+	var list pb.DeviceList
+	if err := proto.Unmarshal(packet.Payload, &list); err != nil {
+		t.Fatalf("unmarshal device list failed: %v", err)
+	}
+	if list.GetEpoch() != 2 {
+		t.Fatalf("unexpected epoch: %d", list.GetEpoch())
+	}
+	if len(list.GetDeviceInfoList()) != 1 {
+		t.Fatalf("unexpected device list length: %d", len(list.GetDeviceInfoList()))
+	}
+	item := list.GetDeviceInfoList()[0]
+	if item.GetVirtualIp() != resp2.GetVirtualIp() || item.GetDeviceId() != "dev-b" {
+		t.Fatalf("unexpected device info item: %+v", item)
+	}
+}
+
 func TestHandleClientStatusInfoPacket(t *testing.T) {
 	ctrl := newTestController(t)
 	defer ctrl.Stop()
