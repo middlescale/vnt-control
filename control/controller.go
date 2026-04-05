@@ -14,6 +14,7 @@ import (
 	"sdl-control/protocol"
 	"sdl-control/protocol/pb"
 	"sdl-control/util"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -71,6 +72,17 @@ type GatewayAdminView struct {
 	Alive         bool     `json:"alive"`
 	Capabilities  []string `json:"capabilities,omitempty"`
 	UpdatedAtUnix int64    `json:"updated_at_unix,omitempty"`
+}
+
+type DeviceAdminView struct {
+	UserID             string `json:"user_id"`
+	Group              string `json:"group"`
+	Name               string `json:"name"`
+	DeviceID           string `json:"device_id"`
+	VirtualIP          string `json:"virtual_ip"`
+	ControlOnline      bool   `json:"control_online"`
+	DataPlaneReachable bool   `json:"data_plane_reachable"`
+	UpdatedAtUnix      int64  `json:"updated_at_unix,omitempty"`
 }
 
 const maxPunchAttemptsPerPair = 3
@@ -1412,6 +1424,64 @@ func (c *Controller) ListGateways() []GatewayAdminView {
 		result = append(result, item)
 	}
 	return result
+}
+
+func (c *Controller) ListDevices(userID string) []DeviceAdminView {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return nil
+	}
+	records := c.um.ListAuthedDevicesByUser(userID)
+	if len(records) == 0 {
+		return nil
+	}
+	recordByGroupDevice := make(map[string]UMAuthDevice, len(records))
+	for _, record := range records {
+		recordByGroupDevice[record.GroupName+"\x00"+record.DeviceID] = record
+	}
+
+	c.nc.VirtualNetwork.mutex.RLock()
+	defer c.nc.VirtualNetwork.mutex.RUnlock()
+
+	devices := make([]DeviceAdminView, 0, len(records))
+	for _, network := range c.nc.VirtualNetwork.data {
+		for ip, client := range network.Clients {
+			record, ok := recordByGroupDevice[network.Group+"\x00"+client.DeviceId]
+			if !ok {
+				continue
+			}
+			updatedAt := client.ControlLastSeen
+			if client.DataPlaneLastSeen > updatedAt {
+				updatedAt = client.DataPlaneLastSeen
+			}
+			if client.LastJoin > updatedAt {
+				updatedAt = client.LastJoin
+			}
+			devices = append(devices, DeviceAdminView{
+				UserID:             record.UserID,
+				Group:              network.Group,
+				Name:               client.Name,
+				DeviceID:           client.DeviceId,
+				VirtualIP:          util.Uint32ToIP(ip).String(),
+				ControlOnline:      client.ControlOnline,
+				DataPlaneReachable: client.DataPlaneReachable,
+				UpdatedAtUnix:      updatedAt,
+			})
+		}
+	}
+	sort.Slice(devices, func(i, j int) bool {
+		if devices[i].Group != devices[j].Group {
+			return devices[i].Group < devices[j].Group
+		}
+		if devices[i].UserID != devices[j].UserID {
+			return devices[i].UserID < devices[j].UserID
+		}
+		if devices[i].VirtualIP != devices[j].VirtualIP {
+			return devices[i].VirtualIP < devices[j].VirtualIP
+		}
+		return devices[i].DeviceID < devices[j].DeviceID
+	})
+	return devices
 }
 
 func (c *Controller) isGatewayAllowed(gatewayID, endpoint string) bool {

@@ -33,6 +33,7 @@ type adminResponse struct {
 	Ticket       string                     `json:"ticket,omitempty"`
 	ExpireAtUnix int64                      `json:"expire_at_unix,omitempty"`
 	Gateways     []control.GatewayAdminView `json:"gateways,omitempty"`
+	Devices      []control.DeviceAdminView  `json:"devices,omitempty"`
 	Error        string                     `json:"error,omitempty"`
 }
 
@@ -116,6 +117,13 @@ func handleAdminConn(ctrl *control.Controller, conn net.Conn) {
 		_ = json.NewEncoder(conn).Encode(adminResponse{OK: true})
 	case "list_gateway":
 		_ = json.NewEncoder(conn).Encode(adminResponse{OK: true, Gateways: ctrl.ListGateways()})
+	case "list_device":
+		userID := strings.TrimSpace(req.UserID)
+		if userID == "" {
+			_ = json.NewEncoder(conn).Encode(adminResponse{OK: false, Error: "user_id required"})
+			return
+		}
+		_ = json.NewEncoder(conn).Encode(adminResponse{OK: true, Devices: ctrl.ListDevices(userID)})
 	default:
 		_ = json.NewEncoder(conn).Encode(adminResponse{OK: false, Error: "unsupported action"})
 	}

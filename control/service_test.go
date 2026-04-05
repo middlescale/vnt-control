@@ -666,6 +666,69 @@ func TestFailedRegistrationClearsStalePunchCandidateState(t *testing.T) {
 	}
 }
 
+func TestListDevicesIncludesOnlineState(t *testing.T) {
+	ctrl := newTestController(t)
+	defer ctrl.Stop()
+
+	userA, err := ctrl.UMCreateUserWithID("user-a", "ms.net", "ms.net")
+	if err != nil {
+		t.Fatalf("UMCreateUserWithID user-a failed: %v", err)
+	}
+	userATicket, err := ctrl.UMIssueDeviceTicket(userA.UserID, "ms.net", time.Minute)
+	if err != nil {
+		t.Fatalf("UMIssueDeviceTicket user-a failed: %v", err)
+	}
+	if _, err := ctrl.UMAuthDevice(userA.UserID, "ms.net", "dev-a", userATicket.Ticket, []byte("pk-dev-a")); err != nil {
+		t.Fatalf("UMAuthDevice user-a failed: %v", err)
+	}
+	userB, err := ctrl.UMCreateUserWithID("user-b", "ms.net", "ms.net")
+	if err != nil {
+		t.Fatalf("UMCreateUserWithID user-b failed: %v", err)
+	}
+	userBTicket, err := ctrl.UMIssueDeviceTicket(userB.UserID, "ms.net", time.Minute)
+	if err != nil {
+		t.Fatalf("UMIssueDeviceTicket user-b failed: %v", err)
+	}
+	if _, err := ctrl.UMAuthDevice(userB.UserID, "ms.net", "dev-b", userBTicket.Ticket, []byte("pk-dev-b")); err != nil {
+		t.Fatalf("UMAuthDevice user-b failed: %v", err)
+	}
+	srcReg := mustRegister(t, ctrl, newBaseRegisterReq("dev-a", "node-a"), &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1111})
+	dstReg := mustRegister(t, ctrl, newBaseRegisterReq("dev-b", "node-b"), &net.UDPAddr{IP: net.ParseIP("1.1.1.2"), Port: 2222})
+
+	srcStatus := &pb.ClientStatusInfo{
+		Source:         srcReg.GetVirtualIp(),
+		NatType:        pb.PunchNatType_Cone,
+		PublicIpList:   []uint32{util.IpToUint32(net.ParseIP("8.8.8.8"))},
+		PublicUdpPorts: []uint32{30001},
+		LocalUdpPorts:  []uint32{1111},
+	}
+	srcPayload, err := proto.Marshal(srcStatus)
+	if err != nil {
+		t.Fatalf("marshal src status failed: %v", err)
+	}
+	if err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(srcReg.GetVirtualIp()), Payload: srcPayload}); err != nil {
+		t.Fatalf("update src status failed: %v", err)
+	}
+
+	devices := ctrl.ListDevices("user-a")
+	if len(devices) != 1 {
+		t.Fatalf("expected 1 device, got %d", len(devices))
+	}
+	device := devices[0]
+	if device.UserID != "user-a" || device.DeviceID != "dev-a" {
+		t.Fatalf("unexpected listed device: %+v", device)
+	}
+	if device.VirtualIP != util.Uint32ToIP(srcReg.GetVirtualIp()).String() {
+		t.Fatalf("unexpected src virtual ip: %+v", device)
+	}
+	if !device.ControlOnline {
+		t.Fatalf("expected src device control-online: %+v", device)
+	}
+	if other := ctrl.ListDevices("user-b"); len(other) != 1 || other[0].VirtualIP != util.Uint32ToIP(dstReg.GetVirtualIp()).String() || !other[0].ControlOnline {
+		t.Fatalf("unexpected user-b device list: %+v", other)
+	}
+}
+
 func TestHandleRegistrationPacketConflictAndAllowIpChange(t *testing.T) {
 	ctrl := newTestController(t)
 	defer ctrl.Stop()

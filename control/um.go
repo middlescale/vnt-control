@@ -422,6 +422,19 @@ func (m *UserManager) GetAuthedDevice(groupName string, deviceID string) (UMAuth
 	return record, ok
 }
 
+func (m *UserManager) ListAuthedDevicesByUser(userID string) []UMAuthDevice {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	devices := make([]UMAuthDevice, 0)
+	for _, record := range m.authedDevices {
+		if record.UserID == userID {
+			devices = append(devices, record)
+		}
+	}
+	return devices
+}
+
 func (m *UserManager) CheckAuthedDevice(groupName string, deviceID string, pubKey []byte) error {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

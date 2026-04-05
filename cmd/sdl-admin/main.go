@@ -30,6 +30,7 @@ type adminResponse struct {
 	Ticket       string        `json:"ticket,omitempty"`
 	ExpireAtUnix int64         `json:"expire_at_unix,omitempty"`
 	Gateways     []gatewayInfo `json:"gateways,omitempty"`
+	Devices      []deviceInfo  `json:"devices,omitempty"`
 	Error        string        `json:"error,omitempty"`
 }
 
@@ -42,6 +43,17 @@ type gatewayInfo struct {
 	Alive         bool     `json:"alive"`
 	Capabilities  []string `json:"capabilities,omitempty"`
 	UpdatedAtUnix int64    `json:"updated_at_unix,omitempty"`
+}
+
+type deviceInfo struct {
+	UserID             string `json:"user_id"`
+	Group              string `json:"group"`
+	Name               string `json:"name"`
+	DeviceID           string `json:"device_id"`
+	VirtualIP          string `json:"virtual_ip"`
+	ControlOnline      bool   `json:"control_online"`
+	DataPlaneReachable bool   `json:"data_plane_reachable"`
+	UpdatedAtUnix      int64  `json:"updated_at_unix,omitempty"`
 }
 
 func main() {
@@ -64,6 +76,8 @@ func main() {
 		req = parseIssueDeviceTicket(args[1:])
 	case "listGateway", "list_gateway":
 		req = parseListGateway(args[1:])
+	case "listDevice", "list_device":
+		req = parseListDevice(args[1:])
 	case "registerGateway", "register_gateway":
 		req = parseRegisterGateway(args[1:])
 	default:
@@ -85,6 +99,10 @@ func main() {
 	case "list_gateway":
 		for _, gw := range resp.Gateways {
 			fmt.Printf("gateway=%s endpoint=%s default=%t approved=%t reported=%t alive=%t updated_at_unix=%d\n", gw.GatewayID, gw.Endpoint, gw.Default, gw.Approved, gw.Reported, gw.Alive, gw.UpdatedAtUnix)
+		}
+	case "list_device":
+		for _, device := range resp.Devices {
+			fmt.Printf("user_id=%s group=%s device_id=%s name=%s virtual_ip=%s control_online=%t data_plane_reachable=%t updated_at_unix=%d\n", device.UserID, device.Group, device.DeviceID, device.Name, device.VirtualIP, device.ControlOnline, device.DataPlaneReachable, device.UpdatedAtUnix)
 		}
 	}
 }
@@ -149,6 +167,21 @@ func parseListGateway(args []string) adminRequest {
 	return adminRequest{Action: "list_gateway"}
 }
 
+func parseListDevice(args []string) adminRequest {
+	fs := flag.NewFlagSet("listDevice", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	var userID string
+	fs.StringVar(&userID, "userId", "", "user id")
+	fs.StringVar(&userID, "u", "", "user id")
+	if err := fs.Parse(args); err != nil {
+		fatalUsage()
+	}
+	if strings.TrimSpace(userID) == "" || fs.NArg() != 0 {
+		fatalUsage()
+	}
+	return adminRequest{Action: "list_device", UserID: strings.TrimSpace(userID)}
+}
+
 func parseRegisterGateway(args []string) adminRequest {
 	fs := flag.NewFlagSet("registerGateway", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
@@ -205,6 +238,7 @@ func fatalUsage() {
 	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] createUser --userId/-u user1 [--group/-g sales.ms.net]")
 	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] issueDeviceTicket --userId/-u u-1 [--group/-g default.ms.net] [--ttlSeconds/-t 300]")
 	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] listGateway")
+	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] listDevice --userId/-u u-1")
 	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] registerGateway --gateway-id/-g gw-1")
 	os.Exit(2)
 }
