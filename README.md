@@ -61,8 +61,7 @@
   "listen_addr": ":4433",
   "autocert_http_addr": ":80",
   "autocert_email": "admin@example.com",
-  "cert_cache_dir": "./cert-cache",
-  "gateway_ca_path": "./gateway-ca.pem"
+  "cert_cache_dir": "./cert-cache"
 }
 ```
 
@@ -74,7 +73,6 @@
 - `default_domain`：创建用户时未指定域名时使用，默认建议 `ms.net`。
 - `default_gateway_id`：默认下发给客户端的 gateway 身份标识。control 只按这个 `gateway_id` 选择默认网关，实际地址来自 gateway 上报并持久化保存的 `gateway_id -> endpoint` 记录。
 - `gateway_ticket_secret`：control 与 gateway 共享的密钥；control 用它对下发给客户端的 gateway ticket 做 HMAC-SHA256 签名，也用它校验 gateway 上报的 `GatewayReportRequest.signature`。
-- `gateway_ca_path`：可选。若 gateway 的 QUIC fallback 使用私有 CA / 自签链，control 会读取这个 PEM 文件并把 CA PEM 附到下发给客户端的 QUIC channel 元数据中。
 - `domains`：多域名配置，`domains.<domain>.groups.<group>` 对应子域配置，例如 `sales.ms.net`。
 - `tls_cert_path` / `tls_key_path`：使用本地证书文件。
 - `client_ca_path`：客户端 CA 文件路径（PEM）。

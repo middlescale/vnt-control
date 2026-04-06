@@ -29,7 +29,6 @@ type Config struct {
 	CertCacheDir        string                  `json:"cert_cache_dir"`
 	TLSCertPath         string                  `json:"tls_cert_path"`
 	TLSKeyPath          string                  `json:"tls_key_path"`
-	GatewayCAPath       string                  `json:"gateway_ca_path"`
 	ClientCAPath        string                  `json:"client_ca_path"`
 	RequireClientCert   bool                    `json:"require_client_cert"`
 }

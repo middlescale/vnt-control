@@ -1697,11 +1697,6 @@ func (c *Controller) buildGatewayAccessGrant(virtualIP uint32, deviceID string) 
 	sessionID := uint64(time.Now().UnixNano())
 	leaseSecs := uint32(60)
 	graceSecs := uint32(30)
-	gatewayCAPem, err := c.loadGatewayCAPem()
-	if err != nil {
-		log.Warnf("load gateway CA PEM failed: %v", err)
-		return nil
-	}
 	ticket, err := newGatewayTicket(
 		c.cfg.GatewayTicketSecret,
 		deviceID,
@@ -1724,7 +1719,6 @@ func (c *Controller) buildGatewayAccessGrant(virtualIP uint32, deviceID string) 
 			Kind:       pb.GatewayChannelKind_GATEWAY_CHANNEL_QUIC,
 			Addr:       "quic://" + strings.TrimSpace(picked.Endpoint),
 			ServerName: gatewayServerName(picked.Endpoint),
-			CaPem:      append([]byte(nil), gatewayCAPem...),
 		}}
 	}
 	defaultChannel := normalizeGatewayChannelKind(picked.DefaultChannel)
@@ -1743,23 +1737,11 @@ func (c *Controller) buildGatewayAccessGrant(virtualIP uint32, deviceID string) 
 		GatewayCapabilities:   append([]string{}, picked.Capabilities...),
 		LeaseSecs:             leaseSecs,
 		GraceSecs:             graceSecs,
-		GatewayChannels:       attachGatewayCAPem(grantChannels, gatewayCAPem),
+		GatewayChannels:       cloneGatewayChannels(grantChannels),
 		DefaultGatewayChannel: defaultChannel,
 		GatewayUdpPublicKey:   append([]byte(nil), picked.UDPPublicKey...),
 		GatewayUdpKeyId:       picked.UDPKeyID,
 	}
-}
-
-func (c *Controller) loadGatewayCAPem() ([]byte, error) {
-	path := strings.TrimSpace(c.cfg.GatewayCAPath)
-	if path == "" {
-		return nil, nil
-	}
-	pem, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("read gateway_ca_path %s failed: %w", path, err)
-	}
-	return pem, nil
 }
 
 func cloneGatewayChannels(channels []*pb.GatewayChannel) []*pb.GatewayChannel {
@@ -1779,7 +1761,6 @@ func cloneGatewayChannels(channels []*pb.GatewayChannel) []*pb.GatewayChannel {
 			Kind:       normalizeGatewayChannelKind(channel.GetKind()),
 			Addr:       addr,
 			ServerName: strings.TrimSpace(channel.GetServerName()),
-			CaPem:      append([]byte(nil), channel.GetCaPem()...),
 		})
 	}
 	return cloned
@@ -1801,19 +1782,6 @@ func hasGatewayChannelKind(channels []*pb.GatewayChannel, kind pb.GatewayChannel
 		}
 	}
 	return false
-}
-
-func attachGatewayCAPem(channels []*pb.GatewayChannel, gatewayCAPem []byte) []*pb.GatewayChannel {
-	if len(channels) == 0 {
-		return nil
-	}
-	cloned := cloneGatewayChannels(channels)
-	for _, channel := range cloned {
-		if channel != nil && normalizeGatewayChannelKind(channel.GetKind()) == pb.GatewayChannelKind_GATEWAY_CHANNEL_QUIC && len(channel.GetCaPem()) == 0 && len(gatewayCAPem) > 0 {
-			channel.CaPem = append([]byte(nil), gatewayCAPem...)
-		}
-	}
-	return cloned
 }
 
 func primaryGatewayEndpoint(channels []*pb.GatewayChannel) string {

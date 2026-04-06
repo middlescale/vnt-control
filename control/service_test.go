@@ -1,13 +1,11 @@
 package control
 
 import (
-	"bytes"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"fmt"
 	"net"
-	"os"
 	"path/filepath"
 	"sdl-control/config"
 	"sdl-control/protocol"
@@ -1361,20 +1359,13 @@ func TestGatewayReportAllowsConfiguredDefaultGateway(t *testing.T) {
 	}
 }
 
-func TestGatewayGrantIncludesConfiguredCAPem(t *testing.T) {
-	dir := t.TempDir()
-	caPath := filepath.Join(dir, "gateway-ca.pem")
-	expected := []byte("-----BEGIN CERTIFICATE-----\nTEST\n-----END CERTIFICATE-----\n")
-	if err := os.WriteFile(caPath, expected, 0o600); err != nil {
-		t.Fatalf("write gateway ca failed: %v", err)
-	}
+func TestGatewayGrantIncludesSingleChannel(t *testing.T) {
 	ctrl := newControllerWithConfig(t, &config.Config{
 		Gateway:             net.ParseIP("10.26.0.1"),
 		Domain:              "ms.net",
 		Netmask:             "255.255.255.0",
 		DefaultGatewayID:    "gw-ca",
 		GatewayTicketSecret: testGatewayTicketSecret,
-		GatewayCAPath:       caPath,
 	})
 	defer ctrl.Stop()
 	ctrl.RegisterGatewayNode("gw-ca", "127.0.0.1:51826", []string{"udp_blind_relay_v1"}, "", nil)
@@ -1384,8 +1375,8 @@ func TestGatewayGrantIncludesConfiguredCAPem(t *testing.T) {
 	if grant == nil {
 		t.Fatalf("expected gateway access grant in registration response")
 	}
-	if len(grant.GetGatewayChannels()) != 1 || !bytes.Equal(grant.GetGatewayChannels()[0].GetCaPem(), expected) {
-		t.Fatalf("unexpected gateway channel ca pem: %+v", grant.GetGatewayChannels())
+	if len(grant.GetGatewayChannels()) != 1 {
+		t.Fatalf("expected exactly one gateway channel: %+v", grant.GetGatewayChannels())
 	}
 }
 
