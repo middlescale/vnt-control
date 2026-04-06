@@ -231,6 +231,12 @@ func serveControlSession(ctrl *control.Controller, remoteAddr net.Addr, session 
 						log.Errorf("HandleRefreshGatewayGrantPacket error: %v", err)
 						continue
 					}
+				case protocol.AppProtoDNSQueryRequest:
+					respPacket, err = ctrl.HandleDNSQueryPacket(packet)
+					if err != nil {
+						log.Errorf("HandleDNSQueryPacket error: %v", err)
+						continue
+					}
 				case protocol.AppProtoClientStatusInfo:
 					err = ctrl.HandleClientStatusInfoPacket(packet)
 					if err != nil {

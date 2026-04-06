@@ -31,6 +31,7 @@ type adminResponse struct {
 	ExpireAtUnix int64         `json:"expire_at_unix,omitempty"`
 	Gateways     []gatewayInfo `json:"gateways,omitempty"`
 	Devices      []deviceInfo  `json:"devices,omitempty"`
+	DNSSnapshot  any           `json:"dns_snapshot,omitempty"`
 	Error        string        `json:"error,omitempty"`
 }
 
@@ -80,6 +81,8 @@ func main() {
 		req = parseListDevice(args[1:])
 	case "registerGateway", "register_gateway":
 		req = parseRegisterGateway(args[1:])
+	case "dnsSnapshot", "dns_snapshot":
+		req = parseDNSSnapshot(args[1:])
 	default:
 		fatalUsage()
 	}
@@ -103,6 +106,13 @@ func main() {
 	case "list_device":
 		for _, device := range resp.Devices {
 			fmt.Printf("user_id=%s group=%s device_id=%s name=%s virtual_ip=%s control_online=%t data_plane_reachable=%t updated_at_unix=%d\n", device.UserID, device.Group, device.DeviceID, device.Name, device.VirtualIP, device.ControlOnline, device.DataPlaneReachable, device.UpdatedAtUnix)
+		}
+	case "dns_snapshot":
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(resp.DNSSnapshot); err != nil {
+			fmt.Fprintf(os.Stderr, "encode dns snapshot failed: %v\n", err)
+			os.Exit(1)
 		}
 	}
 }
@@ -208,6 +218,28 @@ func parseRegisterGateway(args []string) adminRequest {
 	}
 }
 
+func parseDNSSnapshot(args []string) adminRequest {
+	fs := flag.NewFlagSet("dnsSnapshot", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	var domain string
+	var group string
+	fs.StringVar(&domain, "domain", "", "dns domain")
+	fs.StringVar(&domain, "d", "", "dns domain")
+	fs.StringVar(&group, "group", "", "optional short group name")
+	fs.StringVar(&group, "g", "", "optional short group name")
+	if err := fs.Parse(args); err != nil {
+		fatalUsage()
+	}
+	if strings.TrimSpace(domain) == "" || fs.NArg() != 0 {
+		fatalUsage()
+	}
+	return adminRequest{
+		Action: "dns_snapshot",
+		Domain: strings.TrimSpace(domain),
+		Group:  strings.TrimSpace(group),
+	}
+}
+
 func call(socket string, req adminRequest) adminResponse {
 	conn, err := net.Dial("unix", socket)
 	if err != nil {
@@ -240,6 +272,7 @@ func fatalUsage() {
 	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] listGateway")
 	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] listDevice --userId/-u u-1")
 	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] registerGateway --gateway-id/-g gw-1")
+	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] dnsSnapshot --domain/-d ms.net [--group/-g default]")
 	os.Exit(2)
 }
 

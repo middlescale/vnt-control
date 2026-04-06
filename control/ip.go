@@ -3,19 +3,24 @@ package control
 import "net"
 
 type NetworkInfo struct {
-	Group   string
-	Netmask net.IPMask
-	Gateway net.IP
-	Epoch   uint64
-	Clients map[uint32]ClientInfo
+	Group       string
+	Netmask     net.IPMask
+	Gateway     net.IP
+	Epoch       uint64
+	Clients     map[uint32]ClientInfo
+	ReservedIPs map[uint32]string
 }
 
-func NewNetworkInfo(group string, netmask net.IPMask, gateway net.IP) *NetworkInfo {
+func NewNetworkInfo(group string, netmask net.IPMask, gateway net.IP, reservedIPs map[uint32]string) *NetworkInfo {
+	if reservedIPs == nil {
+		reservedIPs = make(map[uint32]string)
+	}
 	return &NetworkInfo{
-		Group:   group,
-		Netmask: netmask,
-		Gateway: gateway,
-		Clients: make(map[uint32]ClientInfo), // key: virtual IP
+		Group:       group,
+		Netmask:     netmask,
+		Gateway:     gateway,
+		Clients:     make(map[uint32]ClientInfo), // key: virtual IP
+		ReservedIPs: reservedIPs,
 	}
 }
 

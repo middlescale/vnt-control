@@ -34,6 +34,7 @@ type adminResponse struct {
 	ExpireAtUnix int64                      `json:"expire_at_unix,omitempty"`
 	Gateways     []control.GatewayAdminView `json:"gateways,omitempty"`
 	Devices      []control.DeviceAdminView  `json:"devices,omitempty"`
+	DNSSnapshot  *control.DNSSnapshotView   `json:"dns_snapshot,omitempty"`
 	Error        string                     `json:"error,omitempty"`
 }
 
@@ -124,6 +125,13 @@ func handleAdminConn(ctrl *control.Controller, conn net.Conn) {
 			return
 		}
 		_ = json.NewEncoder(conn).Encode(adminResponse{OK: true, Devices: ctrl.ListDevices(userID)})
+	case "dns_snapshot":
+		snapshot, err := ctrl.BuildDNSSnapshot(strings.TrimSpace(req.Domain), strings.TrimSpace(req.Group))
+		if err != nil {
+			_ = json.NewEncoder(conn).Encode(adminResponse{OK: false, Error: err.Error()})
+			return
+		}
+		_ = json.NewEncoder(conn).Encode(adminResponse{OK: true, DNSSnapshot: snapshot})
 	default:
 		_ = json.NewEncoder(conn).Encode(adminResponse{OK: false, Error: "unsupported action"})
 	}

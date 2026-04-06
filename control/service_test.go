@@ -45,7 +45,6 @@ func TestHandleHandshakePacketSuccess(t *testing.T) {
 		AppProto: protocol.AppProtoHandshakeRequest,
 		SrcIP:    srcIP,
 		DstIP:    net.ParseIP("0.0.0.1"),
-		Gateway:  true,
 		Payload:  payload,
 	}
 	remoteAddr := &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1111}
@@ -68,9 +67,6 @@ func TestHandleHandshakePacketSuccess(t *testing.T) {
 	}
 	if respPacket.TTL != protocol.MAX_TTL {
 		t.Fatalf("unexpected ttl: %v", respPacket.TTL)
-	}
-	if !respPacket.Gateway {
-		t.Fatalf("expected gateway packet")
 	}
 	if !respPacket.SrcIP.Equal(reqPacket.DstIP) {
 		t.Fatalf("unexpected source ip: %v", respPacket.SrcIP)
@@ -106,7 +102,6 @@ func TestHandleHandshakePacketInvalidPayload(t *testing.T) {
 		Proto:    protocol.ProtocolService,
 		AppProto: protocol.AppProtoHandshakeRequest,
 		SrcIP:    net.ParseIP("10.26.0.2"),
-		Gateway:  true,
 		Payload:  []byte{0x01, 0x02},
 	}
 
@@ -131,7 +126,6 @@ func TestHandleHandshakePacketUnsupportedCapabilities(t *testing.T) {
 		AppProto: protocol.AppProtoHandshakeRequest,
 		SrcIP:    net.ParseIP("10.26.0.2"),
 		DstIP:    net.ParseIP("0.0.0.1"),
-		Gateway:  true,
 		Payload:  payload,
 	}, &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1111})
 	if err != nil {
@@ -164,7 +158,6 @@ func TestRegistrationPersistsNegotiatedCapabilities(t *testing.T) {
 		AppProto: protocol.AppProtoHandshakeRequest,
 		SrcIP:    net.ParseIP("10.26.0.2"),
 		DstIP:    net.ParseIP("0.0.0.1"),
-		Gateway:  true,
 		Payload:  payload,
 	}, remoteAddr); err != nil {
 		t.Fatalf("HandleHandshakePacket failed: %v", err)
@@ -211,7 +204,6 @@ func TestRegistrationRequiresUDPEndpointReportCapability(t *testing.T) {
 		AppProto: protocol.AppProtoHandshakeRequest,
 		SrcIP:    net.ParseIP("10.26.0.2"),
 		DstIP:    net.ParseIP("0.0.0.1"),
-		Gateway:  true,
 		Payload:  payload,
 	}, remoteAddr); err != nil {
 		t.Fatalf("HandleHandshakePacket failed: %v", err)
@@ -323,7 +315,6 @@ func TestPunchSessionLifecycleHandlers(t *testing.T) {
 		AppProto: protocol.AppProtoPunchRequest,
 		SrcIP:    util.Uint32ToIP(srcReg.GetVirtualIp()),
 		DstIP:    util.Uint32ToIP(srcReg.GetVirtualGateway()),
-		Gateway:  true,
 		Payload:  reqPayload,
 	})
 	if err != nil {
@@ -416,7 +407,6 @@ func TestBuildPunchStartPackets(t *testing.T) {
 		AppProto: protocol.AppProtoPunchRequest,
 		SrcIP:    util.Uint32ToIP(srcReg.GetVirtualIp()),
 		DstIP:    util.Uint32ToIP(srcReg.GetVirtualGateway()),
-		Gateway:  true,
 		Payload:  payload,
 	})
 	if err != nil {
@@ -541,10 +531,9 @@ func TestBuildPunchStartPacketsFromStatus(t *testing.T) {
 		t.Fatalf("update dst status failed: %v", err)
 	}
 	startPackets, err := ctrl.BuildPunchStartPacketsFromStatus(&protocol.Packet{
-		Proto:   protocol.ProtocolService,
-		SrcIP:   util.Uint32ToIP(srcReg.GetVirtualIp()),
-		DstIP:   util.Uint32ToIP(srcReg.GetVirtualGateway()),
-		Gateway: true,
+		Proto: protocol.ProtocolService,
+		SrcIP: util.Uint32ToIP(srcReg.GetVirtualIp()),
+		DstIP: util.Uint32ToIP(srcReg.GetVirtualGateway()),
 	})
 	if err != nil {
 		t.Fatalf("BuildPunchStartPacketsFromStatus failed: %v", err)
@@ -618,10 +607,9 @@ func TestBuildPunchStartPacketsFromStatusIncludesLocalEndpointsForPrivateRemoteA
 		t.Fatalf("update dst status failed: %v", err)
 	}
 	startPackets, err := ctrl.BuildPunchStartPacketsFromStatus(&protocol.Packet{
-		Proto:   protocol.ProtocolService,
-		SrcIP:   util.Uint32ToIP(srcReg.GetVirtualIp()),
-		DstIP:   util.Uint32ToIP(srcReg.GetVirtualGateway()),
-		Gateway: true,
+		Proto: protocol.ProtocolService,
+		SrcIP: util.Uint32ToIP(srcReg.GetVirtualIp()),
+		DstIP: util.Uint32ToIP(srcReg.GetVirtualGateway()),
 	})
 	if err != nil {
 		t.Fatalf("BuildPunchStartPacketsFromStatus failed: %v", err)
@@ -989,7 +977,6 @@ func TestHandlePullDeviceListPacket(t *testing.T) {
 		TTL:       protocol.MAX_TTL,
 		SrcIP:     util.Uint32ToIP(resp2.GetVirtualIp()),
 		DstIP:     util.Uint32ToIP(resp2.GetVirtualGateway()),
-		Gateway:   true,
 	}
 	rs, err := ctrl.HandlePullDeviceListPacket(req)
 	if err != nil {
@@ -1206,7 +1193,7 @@ func TestHandleDeviceAuthPacket(t *testing.T) {
 	}
 	req := &pb.DeviceAuthRequest{UserId: user.UserID, Group: "ms.net", DeviceId: "dev-x", Ticket: tk.Ticket, DevicePubKey: []byte("pk-dev-x")}
 	b, _ := proto.Marshal(req)
-	packet := &protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoDeviceAuthRequest, SrcIP: net.ParseIP("10.0.0.2"), DstIP: net.ParseIP("0.0.0.1"), Gateway: true, Payload: b}
+	packet := &protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoDeviceAuthRequest, SrcIP: net.ParseIP("10.0.0.2"), DstIP: net.ParseIP("0.0.0.1"), Payload: b}
 	resp, err := ctrl.HandleDeviceAuthPacket(packet)
 	if err != nil {
 		t.Fatalf("HandleDeviceAuthPacket failed: %v", err)
@@ -1522,7 +1509,6 @@ func TestRefreshGatewayGrantPacket(t *testing.T) {
 		TTL:       protocol.MAX_TTL,
 		SrcIP:     util.Uint32ToIP(regResp.GetVirtualIp()),
 		DstIP:     util.Uint32ToIP(regResp.GetVirtualGateway()),
-		Gateway:   true,
 		Payload:   payload,
 	})
 	if err != nil {
@@ -1538,6 +1524,104 @@ func TestRefreshGatewayGrantPacket(t *testing.T) {
 	}
 	if resp.GetGatewayAccessGrant() == nil {
 		t.Fatalf("expected gateway access grant in refresh response")
+	}
+}
+
+func TestBuildDNSSnapshotReturnsRecords(t *testing.T) {
+	ctrl := newControllerWithConfig(t, &config.Config{
+		DefaultDomain: "ms.net",
+		Domains: map[string]config.DomainConfig{
+			"ms.net": {
+				Groups: map[string]config.GroupConfig{
+					"default": {Gateway: net.ParseIP("10.26.0.1"), Netmask: "255.255.255.0"},
+					"ops":     {Gateway: net.ParseIP("10.26.1.1"), Netmask: "255.255.255.0"},
+				},
+			},
+		},
+		DefaultGatewayID:    "gw-default",
+		GatewayTicketSecret: testGatewayTicketSecret,
+	})
+	defer ctrl.Stop()
+	ctrl.RegisterGatewayNode("gw-default", "127.0.0.1:51820", []string{"quic_stream_relay_v1"}, "", nil)
+
+	req := newBaseRegisterReq("dev-dns-a", "laptop")
+	req.Token = "default.ms.net"
+	req.Name = "laptop"
+	resp := mustRegister(t, ctrl, req, &net.UDPAddr{IP: net.ParseIP("1.1.1.50"), Port: 5050})
+
+	snapshot, err := ctrl.BuildDNSSnapshot("ms.net", "default")
+	if err != nil {
+		t.Fatalf("BuildDNSSnapshot failed: %v", err)
+	}
+	if snapshot.Domain != "ms.net" || snapshot.GroupFilter != "default" {
+		t.Fatalf("unexpected snapshot scope: %+v", snapshot)
+	}
+	if snapshot.Epoch == 0 {
+		t.Fatalf("expected non-zero epoch")
+	}
+	if len(snapshot.Networks) != 1 || snapshot.Networks[0].Group != "default" || snapshot.Networks[0].GatewayIP != "10.26.0.1" {
+		t.Fatalf("unexpected networks: %+v", snapshot.Networks)
+	}
+	if len(snapshot.Records) != 1 {
+		t.Fatalf("unexpected records: %+v", snapshot.Records)
+	}
+	record := snapshot.Records[0]
+	if record.FQDN != "laptop.default.ms.net" {
+		t.Fatalf("unexpected fqdn: %+v", record)
+	}
+	if record.VirtualIP != util.Uint32ToIP(resp.GetVirtualIp()).String() {
+		t.Fatalf("unexpected virtual ip: %+v", record)
+	}
+	if len(snapshot.Gateways) == 0 || snapshot.Gateways[0].GatewayID != "gw-default" || !snapshot.Gateways[0].Default {
+		t.Fatalf("unexpected gateways: %+v", snapshot.Gateways)
+	}
+}
+
+func TestBuildDNSSnapshotEpochIgnoresReachabilityState(t *testing.T) {
+	ctrl := newControllerWithConfig(t, &config.Config{
+		DefaultDomain: "ms.net",
+		Domains: map[string]config.DomainConfig{
+			"ms.net": {
+				Groups: map[string]config.GroupConfig{
+					"default": {Gateway: net.ParseIP("10.26.0.1"), Netmask: "255.255.255.0"},
+				},
+			},
+		},
+		DefaultGatewayID:    "gw-default",
+		GatewayTicketSecret: testGatewayTicketSecret,
+	})
+	defer ctrl.Stop()
+
+	req := newBaseRegisterReq("dev-dns-epoch", "epoch-node")
+	req.Token = "default.ms.net"
+	req.Name = "epoch-node"
+	resp := mustRegister(t, ctrl, req, &net.UDPAddr{IP: net.ParseIP("1.1.1.51"), Port: 5151})
+
+	before, err := ctrl.BuildDNSSnapshot("ms.net", "default")
+	if err != nil {
+		t.Fatalf("BuildDNSSnapshot before failed: %v", err)
+	}
+
+	ctrl.nc.VirtualNetwork.mutex.Lock()
+	network, ok := ctrl.nc.VirtualNetwork.data["default.ms.net"]
+	if !ok || network == nil {
+		ctrl.nc.VirtualNetwork.mutex.Unlock()
+		t.Fatalf("expected network for default.ms.net")
+	}
+	client := network.Clients[resp.GetVirtualIp()]
+	client.ControlOnline = !client.ControlOnline
+	client.DataPlaneReachable = !client.DataPlaneReachable
+	client.ControlLastSeen++
+	client.DataPlaneLastSeen++
+	network.Clients[resp.GetVirtualIp()] = client
+	ctrl.nc.VirtualNetwork.mutex.Unlock()
+
+	after, err := ctrl.BuildDNSSnapshot("ms.net", "default")
+	if err != nil {
+		t.Fatalf("BuildDNSSnapshot after failed: %v", err)
+	}
+	if before.Epoch != after.Epoch {
+		t.Fatalf("expected epoch unchanged for reachability-only update: before=%d after=%d", before.Epoch, after.Epoch)
 	}
 }
 
@@ -1560,6 +1644,171 @@ func TestRegistrationUsesConfiguredGroupNetwork(t *testing.T) {
 	if resp.GetVirtualNetmask() != util.IpToUint32(net.ParseIP("255.255.255.0")) {
 		t.Fatalf("unexpected g1 netmask: %s", util.Uint32ToIP(resp.GetVirtualNetmask()))
 	}
+}
+
+func TestRegistrationResponseIncludesDNSProfile(t *testing.T) {
+	ctrl := newControllerWithConfig(t, &config.Config{
+		DefaultDomain:   "ms.net",
+		DNSServers:      []string{"10.26.0.53"},
+		DNSMatchDomains: []string{"ms.net"},
+		Domains: map[string]config.DomainConfig{
+			"ms.net": {
+				Groups: map[string]config.GroupConfig{
+					"sales": {
+						Gateway:         net.ParseIP("10.26.0.1"),
+						Netmask:         "255.255.255.0",
+						DNSServers:      []string{"10.26.0.54"},
+						DNSMatchDomains: []string{"sales.ms.net", "ms.net"},
+					},
+				},
+			},
+		},
+		DefaultGatewayID:    "gw-default",
+		GatewayTicketSecret: testGatewayTicketSecret,
+	})
+	defer ctrl.Stop()
+
+	req := newBaseRegisterReq("dev-dns-prof-a", "dns-node")
+	req.Token = "sales.ms.net"
+	resp := mustRegister(t, ctrl, req, &net.UDPAddr{IP: net.ParseIP("1.1.1.70"), Port: 7070})
+	if resp.GetDnsProfile() == nil {
+		t.Fatalf("expected dns profile in registration response")
+	}
+	if got, want := resp.GetDnsProfile().GetServers(), []string{"10.26.0.54"}; len(got) != len(want) || got[0] != want[0] {
+		t.Fatalf("unexpected dns servers: %v", got)
+	}
+	if got, want := resp.GetDnsProfile().GetMatchDomains(), []string{"ms.net", "sales.ms.net"}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("unexpected dns match domains: %v", got)
+	}
+}
+
+func TestRegistrationSkipsReservedDNSServiceIPDuringAutoAllocation(t *testing.T) {
+	ctrl := newControllerWithConfig(t, &config.Config{
+		DefaultDomain: "ms.net",
+		Domains: map[string]config.DomainConfig{
+			"ms.net": {
+				Groups: map[string]config.GroupConfig{
+					"sales": {
+						Gateway:      net.ParseIP("10.26.0.1"),
+						Netmask:      "255.255.255.0",
+						DNSServiceIP: "10.26.0.53",
+					},
+				},
+			},
+		},
+		DefaultGatewayID:    "gw-default",
+		GatewayTicketSecret: testGatewayTicketSecret,
+	})
+	defer ctrl.Stop()
+
+	req := newBaseRegisterReq("dev-dns-skip-a", "dns-skip-node")
+	req.Token = "sales.ms.net"
+	resp := mustRegister(t, ctrl, req, &net.UDPAddr{IP: net.ParseIP("1.1.1.71"), Port: 7171})
+
+	if got := util.Uint32ToIP(resp.GetVirtualIp()).String(); got == "10.26.0.53" {
+		t.Fatalf("auto allocation should skip reserved dns service ip, got %s", got)
+	}
+	if resp.GetDnsProfile() == nil {
+		t.Fatalf("expected dns profile in registration response")
+	}
+	if got, want := resp.GetDnsProfile().GetServers(), []string{"10.26.0.53"}; len(got) != len(want) || got[0] != want[0] {
+		t.Fatalf("unexpected dns servers: %v", got)
+	}
+}
+
+func TestRegistrationAcceptsExplicitReservedDNSServiceIP(t *testing.T) {
+	ctrl := newControllerWithConfig(t, &config.Config{
+		DefaultDomain: "ms.net",
+		Domains: map[string]config.DomainConfig{
+			"ms.net": {
+				Groups: map[string]config.GroupConfig{
+					"sales": {
+						Gateway:      net.ParseIP("10.26.0.1"),
+						Netmask:      "255.255.255.0",
+						DNSServiceIP: "10.26.0.53",
+					},
+				},
+			},
+		},
+		DefaultGatewayID:    "gw-default",
+		GatewayTicketSecret: testGatewayTicketSecret,
+	})
+	defer ctrl.Stop()
+
+	req := newBaseRegisterReq("dev-dns-service", "dns-service")
+	req.Token = "sales.ms.net"
+	req.VirtualIp = util.IpToUint32(net.ParseIP("10.26.0.53"))
+	resp := mustRegister(t, ctrl, req, &net.UDPAddr{IP: net.ParseIP("1.1.1.72"), Port: 7272})
+
+	if got := util.Uint32ToIP(resp.GetVirtualIp()).String(); got != "10.26.0.53" {
+		t.Fatalf("expected reserved dns service ip, got %s", got)
+	}
+}
+
+func TestHandleDNSQueryPacketProxiesToConfiguredServiceAddr(t *testing.T) {
+	udpAddr, err := net.ResolveUDPAddr("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("ResolveUDPAddr failed: %v", err)
+	}
+	ln, err := net.ListenUDP("udp", udpAddr)
+	if err != nil {
+		t.Fatalf("ListenUDP failed: %v", err)
+	}
+	defer ln.Close()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		buf := make([]byte, 1024)
+		n, addr, err := ln.ReadFromUDP(buf)
+		if err != nil {
+			return
+		}
+		reply := append([]byte("resp:"), buf[:n]...)
+		_, _ = ln.WriteToUDP(reply, addr)
+	}()
+
+	ctrl := newControllerWithConfig(t, &config.Config{
+		Gateway:             net.ParseIP("10.26.0.1"),
+		Domain:              "ms.net",
+		Netmask:             "255.255.255.0",
+		DNSServiceAddr:      ln.LocalAddr().String(),
+		DefaultGatewayID:    "gw-default",
+		GatewayTicketSecret: testGatewayTicketSecret,
+	})
+	defer ctrl.Stop()
+
+	query := &pb.DnsQueryRequest{
+		RequestId: 42,
+		Query:     []byte{0x12, 0x34, 0x01, 0x00},
+	}
+	payload, err := proto.Marshal(query)
+	if err != nil {
+		t.Fatalf("marshal dns query failed: %v", err)
+	}
+	respPacket, err := ctrl.HandleDNSQueryPacket(&protocol.Packet{
+		Proto:    protocol.ProtocolService,
+		AppProto: protocol.AppProtoDNSQueryRequest,
+		SrcIP:    net.ParseIP("10.26.0.2"),
+		DstIP:    net.ParseIP("0.0.0.1"),
+		Payload:  payload,
+	})
+	if err != nil {
+		t.Fatalf("HandleDNSQueryPacket failed: %v", err)
+	}
+	var resp pb.DnsQueryResponse
+	if err := proto.Unmarshal(respPacket.Payload, &resp); err != nil {
+		t.Fatalf("unmarshal dns query response failed: %v", err)
+	}
+	if resp.GetRequestId() != 42 {
+		t.Fatalf("unexpected request id: %d", resp.GetRequestId())
+	}
+	if got, want := string(resp.GetResponse()), "resp:\x12\x34\x01\x00"; got != want {
+		t.Fatalf("unexpected dns proxy response: %q", got)
+	}
+	if resp.GetError() != "" {
+		t.Fatalf("unexpected dns proxy error: %s", resp.GetError())
+	}
+	<-done
 }
 
 func newTestController(t *testing.T) *Controller {
@@ -1643,7 +1892,6 @@ func handshakeRemote(t *testing.T, ctrl *Controller, remoteAddr net.Addr) net.Ad
 		AppProto: protocol.AppProtoHandshakeRequest,
 		SrcIP:    net.ParseIP("10.26.0.2"),
 		DstIP:    net.ParseIP("0.0.0.1"),
-		Gateway:  true,
 		Payload:  payload,
 	}, remoteAddr); err != nil {
 		t.Fatalf("HandleHandshakePacket failed: %v", err)
@@ -1718,7 +1966,6 @@ func newGatewayReportPacket(t *testing.T, report *pb.GatewayReportRequest) *prot
 		AppProto: protocol.AppProtoGatewayReportRequest,
 		SrcIP:    net.ParseIP("10.0.0.2"),
 		DstIP:    net.ParseIP("0.0.0.1"),
-		Gateway:  true,
 		Payload:  payload,
 	}
 }
@@ -1731,7 +1978,9 @@ func ensureAuthed(t *testing.T, ctrl *Controller, group, deviceID string, device
 		}
 	}
 	createArgs := []string{fmt.Sprintf("user-%s-%s", group, deviceID)}
-	if strings.Contains(group, ".") {
+	if domainName, _, ok := matchDomainAndGroup(group, ctrl.cfg.Domains); ok {
+		createArgs = append(createArgs, domainName)
+	} else if strings.Contains(group, ".") {
 		createArgs = append(createArgs, group)
 	}
 	user, err := ctrl.UMCreateUser(createArgs[0], createArgs[1:]...)
@@ -1757,7 +2006,6 @@ func newRegistrationPacket(t *testing.T, req *pb.RegistrationRequest) *protocol.
 		Proto:    protocol.ProtocolService,
 		AppProto: protocol.AppProtoRegistrationRequest,
 		SrcIP:    net.ParseIP("10.26.0.2"),
-		Gateway:  true,
 		Payload:  payload,
 	}
 }

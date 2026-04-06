@@ -253,7 +253,6 @@ func (c *Controller) HandleHandshakePacket(reqPacket *protocol.Packet, remoteAdd
 		TTL:       protocol.MAX_TTL,
 		SrcIP:     reqPacket.DstIP,
 		DstIP:     reqPacket.SrcIP,
-		Gateway:   true,
 		Payload:   playload,
 	}
 
@@ -316,13 +315,14 @@ func (c *Controller) HandleRegistrationPacketWithVirtualIP(request *protocol.Pac
 	}
 	registrationResp.VirtualGateway = util.IpToUint32(gateway)
 	registrationResp.VirtualNetmask = util.MaskToUint32(netmask)
+	registrationResp.DnsProfile = c.BuildClientDNSProfile(domain)
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	netInfo, netInfoExist := c.nc.VirtualNetwork.Get(domain)
 	if !netInfoExist {
-		netInfo = NewNetworkInfo(domain, netmask, net.IP(gateway))
+		netInfo = NewNetworkInfo(domain, netmask, net.IP(gateway), c.reservedServiceIPs(domain))
 		c.nc.VirtualNetwork.Set(domain, netInfo)
 	}
 	virtualIP, oldIP, err := c.nc.generateIP(
@@ -376,7 +376,6 @@ func (c *Controller) HandleRegistrationPacketWithVirtualIP(request *protocol.Pac
 		TTL:       protocol.MAX_TTL,
 		SrcIP:     request.DstIP,
 		DstIP:     request.SrcIP,
-		Gateway:   true,
 		Payload:   respBytes,
 	}
 
@@ -448,7 +447,6 @@ func (c *Controller) BuildRegistrationErrorPacket(request *protocol.Packet, err 
 		TTL:       protocol.MAX_TTL,
 		SrcIP:     request.DstIP,
 		DstIP:     request.SrcIP,
-		Gateway:   true,
 		Payload:   payload,
 	}, nil
 }
@@ -471,7 +469,6 @@ func (c *Controller) HandlePullDeviceListPacket(request *protocol.Packet) (*prot
 		TTL:       protocol.MAX_TTL,
 		SrcIP:     request.DstIP,
 		DstIP:     request.SrcIP,
-		Gateway:   true,
 		Payload:   payload,
 	}, nil
 }
@@ -509,7 +506,6 @@ func (c *Controller) BuildPushDeviceListPacketsForPeerChange(changedIP uint32) (
 				TTL:       protocol.MAX_TTL,
 				SrcIP:     net.ParseIP("0.0.0.1"),
 				DstIP:     util.Uint32ToIP(targetIP),
-				Gateway:   true,
 				Payload:   payload,
 			})
 		}
@@ -527,7 +523,6 @@ func (c *Controller) buildDisconnectPacket(request *protocol.Packet) *protocol.P
 		TTL:       protocol.MAX_TTL,
 		SrcIP:     request.DstIP,
 		DstIP:     request.SrcIP,
-		Gateway:   true,
 	}
 }
 
@@ -665,7 +660,6 @@ func (c *Controller) HandleRefreshGatewayGrantPacket(request *protocol.Packet) (
 		TTL:       protocol.MAX_TTL,
 		SrcIP:     request.DstIP,
 		DstIP:     request.SrcIP,
-		Gateway:   true,
 		Payload:   payload,
 	}, nil
 }
@@ -814,7 +808,6 @@ func (c *Controller) BuildPunchStartPacketsFromStatus(request *protocol.Packet) 
 					TTL:       protocol.MAX_TTL,
 					SrcIP:     request.DstIP,
 					DstIP:     util.Uint32ToIP(srcIP),
-					Gateway:   true,
 					Payload:   sourcePayload,
 				},
 				{
@@ -825,7 +818,6 @@ func (c *Controller) BuildPunchStartPacketsFromStatus(request *protocol.Packet) 
 					TTL:       protocol.MAX_TTL,
 					SrcIP:     request.DstIP,
 					DstIP:     util.Uint32ToIP(targetIP),
-					Gateway:   true,
 					Payload:   targetPayload,
 				},
 			}, nil
@@ -883,7 +875,6 @@ func (c *Controller) HandlePunchRequestPacket(request *protocol.Packet) (*protoc
 		TTL:       protocol.MAX_TTL,
 		SrcIP:     request.DstIP,
 		DstIP:     request.SrcIP,
-		Gateway:   true,
 		Payload:   payload,
 	}, nil
 }
@@ -941,7 +932,6 @@ func (c *Controller) BuildPunchStartPackets(request *protocol.Packet) ([]*protoc
 			TTL:       protocol.MAX_TTL,
 			SrcIP:     request.DstIP,
 			DstIP:     util.Uint32ToIP(sourceIP),
-			Gateway:   true,
 			Payload:   sourcePayload,
 		},
 		{
@@ -952,7 +942,6 @@ func (c *Controller) BuildPunchStartPackets(request *protocol.Packet) ([]*protoc
 			TTL:       protocol.MAX_TTL,
 			SrcIP:     request.DstIP,
 			DstIP:     util.Uint32ToIP(req.GetTarget()),
-			Gateway:   true,
 			Payload:   targetPayload,
 		},
 	}, nil
@@ -1094,7 +1083,6 @@ func (c *Controller) HandleControlPacket(request *protocol.Packet, remoteAddr ne
 			TTL:       protocol.MAX_TTL,
 			SrcIP:     request.DstIP,
 			DstIP:     request.SrcIP,
-			Gateway:   true,
 			Payload:   payload,
 		}, nil
 	case protocol.ControlAddrRequest:
@@ -1110,7 +1098,6 @@ func (c *Controller) HandleControlPacket(request *protocol.Packet, remoteAddr ne
 			TTL:       protocol.MAX_TTL,
 			SrcIP:     request.DstIP,
 			DstIP:     request.SrcIP,
-			Gateway:   true,
 			Payload:   payload,
 		}, nil
 	default:
@@ -1454,7 +1441,6 @@ func (c *Controller) buildGatewayReportAck(packet *protocol.Packet, ack *pb.Gate
 		TTL:       protocol.MAX_TTL,
 		SrcIP:     packet.DstIP,
 		DstIP:     packet.SrcIP,
-		Gateway:   true,
 		Payload:   payload,
 	}, nil
 }
@@ -1923,7 +1909,6 @@ func (c *Controller) buildServicePacket(request *protocol.Packet, appProto proto
 		TTL:       protocol.MAX_TTL,
 		SrcIP:     request.DstIP,
 		DstIP:     request.SrcIP,
-		Gateway:   true,
 		Payload:   payload,
 	}, nil
 }
@@ -2008,6 +1993,44 @@ func validateRequestedIP(virtualIP uint32, gateway net.IP, netmask net.IPMask) e
 		return fmt.Errorf("virtual ip %s out of network range", requested)
 	}
 	return nil
+}
+
+func (c *Controller) reservedServiceIPs(group string) map[uint32]string {
+	reserved := make(map[uint32]string)
+	if ip := strings.TrimSpace(c.resolveDNSServiceIP(group)); ip != "" {
+		parsed := net.ParseIP(ip)
+		if parsed != nil && parsed.To4() != nil {
+			reserved[util.IpToUint32(parsed)] = "dns_service_ip"
+		}
+	}
+	return reserved
+}
+
+func (c *Controller) resolveDNSServiceIP(group string) string {
+	group = strings.ToLower(strings.TrimSpace(group))
+	switch {
+	case len(c.cfg.Domains) > 0:
+		domainName, groupName, ok := matchDomainAndGroup(group, c.cfg.Domains)
+		if !ok {
+			return ""
+		}
+		gc := c.cfg.Domains[domainName].Groups[groupName]
+		if strings.TrimSpace(gc.DNSServiceIP) != "" {
+			return strings.TrimSpace(gc.DNSServiceIP)
+		}
+		return strings.TrimSpace(c.cfg.DNSServiceIP)
+	case len(c.cfg.Groups) > 0:
+		gc, ok := c.cfg.Groups[group]
+		if !ok {
+			return ""
+		}
+		if strings.TrimSpace(gc.DNSServiceIP) != "" {
+			return strings.TrimSpace(gc.DNSServiceIP)
+		}
+		return strings.TrimSpace(c.cfg.DNSServiceIP)
+	default:
+		return strings.TrimSpace(c.cfg.DNSServiceIP)
+	}
 }
 
 func findClientIPByDeviceID(clients map[uint32]ClientInfo, deviceID string) uint32 {
@@ -2104,6 +2127,9 @@ func (nc *NetworkControl) generateIP(
 	}
 	for ip := first; ip <= last; ip++ {
 		if ip == gatewayIP {
+			continue
+		}
+		if _, reserved := network.ReservedIPs[ip]; reserved {
 			continue
 		}
 		if client, occupied := network.Clients[ip]; occupied {

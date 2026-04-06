@@ -4,6 +4,10 @@
 FROM golang:1.23-alpine AS builder
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
+ARG GOPROXY=https://proxy.golang.org,direct
+ARG GOSUMDB=sum.golang.org
+ENV GOPROXY=${GOPROXY}
+ENV GOSUMDB=${GOSUMDB}
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download

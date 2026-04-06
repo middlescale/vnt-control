@@ -72,11 +72,22 @@
 - `autocert_email`：ACME 账户联系邮箱，可选但推荐配置。
 - `default_domain`：创建用户时未指定域名时使用，默认建议 `ms.net`。
 - `default_gateway_id`：默认下发给客户端的 gateway 身份标识。control 只按这个 `gateway_id` 选择默认网关，实际地址来自 gateway 上报并持久化保存的 `gateway_id -> endpoint` 记录。
+- `dns_service_ip`：为 `sdl-dns` 预留的固定虚拟 IP；可放在顶层作为默认值，也可放在 `domains.<domain>.groups.<group>` 下做 group 覆盖。普通客户端自动分配会跳过这个地址，`sdl-dns` 可在注册时显式请求它。
+- `dns_service_addr`：control 本机代理 DNS 查询时转发到的实际地址，格式为 `host:port`，默认 `127.0.0.1:53`；容器化部署时通常应配置成 `sdl-dns:53`。
+- `dns_servers`：给客户端 split DNS 下发的 DNS 服务器 IPv4 列表；可放在顶层作为默认值，也可放在 `domains.<domain>.groups.<group>` 下做覆盖。
+- `dns_match_domains`：给客户端 split DNS 下发的域名后缀列表；可放在顶层作为默认值，也可放在 group 下做覆盖。
 - `gateway_ticket_secret`：control 与 gateway 共享的密钥；control 用它对下发给客户端的 gateway ticket 做 HMAC-SHA256 签名，也用它校验 gateway 上报的 `GatewayReportRequest.signature`。
 - `domains`：多域名配置，`domains.<domain>.groups.<group>` 对应子域配置，例如 `sales.ms.net`。
 - `tls_cert_path` / `tls_key_path`：使用本地证书文件。
 - `client_ca_path`：客户端 CA 文件路径（PEM）。
 - `require_client_cert`：是否强制客户端证书校验（mTLS）。
+
+如果 `dns_servers` / `dns_match_domains` 未显式配置，control 当前会回退为：
+
+- `dns_servers`：当前 group 的 `dns_service_ip`，若未配置再回退到当前 group 的 `gateway`
+- `dns_match_domains`：当前 domain
+
+这里的 `dns_service_ip` 是客户端视角的**逻辑 DNS 服务 IP**，`dns_service_addr` 是 control 进程视角的**实际 DNS 服务地址**。当前实现会在客户端把发往 `dns_service_ip:53` 的 UDP 查询劫持到 control 通道，再由 control 转发到 `dns_service_addr`。
 
 ## 环境变量（优先级高于配置文件）
 

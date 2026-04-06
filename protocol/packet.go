@@ -30,7 +30,6 @@ type Packet struct {
 	SrcIP     net.IP      // 源IP地址，IPv4
 	DstIP     net.IP      // 目的IP地址，IPv4
 	Payload   []byte      // 数据体
-	Gateway   bool
 }
 
 const (
@@ -117,6 +116,8 @@ const (
 	AppProtoRefreshGatewayGrantResponse AppProtocol = 22
 	AppProtoDeviceAuthChallenge         AppProtocol = 23
 	AppProtoDeviceAuthProof             AppProtocol = 24
+	AppProtoDNSQueryRequest             AppProtocol = 25
+	AppProtoDNSQueryResponse            AppProtocol = 26
 	AppProtoUnknown                     AppProtocol = 255
 )
 
@@ -164,6 +165,10 @@ func AppProtocolFromUint8(val uint8) AppProtocol {
 		return AppProtoDeviceAuthChallenge
 	case 24:
 		return AppProtoDeviceAuthProof
+	case 25:
+		return AppProtoDNSQueryRequest
+	case 26:
+		return AppProtoDNSQueryResponse
 	default:
 		return AppProtoUnknown
 	}
@@ -213,7 +218,6 @@ func Unmarshal(data []byte) (*Packet, error) {
 
 	p := &Packet{}
 	p.Ver = VersionFromUint8(data[0] & 0x0F)
-	p.Gateway = false
 	p.Proto = ProtocolFromUint8(data[1])
 	p.AppProto = AppProtocolFromUint8(data[2])
 	p.SourceTTL = (data[3] >> 4) & 0x0F
@@ -237,10 +241,5 @@ func (p *Packet) DebugString() string {
 		"SrcIP=" + p.SrcIP.String() + ", " +
 		"DstIP=" + p.DstIP.String() + ", " +
 		"PayloadLen=" + fmt.Sprintf("%d", len(p.Payload)) +
-		", Gateway=" + fmt.Sprintf("%t", p.Gateway) +
 		"}"
-}
-
-func (p *Packet) SetGatewayFlag(isGateway bool) {
-	p.Gateway = isGateway
 }

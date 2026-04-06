@@ -17,11 +17,15 @@ type Config struct {
 	Gateway             net.IP                  `json:"gateway"`
 	Domain              string                  `json:"domain"`
 	Netmask             string                  `json:"netmask"`
+	DNSServiceIP        string                  `json:"dns_service_ip,omitempty"`
+	DNSServers          []string                `json:"dns_servers,omitempty"`
+	DNSMatchDomains     []string                `json:"dns_match_domains,omitempty"`
 	Groups              map[string]GroupConfig  `json:"groups"`
 	DefaultDomain       string                  `json:"default_domain"`
 	Domains             map[string]DomainConfig `json:"domains"`
 	DefaultGatewayID    string                  `json:"default_gateway_id"`
 	GatewayTicketSecret string                  `json:"gateway_ticket_secret"`
+	DNSServiceAddr      string                  `json:"dns_service_addr,omitempty"`
 	ListenAddr          string                  `json:"listen_addr"`
 	AutoCertDomain      string                  `json:"autocert_domain"`
 	AutoCertHTTPAddr    string                  `json:"autocert_http_addr"`
@@ -34,8 +38,11 @@ type Config struct {
 }
 
 type GroupConfig struct {
-	Gateway net.IP `json:"gateway"`
-	Netmask string `json:"netmask"`
+	Gateway         net.IP   `json:"gateway"`
+	Netmask         string   `json:"netmask"`
+	DNSServiceIP    string   `json:"dns_service_ip,omitempty"`
+	DNSServers      []string `json:"dns_servers,omitempty"`
+	DNSMatchDomains []string `json:"dns_match_domains,omitempty"`
 }
 
 type DomainConfig struct {
@@ -68,6 +75,12 @@ func (c *Config) Validate() error {
 	if strings.TrimSpace(c.GatewayTicketSecret) == "" {
 		return errors.New("gateway_ticket_secret 不能为空")
 	}
+	if strings.TrimSpace(c.DNSServiceAddr) == "" {
+		c.DNSServiceAddr = "127.0.0.1:53"
+	}
+	if _, _, err := net.SplitHostPort(c.DNSServiceAddr); err != nil {
+		return errors.New("dns_service_addr 必须为 host:port")
+	}
 	if strings.TrimSpace(c.AutoCertHTTPAddr) == "" {
 		c.AutoCertHTTPAddr = ":80"
 	}
@@ -75,6 +88,15 @@ func (c *Config) Validate() error {
 	domainRe := regexp.MustCompile(`^(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}$`)
 	groupRe := regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9-]{0,62}$`)
 	if len(c.Domains) > 0 {
+		if err := validateDNSServers(c.DNSServers); err != nil {
+			return err
+		}
+		if err := validateServiceIP(c.DNSServiceIP, c.Gateway, c.Netmask, "dns_service_ip"); err != nil {
+			return err
+		}
+		if err := validateDNSMatchDomains(c.DNSMatchDomains, domainRe); err != nil {
+			return err
+		}
 		if strings.TrimSpace(c.DefaultDomain) == "" {
 			c.DefaultDomain = "ms.net"
 		}
@@ -98,12 +120,30 @@ func (c *Config) Validate() error {
 				if err := validateGatewayAndNetmask(gc.Gateway, gc.Netmask); err != nil {
 					return err
 				}
+				if err := validateServiceIP(gc.DNSServiceIP, gc.Gateway, gc.Netmask, "domains.<domain>.groups.<group>.dns_service_ip"); err != nil {
+					return err
+				}
+				if err := validateDNSServers(gc.DNSServers); err != nil {
+					return err
+				}
+				if err := validateDNSMatchDomains(gc.DNSMatchDomains, domainRe); err != nil {
+					return err
+				}
 			}
 		}
 		return nil
 	}
 	if len(c.Groups) == 0 {
 		if err := validateGatewayAndNetmask(c.Gateway, c.Netmask); err != nil {
+			return err
+		}
+		if err := validateServiceIP(c.DNSServiceIP, c.Gateway, c.Netmask, "dns_service_ip"); err != nil {
+			return err
+		}
+		if err := validateDNSServers(c.DNSServers); err != nil {
+			return err
+		}
+		if err := validateDNSMatchDomains(c.DNSMatchDomains, domainRe); err != nil {
 			return err
 		}
 		if !domainRe.MatchString(c.Domain) {
@@ -118,6 +158,15 @@ func (c *Config) Validate() error {
 		if err := validateGatewayAndNetmask(gc.Gateway, gc.Netmask); err != nil {
 			return err
 		}
+		if err := validateServiceIP(gc.DNSServiceIP, gc.Gateway, gc.Netmask, "groups.<group>.dns_service_ip"); err != nil {
+			return err
+		}
+		if err := validateDNSServers(gc.DNSServers); err != nil {
+			return err
+		}
+		if err := validateDNSMatchDomains(gc.DNSMatchDomains, domainRe); err != nil {
+			return err
+		}
 	}
 	if c.Domain != "" {
 		if !domainRe.MatchString(c.Domain) {
@@ -126,6 +175,15 @@ func (c *Config) Validate() error {
 		if err := validateGatewayAndNetmask(c.Gateway, c.Netmask); err != nil {
 			return err
 		}
+	}
+	if err := validateServiceIP(c.DNSServiceIP, c.Gateway, c.Netmask, "dns_service_ip"); err != nil {
+		return err
+	}
+	if err := validateDNSServers(c.DNSServers); err != nil {
+		return err
+	}
+	if err := validateDNSMatchDomains(c.DNSMatchDomains, domainRe); err != nil {
+		return err
 	}
 	return nil
 }
@@ -184,4 +242,70 @@ func validateGatewayAndNetmask(gateway net.IP, netmaskStr string) error {
 		}
 	}
 	return nil
+}
+
+func validateDNSServers(servers []string) error {
+	for _, server := range servers {
+		server = strings.TrimSpace(server)
+		if server == "" {
+			return errors.New("dns_servers 不能为空字符串")
+		}
+		ip := net.ParseIP(server)
+		if ip == nil || ip.To4() == nil {
+			return errors.New("dns_servers 必须为合法 IPv4 地址列表")
+		}
+	}
+	return nil
+}
+
+func validateDNSMatchDomains(domains []string, domainRe *regexp.Regexp) error {
+	for _, domain := range domains {
+		domain = strings.TrimSpace(domain)
+		if domain == "" {
+			return errors.New("dns_match_domains 不能为空字符串")
+		}
+		if !domainRe.MatchString(domain) {
+			return errors.New("dns_match_domains 必须为合法域名列表")
+		}
+	}
+	return nil
+}
+
+func validateServiceIP(serviceIP string, gateway net.IP, netmaskStr string, field string) error {
+	serviceIP = strings.TrimSpace(serviceIP)
+	if serviceIP == "" {
+		return nil
+	}
+	ip := net.ParseIP(serviceIP)
+	if ip == nil || ip.To4() == nil {
+		return errors.New(field + " 必须为合法 IPv4 地址")
+	}
+	if gateway == nil || gateway.To4() == nil || strings.TrimSpace(netmaskStr) == "" {
+		return errors.New(field + " 需要对应合法的 gateway 和 netmask")
+	}
+	maskIP := net.ParseIP(netmaskStr)
+	if maskIP == nil || maskIP.To4() == nil {
+		return errors.New(field + " 对应的 netmask 必须为合法 IPv4 地址")
+	}
+	mask := net.IPMask(maskIP.To4())
+	requested := ip.To4()
+	gateway4 := gateway.To4()
+	if requested.Equal(gateway4) {
+		return errors.New(field + " 不能与 gateway 相同")
+	}
+	networkIP := ipv4ToUint32(gateway4) & ipv4ToUint32(net.IP(mask))
+	maskUint := ipv4ToUint32(net.IP(mask))
+	serviceUint := ipv4ToUint32(requested)
+	broadcast := networkIP | ^maskUint
+	first := networkIP + 1
+	last := broadcast - 1
+	if serviceUint < first || serviceUint > last {
+		return errors.New(field + " 必须落在对应网段可用地址范围内")
+	}
+	return nil
+}
+
+func ipv4ToUint32(ip net.IP) uint32 {
+	ip4 := ip.To4()
+	return uint32(ip4[0])<<24 | uint32(ip4[1])<<16 | uint32(ip4[2])<<8 | uint32(ip4[3])
 }

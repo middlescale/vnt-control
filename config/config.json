@@ -2,16 +2,19 @@
     "default_domain": "ms.net",
     "default_gateway_id": "default-gateway",
     "gateway_ticket_secret": "dev-gateway-ticket-secret-change-me",
+    "dns_service_addr": "127.0.0.1:53",
     "domains": {
         "ms.net": {
             "groups": {
                 "sales": {
                     "gateway": "10.26.0.1",
-                    "netmask": "255.255.255.0"
+                    "netmask": "255.255.255.0",
+                    "dns_service_ip": "10.26.0.53"
                 },
                 "marketing": {
                     "gateway": "10.27.0.1",
-                    "netmask": "255.255.255.0"
+                    "netmask": "255.255.255.0",
+                    "dns_service_ip": "10.27.0.53"
                 }
             }
         },
@@ -19,7 +22,8 @@
             "groups": {
                 "qa": {
                     "gateway": "10.28.0.1",
-                    "netmask": "255.255.255.0"
+                    "netmask": "255.255.255.0",
+                    "dns_service_ip": "10.28.0.53"
                 }
             }
         }

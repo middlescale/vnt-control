@@ -29,7 +29,6 @@ func TestHandleControlPacketPingPong(t *testing.T) {
 		TTL:       protocol.MAX_TTL,
 		SrcIP:     util.Uint32ToIP(resp.GetVirtualIp()),
 		DstIP:     util.Uint32ToIP(resp.GetVirtualGateway()),
-		Gateway:   true,
 		Payload:   protocol.BuildPingPayload(timeVal, 0),
 	}
 	rs, err := ctrl.HandleControlPacket(req, &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1111})
@@ -86,7 +85,6 @@ func TestHandleControlPacketPingUnknownClientReturnsDisconnect(t *testing.T) {
 		TTL:       protocol.MAX_TTL,
 		SrcIP:     net.IPv4(10, 26, 0, 99),
 		DstIP:     net.IPv4(10, 26, 0, 1),
-		Gateway:   true,
 		Payload:   protocol.BuildPingPayload(1234, 0),
 	}
 	resp, err := ctrl.HandleControlPacket(req, &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1111})
@@ -109,7 +107,6 @@ func TestHandleControlPacketAddrRequest(t *testing.T) {
 		TTL:       protocol.MAX_TTL,
 		SrcIP:     net.IPv4(10, 0, 0, 2),
 		DstIP:     net.IPv4(10, 0, 0, 1),
-		Gateway:   true,
 	}
 	rs, err := ctrl.HandleControlPacket(req, &net.UDPAddr{IP: net.ParseIP("2.3.4.5"), Port: 4567})
 	if err != nil {
@@ -139,7 +136,6 @@ func TestHandlePullDeviceListPacketUnknownClientReturnsDisconnect(t *testing.T) 
 		TTL:       protocol.MAX_TTL,
 		SrcIP:     net.IPv4(10, 26, 0, 99),
 		DstIP:     net.IPv4(10, 26, 0, 1),
-		Gateway:   true,
 	}
 	resp, err := ctrl.HandlePullDeviceListPacket(req)
 	if err != nil {
