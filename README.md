@@ -183,7 +183,7 @@ control 对已批准网关采用租约保活（90 秒），并基于 `report_uni
 - control 下发 `gateway_udp_public_key` / `gateway_udp_key_id` 给客户端完成 UDP bootstrap
 - 若 gateway 同时上报 QUIC channel，control 也会把对应的 `server_name` 和可选 CA PEM 一并下发，供客户端做 QUIC fallback
 
-设备认证（auth device）由 `sdl auth` 发起：客户端输入 `--userId`、可选 `--group`（默认 `default.ms.net`）和 `ticket` 发送到 `sdl-control`，认证成功后设备才可注册入网。
+设备认证（auth device）由 `sdl auth` 发起：客户端输入 `--userId`、可选 `--group`（默认 `default.ms.net`）和 `ticket` 发送到 `sdl-control`，认证成功后设备才可注册入网。当前认证成功后的默认有效期为 30 天。
 
 可选参数：
 

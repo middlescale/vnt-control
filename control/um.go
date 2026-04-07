@@ -79,7 +79,7 @@ type UserManager struct {
 	deviceTickets  map[string]UMDeviceTicket
 }
 
-const defaultDeviceAuthTTL = 24 * time.Hour
+const defaultDeviceAuthTTL = 30 * 24 * time.Hour
 
 func NewUserManager() *UserManager {
 	m := &UserManager{
