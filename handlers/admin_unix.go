@@ -30,6 +30,7 @@ type adminResponse struct {
 	UserID       string                     `json:"user_id,omitempty"`
 	Name         string                     `json:"name,omitempty"`
 	Domain       string                     `json:"domain,omitempty"`
+	Domains      []string                   `json:"domains,omitempty"`
 	Ticket       string                     `json:"ticket,omitempty"`
 	ExpireAtUnix int64                      `json:"expire_at_unix,omitempty"`
 	Gateways     []control.GatewayAdminView `json:"gateways,omitempty"`
@@ -132,6 +133,8 @@ func handleAdminConn(ctrl *control.Controller, conn net.Conn) {
 			return
 		}
 		_ = json.NewEncoder(conn).Encode(adminResponse{OK: true, DNSSnapshot: snapshot})
+	case "dns_domains":
+		_ = json.NewEncoder(conn).Encode(adminResponse{OK: true, Domains: ctrl.ListDNSDomains()})
 	default:
 		_ = json.NewEncoder(conn).Encode(adminResponse{OK: false, Error: "unsupported action"})
 	}

@@ -65,6 +65,19 @@ type dnsGroupScope struct {
 	includeGroupLabel bool
 }
 
+func (c *Controller) ListDNSDomains() []string {
+	domains := make([]string, 0, len(c.cfg.Domains))
+	for domain := range c.cfg.Domains {
+		domain = strings.ToLower(strings.TrimSpace(domain))
+		if domain == "" {
+			continue
+		}
+		domains = append(domains, domain)
+	}
+	sort.Strings(domains)
+	return domains
+}
+
 func (c *Controller) BuildDNSSnapshot(domain, group string) (*DNSSnapshotView, error) {
 	domain = strings.ToLower(strings.TrimSpace(domain))
 	group = strings.ToLower(strings.TrimSpace(group))
