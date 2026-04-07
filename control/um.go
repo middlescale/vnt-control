@@ -1,6 +1,7 @@
 package control
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -314,15 +315,26 @@ func (m *UserManager) IssueDeviceTicket(userID string, groupName string, ttl tim
 	if err != nil {
 		return UMDeviceTicket{}, err
 	}
-	seq := m.enrollmentSeq.Add(1)
+	ticketID, err := newSecureTicketID()
+	if err != nil {
+		return UMDeviceTicket{}, err
+	}
 	ticket := UMDeviceTicket{
-		Ticket:    fmt.Sprintf("dtk-%d-%d", time.Now().UnixNano(), seq),
+		Ticket:    ticketID,
 		UserID:    userID,
 		GroupName: fullGroupName,
 		ExpireAt:  time.Now().Add(ttl),
 	}
 	m.deviceTickets[ticket.Ticket] = ticket
 	return ticket, nil
+}
+
+func newSecureTicketID() (string, error) {
+	var buf [16]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return "", fmt.Errorf("generate secure ticket id: %w", err)
+	}
+	return "dtk-" + hex.EncodeToString(buf[:]), nil
 }
 
 func normalizeGroupForUser(groupName string, userDomain string) (string, error) {

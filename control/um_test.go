@@ -1,6 +1,7 @@
 package control
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -153,5 +154,30 @@ func TestIssueDeviceTicketFullDomainValidation(t *testing.T) {
 	}
 	if _, err := um.IssueDeviceTicket(user.UserID, "sales.ms.net", time.Minute); err != nil {
 		t.Fatalf("expected matching fqdn to pass: %v", err)
+	}
+}
+
+func TestIssueDeviceTicketUsesSecureRandomID(t *testing.T) {
+	um := NewUserManager()
+	user, _ := um.CreateUser("ticket-random-user")
+
+	tk1, err := um.IssueDeviceTicket(user.UserID, "g1", time.Minute)
+	if err != nil {
+		t.Fatalf("IssueDeviceTicket first failed: %v", err)
+	}
+	tk2, err := um.IssueDeviceTicket(user.UserID, "g1", time.Minute)
+	if err != nil {
+		t.Fatalf("IssueDeviceTicket second failed: %v", err)
+	}
+	if tk1.Ticket == tk2.Ticket {
+		t.Fatalf("expected unique ticket ids")
+	}
+	for _, tk := range []string{tk1.Ticket, tk2.Ticket} {
+		if !strings.HasPrefix(tk, "dtk-") {
+			t.Fatalf("expected dtk- prefix, got %s", tk)
+		}
+		if len(tk) != len("dtk-")+32 {
+			t.Fatalf("expected 128-bit hex ticket id, got %s", tk)
+		}
 	}
 }
