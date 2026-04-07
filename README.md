@@ -163,6 +163,8 @@ make proto   # 重新生成 proto Go 代码（需安装 protoc 与插件）
 ./sdl-admin issueDeviceTicket --userId <user_id>
 ./sdl-admin issueDeviceTicket -u <user_id> -g sales.ms.net
 ./sdl-admin listGateway
+./sdl-admin dnsDomains
+./sdl-admin dnsSnapshot --domain ms.net
 ./sdl-admin registerGateway --gateway-id gw-1
 ```
 
