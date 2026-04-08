@@ -358,7 +358,6 @@ func (c *Controller) HandleRegistrationPacketWithVirtualIP(request *protocol.Pac
 	clientInfo.Address = remoteAddr
 	clientInfo.DevicePubKey = append(clientInfo.DevicePubKey[:0], registration.GetDevicePubKey()...)
 	clientInfo.OnlineKxPub = append(clientInfo.OnlineKxPub[:0], registration.GetOnlineKxPub()...)
-	clientInfo.Wireguard = false
 	clientInfo.LastJoin = now
 	netInfo.Clients[virtualIP] = clientInfo
 	c.nc.IPSessions.Delete(NewIpSessionKey(domain, util.Uint32ToIP(virtualIP)))
@@ -2166,7 +2165,6 @@ func buildDeviceInfoList(clients map[uint32]ClientInfo, selfIP uint32) []*pb.Dev
 		item := &pb.DeviceInfo{
 			Name:         info.Name,
 			VirtualIp:    ip,
-			Wireguard:    info.Wireguard,
 			DeviceId:     info.DeviceId,
 			DevicePubKey: append([]byte(nil), info.DevicePubKey...),
 			OnlineKxPub:  append([]byte(nil), info.OnlineKxPub...),

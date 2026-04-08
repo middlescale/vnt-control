@@ -39,7 +39,6 @@ type ClientInfo struct {
 
 	DevicePubKey []byte
 	OnlineKxPub  []byte
-	Wireguard    bool
 
 	LastJoin int64 // Unix时间戳 (timestamp)
 
