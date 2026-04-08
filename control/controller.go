@@ -287,6 +287,12 @@ func (c *Controller) HandleRegistrationPacketWithVirtualIP(request *protocol.Pac
 		c.clearStaleClientStateByDeviceID(domain, registration.GetDeviceId())
 		return nil, 0, fmt.Errorf("device %s auth check failed for group %s: %w", registration.GetDeviceId(), domain, err)
 	}
+	displayName := strings.TrimSpace(registration.GetName())
+	if existing, ok := c.UMGetAuthedDevice(domain, registration.GetDeviceId()); ok {
+		if persisted := strings.TrimSpace(existing.DisplayName); persisted != "" {
+			displayName = persisted
+		}
+	}
 
 	raddrStr := remoteAddr.String()
 	host, portStr, err := net.SplitHostPort(raddrStr)
@@ -341,7 +347,7 @@ func (c *Controller) HandleRegistrationPacketWithVirtualIP(request *protocol.Pac
 	clientInfo := netInfo.Clients[virtualIP]
 	now := time.Now().Unix()
 	clientInfo.DeviceId = registration.GetDeviceId()
-	clientInfo.Name = registration.GetName()
+	clientInfo.Name = displayName
 	clientInfo.Version = registration.GetVersion()
 	clientInfo.Capabilities = negotiatedCapabilities
 	clientInfo.ControlOnline = true
@@ -380,6 +386,104 @@ func (c *Controller) HandleRegistrationPacketWithVirtualIP(request *protocol.Pac
 	}
 
 	return respPacket, virtualIP, nil
+}
+
+func (c *Controller) HandleDeviceRenamePacket(request *protocol.Packet) (*protocol.Packet, uint32, error) {
+	var req pb.DeviceRenameRequest
+	if err := proto.Unmarshal(request.Payload, &req); err != nil {
+		return nil, 0, err
+	}
+	deviceID := strings.TrimSpace(req.GetDeviceId())
+	newName := strings.TrimSpace(req.GetNewName())
+	if deviceID == "" {
+		resp, err := c.buildServicePacket(request, protocol.AppProtoDeviceRenameResponse, &pb.DeviceRenameResponse{
+			RequestId: req.GetRequestId(),
+			Ok:        false,
+			Reason:    "device_id is empty",
+		})
+		return resp, 0, err
+	}
+	if newName == "" {
+		resp, err := c.buildServicePacket(request, protocol.AppProtoDeviceRenameResponse, &pb.DeviceRenameResponse{
+			RequestId: req.GetRequestId(),
+			Ok:        false,
+			Reason:    "name is empty",
+		})
+		return resp, 0, err
+	}
+	if len(newName) > 128 {
+		resp, err := c.buildServicePacket(request, protocol.AppProtoDeviceRenameResponse, &pb.DeviceRenameResponse{
+			RequestId: req.GetRequestId(),
+			Ok:        false,
+			Reason:    "name too long",
+		})
+		return resp, 0, err
+	}
+	srcIP := util.IpToUint32(request.SrcIP)
+	groupName := ""
+	c.nc.VirtualNetwork.mutex.RLock()
+	for _, network := range c.nc.VirtualNetwork.data {
+		client, ok := network.Clients[srcIP]
+		if !ok {
+			continue
+		}
+		if client.DeviceId != deviceID {
+			c.nc.VirtualNetwork.mutex.RUnlock()
+			resp, err := c.buildServicePacket(request, protocol.AppProtoDeviceRenameResponse, &pb.DeviceRenameResponse{
+				RequestId: req.GetRequestId(),
+				Ok:        false,
+				Reason:    "device mismatch",
+			})
+			return resp, 0, err
+		}
+		groupName = network.Group
+		break
+	}
+	c.nc.VirtualNetwork.mutex.RUnlock()
+	if groupName == "" {
+		resp, err := c.buildServicePacket(request, protocol.AppProtoDeviceRenameResponse, &pb.DeviceRenameResponse{
+			RequestId: req.GetRequestId(),
+			Ok:        false,
+			Reason:    "device not registered",
+		})
+		return resp, 0, err
+	}
+	if err := c.UMSetAuthedDeviceDisplayName(groupName, deviceID, newName); err != nil {
+		resp, packetErr := c.buildServicePacket(request, protocol.AppProtoDeviceRenameResponse, &pb.DeviceRenameResponse{
+			RequestId: req.GetRequestId(),
+			Ok:        false,
+			Reason:    err.Error(),
+		})
+		return resp, 0, packetErr
+	}
+	changed := false
+	c.nc.VirtualNetwork.mutex.Lock()
+	for _, network := range c.nc.VirtualNetwork.data {
+		client, ok := network.Clients[srcIP]
+		if !ok || client.DeviceId != deviceID {
+			continue
+		}
+		client.Name = newName
+		network.Clients[srcIP] = client
+		network.Epoch++
+		changed = true
+		break
+	}
+	c.nc.VirtualNetwork.mutex.Unlock()
+	if !changed {
+		resp, err := c.buildServicePacket(request, protocol.AppProtoDeviceRenameResponse, &pb.DeviceRenameResponse{
+			RequestId: req.GetRequestId(),
+			Ok:        false,
+			Reason:    "device not registered",
+		})
+		return resp, 0, err
+	}
+	resp, err := c.buildServicePacket(request, protocol.AppProtoDeviceRenameResponse, &pb.DeviceRenameResponse{
+		RequestId:   req.GetRequestId(),
+		Ok:          true,
+		AppliedName: newName,
+	})
+	return resp, srcIP, err
 }
 
 func (c *Controller) clearStaleClientStateByDeviceID(domain, deviceID string) {

@@ -237,6 +237,17 @@ func serveControlSession(ctrl *control.Controller, remoteAddr net.Addr, session 
 						log.Errorf("HandleDNSQueryPacket error: %v", err)
 						continue
 					}
+				case protocol.AppProtoDeviceRenameRequest:
+					respPacket, virtualIP, err = ctrl.HandleDeviceRenamePacket(packet)
+					if err != nil {
+						log.Errorf("HandleDeviceRenamePacket error: %v", err)
+						continue
+					}
+					deferredPushPackets, err = ctrl.BuildPushDeviceListPacketsForPeerChange(virtualIP)
+					if err != nil {
+						log.Errorf("BuildPushDeviceListPacketsForPeerChange error: %v", err)
+						deferredPushPackets = nil
+					}
 				case protocol.AppProtoClientStatusInfo:
 					err = ctrl.HandleClientStatusInfoPacket(packet)
 					if err != nil {

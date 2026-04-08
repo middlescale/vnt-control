@@ -118,6 +118,8 @@ const (
 	AppProtoDeviceAuthProof             AppProtocol = 24
 	AppProtoDNSQueryRequest             AppProtocol = 25
 	AppProtoDNSQueryResponse            AppProtocol = 26
+	AppProtoDeviceRenameRequest         AppProtocol = 27
+	AppProtoDeviceRenameResponse        AppProtocol = 28
 	AppProtoUnknown                     AppProtocol = 255
 )
 
@@ -169,6 +171,10 @@ func AppProtocolFromUint8(val uint8) AppProtocol {
 		return AppProtoDNSQueryRequest
 	case 26:
 		return AppProtoDNSQueryResponse
+	case 27:
+		return AppProtoDeviceRenameRequest
+	case 28:
+		return AppProtoDeviceRenameResponse
 	default:
 		return AppProtoUnknown
 	}

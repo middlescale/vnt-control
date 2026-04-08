@@ -98,6 +98,10 @@ func (c *Controller) UMCheckAuthedDevice(groupName string, deviceID string, pubK
 	return c.um.CheckAuthedDevice(groupName, deviceID, pubKey)
 }
 
+func (c *Controller) UMSetAuthedDeviceDisplayName(groupName string, deviceID string, displayName string) error {
+	return c.um.SetAuthedDeviceDisplayName(groupName, deviceID, displayName)
+}
+
 func (c *Controller) UMRequireTicketAuthForGroup(groupName string) bool {
 	return c.um.RequireTicketAuthForGroup(groupName)
 }

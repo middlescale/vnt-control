@@ -1047,6 +1047,109 @@ func TestBuildPushDeviceListPacketsForPeerChange(t *testing.T) {
 	}
 }
 
+func TestHandleDeviceRenamePacket(t *testing.T) {
+	ctrl := newTestController(t)
+	defer ctrl.Stop()
+
+	resp1 := mustRegister(t, ctrl, newBaseRegisterReq("dev-a", "node-a"), &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1111})
+	resp2 := mustRegister(t, ctrl, newBaseRegisterReq("dev-b", "node-b"), &net.UDPAddr{IP: net.ParseIP("1.1.1.2"), Port: 2222})
+
+	req := &pb.DeviceRenameRequest{
+		RequestId: 7,
+		DeviceId:  "dev-b",
+		NewName:   "renamed-node",
+	}
+	payload, err := proto.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal rename request failed: %v", err)
+	}
+	packet := &protocol.Packet{
+		Proto:    protocol.ProtocolService,
+		AppProto: protocol.AppProtoDeviceRenameRequest,
+		SrcIP:    util.Uint32ToIP(resp2.GetVirtualIp()),
+		DstIP:    net.ParseIP("0.0.0.1"),
+		Payload:  payload,
+	}
+	respPacket, changedIP, err := ctrl.HandleDeviceRenamePacket(packet)
+	if err != nil {
+		t.Fatalf("HandleDeviceRenamePacket failed: %v", err)
+	}
+	if changedIP != resp2.GetVirtualIp() {
+		t.Fatalf("unexpected changed ip: %v", changedIP)
+	}
+	var ack pb.DeviceRenameResponse
+	if err := proto.Unmarshal(respPacket.Payload, &ack); err != nil {
+		t.Fatalf("unmarshal rename response failed: %v", err)
+	}
+	if !ack.GetOk() || ack.GetAppliedName() != "renamed-node" || ack.GetRequestId() != 7 {
+		t.Fatalf("unexpected rename response: %+v", ack)
+	}
+
+	client, ok := ctrl.nc.FindClientByVirtualIP(resp2.GetVirtualIp())
+	if !ok {
+		t.Fatalf("renamed client not found")
+	}
+	if client.Name != "renamed-node" {
+		t.Fatalf("unexpected client name after rename: %+v", client)
+	}
+	record, ok := ctrl.UMGetAuthedDevice("ms.net", "dev-b")
+	if !ok {
+		t.Fatalf("authed device not found after rename")
+	}
+	if record.DisplayName != "renamed-node" {
+		t.Fatalf("unexpected persisted display name: %+v", record)
+	}
+
+	packets, err := ctrl.BuildPushDeviceListPacketsForPeerChange(changedIP)
+	if err != nil {
+		t.Fatalf("BuildPushDeviceListPacketsForPeerChange failed: %v", err)
+	}
+	if len(packets) != 1 {
+		t.Fatalf("expected 1 push packet after rename, got %d", len(packets))
+	}
+	if !packets[0].DstIP.Equal(util.Uint32ToIP(resp1.GetVirtualIp())) {
+		t.Fatalf("unexpected push target after rename: %v", packets[0].DstIP)
+	}
+	var list pb.DeviceList
+	if err := proto.Unmarshal(packets[0].Payload, &list); err != nil {
+		t.Fatalf("unmarshal device list failed: %v", err)
+	}
+	if len(list.GetDeviceInfoList()) != 1 || list.GetDeviceInfoList()[0].GetName() != "renamed-node" {
+		t.Fatalf("unexpected pushed device list after rename: %+v", list.GetDeviceInfoList())
+	}
+}
+
+func TestRegistrationUsesPersistedDisplayName(t *testing.T) {
+	ctrl := newTestController(t)
+	defer ctrl.Stop()
+
+	user, err := ctrl.UMCreateUser("alice")
+	if err != nil {
+		t.Fatalf("UMCreateUser failed: %v", err)
+	}
+	tk, err := ctrl.UMIssueDeviceTicket(user.UserID, "ms.net", time.Minute)
+	if err != nil {
+		t.Fatalf("UMIssueDeviceTicket failed: %v", err)
+	}
+	deviceID := "dev-persisted-name"
+	req := newBaseRegisterReq(deviceID, "runtime-name")
+	if _, err := ctrl.UMAuthDevice(user.UserID, "ms.net", deviceID, tk.Ticket, req.GetDevicePubKey()); err != nil {
+		t.Fatalf("UMAuthDevice failed: %v", err)
+	}
+	if err := ctrl.UMSetAuthedDeviceDisplayName("ms.net", deviceID, "persisted-name"); err != nil {
+		t.Fatalf("UMSetAuthedDeviceDisplayName failed: %v", err)
+	}
+
+	resp := mustRegister(t, ctrl, req, &net.UDPAddr{IP: net.ParseIP("1.1.1.9"), Port: 9999})
+	client, ok := ctrl.nc.FindClientByVirtualIP(resp.GetVirtualIp())
+	if !ok {
+		t.Fatalf("client not found")
+	}
+	if client.Name != "persisted-name" {
+		t.Fatalf("expected persisted display name, got %+v", client)
+	}
+}
+
 func TestHandleClientStatusInfoPacket(t *testing.T) {
 	ctrl := newTestController(t)
 	defer ctrl.Stop()

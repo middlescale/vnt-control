@@ -29,6 +29,7 @@ type UMEnrollment struct {
 type UMDevice struct {
 	UserID      string
 	DeviceID    string
+	DisplayName string
 	PubKeyAlg   string
 	PubKeyHex   string
 	CreatedAt   time.Time
@@ -61,6 +62,7 @@ type UMAuthDevice struct {
 	UserID       string
 	GroupName    string
 	DeviceID     string
+	DisplayName  string
 	PubKeyHex    string
 	AuthedAt     time.Time
 	AuthExpireAt time.Time
@@ -407,6 +409,7 @@ func (m *UserManager) AuthDevice(
 		UserID:       userID,
 		GroupName:    normalizedGroup,
 		DeviceID:     deviceID,
+		DisplayName:  "",
 		PubKeyHex:    pubKeyHex,
 		AuthedAt:     now,
 		AuthExpireAt: now.Add(defaultDeviceAuthTTL),
@@ -462,6 +465,33 @@ func (m *UserManager) CheckAuthedDevice(groupName string, deviceID string, pubKe
 	}
 	if record.PubKeyHex != toPubKeyHex(pubKey, "ed25519") {
 		return fmt.Errorf("device_key_mismatch")
+	}
+	return nil
+}
+
+func (m *UserManager) SetAuthedDeviceDisplayName(
+	groupName string,
+	deviceID string,
+	displayName string,
+) error {
+	displayName = strings.TrimSpace(displayName)
+	if displayName == "" {
+		return fmt.Errorf("display name is empty")
+	}
+	if len(displayName) > 128 {
+		return fmt.Errorf("display name too long")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	key := authedDeviceKey(groupName, deviceID)
+	record, ok := m.authedDevices[key]
+	if !ok {
+		return fmt.Errorf("authed device not found")
+	}
+	record.DisplayName = displayName
+	m.authedDevices[key] = record
+	if err := m.saveLocked(); err != nil {
+		return err
 	}
 	return nil
 }
