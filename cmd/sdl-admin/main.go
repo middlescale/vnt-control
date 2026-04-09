@@ -21,6 +21,8 @@ type adminRequest struct {
 	Sections     []string `json:"sections,omitempty"`
 	UserID       string   `json:"user_id,omitempty"`
 	Group        string   `json:"group,omitempty"`
+	DeviceID     string   `json:"device_id,omitempty"`
+	All          bool     `json:"all,omitempty"`
 	TTLSeconds   int64    `json:"ttl_seconds,omitempty"`
 	TimeoutSec   int64    `json:"timeout_sec,omitempty"`
 	DurationSec  int64    `json:"duration_sec,omitempty"`
@@ -40,6 +42,7 @@ type adminResponse struct {
 	DebugResult  json.RawMessage `json:"debug_result,omitempty"`
 	DebugPath    string          `json:"debug_path,omitempty"`
 	DebugWatchID uint64          `json:"debug_watch_id,omitempty"`
+	UpdatedCount int             `json:"updated_count,omitempty"`
 	Error        string          `json:"error,omitempty"`
 }
 
@@ -62,6 +65,9 @@ type deviceInfo struct {
 	VirtualIP          string `json:"virtual_ip"`
 	ControlOnline      bool   `json:"control_online"`
 	DataPlaneReachable bool   `json:"data_plane_reachable"`
+	AuthedAtUnix       int64  `json:"authed_at_unix,omitempty"`
+	AuthExpireAtUnix   int64  `json:"auth_expire_at_unix,omitempty"`
+	AuthExpired        bool   `json:"auth_expired,omitempty"`
 	UpdatedAtUnix      int64  `json:"updated_at_unix,omitempty"`
 }
 
@@ -87,6 +93,8 @@ func main() {
 		req = parseListGateway(args[1:])
 	case "listDevice", "list_device":
 		req = parseListDevice(args[1:])
+	case "extendDeviceExpiry", "extend_device_expiry":
+		req = parseExtendDeviceExpiry(args[1:])
 	case "registerGateway", "register_gateway":
 		req = parseRegisterGateway(args[1:])
 	case "dnsDomains", "dns_domains":
@@ -122,7 +130,20 @@ func main() {
 		}
 	case "list_device":
 		for _, device := range resp.Devices {
-			fmt.Printf("user_id=%s group=%s device_id=%s name=%s virtual_ip=%s control_online=%t data_plane_reachable=%t updated_at_unix=%d\n", device.UserID, device.Group, device.DeviceID, device.Name, device.VirtualIP, device.ControlOnline, device.DataPlaneReachable, device.UpdatedAtUnix)
+			authExpireAt := ""
+			if device.AuthExpireAtUnix > 0 {
+				authExpireAt = time.Unix(device.AuthExpireAtUnix, 0).Local().Format(time.RFC3339)
+			}
+			fmt.Printf("user_id=%s group=%s device_id=%s name=%s virtual_ip=%s control_online=%t data_plane_reachable=%t auth_expired=%t auth_expire_at_unix=%d auth_expire_at=%s updated_at_unix=%d\n", device.UserID, device.Group, device.DeviceID, device.Name, device.VirtualIP, device.ControlOnline, device.DataPlaneReachable, device.AuthExpired, device.AuthExpireAtUnix, authExpireAt, device.UpdatedAtUnix)
+		}
+	case "extend_device_expiry":
+		fmt.Printf("extended %d device(s)\n", resp.UpdatedCount)
+		for _, device := range resp.Devices {
+			authExpireAt := ""
+			if device.AuthExpireAtUnix > 0 {
+				authExpireAt = time.Unix(device.AuthExpireAtUnix, 0).Local().Format(time.RFC3339)
+			}
+			fmt.Printf("user_id=%s group=%s device_id=%s name=%s virtual_ip=%s control_online=%t data_plane_reachable=%t auth_expired=%t auth_expire_at_unix=%d auth_expire_at=%s updated_at_unix=%d\n", device.UserID, device.Group, device.DeviceID, device.Name, device.VirtualIP, device.ControlOnline, device.DataPlaneReachable, device.AuthExpired, device.AuthExpireAtUnix, authExpireAt, device.UpdatedAtUnix)
 		}
 	case "dns_domains":
 		for _, domain := range resp.Domains {
@@ -225,6 +246,42 @@ func parseListDevice(args []string) adminRequest {
 		fatalUsage()
 	}
 	return adminRequest{Action: "list_device", UserID: strings.TrimSpace(userID)}
+}
+
+func parseExtendDeviceExpiry(args []string) adminRequest {
+	fs := flag.NewFlagSet("extendDeviceExpiry", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	var userID string
+	var group string
+	var deviceID string
+	var all bool
+	var ttlSeconds int64
+	fs.StringVar(&userID, "userId", "", "user id")
+	fs.StringVar(&userID, "u", "", "user id")
+	fs.StringVar(&group, "group", "", "optional group filter")
+	fs.StringVar(&group, "g", "", "optional group filter")
+	fs.StringVar(&deviceID, "deviceId", "", "device id")
+	fs.StringVar(&deviceID, "d", "", "device id")
+	fs.BoolVar(&all, "all", false, "extend all devices under the user")
+	fs.Int64Var(&ttlSeconds, "ttlSeconds", int64((30*24*time.Hour).Seconds()), "seconds to extend")
+	fs.Int64Var(&ttlSeconds, "t", int64((30*24*time.Hour).Seconds()), "seconds to extend")
+	if err := fs.Parse(args); err != nil {
+		fatalUsage()
+	}
+	if strings.TrimSpace(userID) == "" || fs.NArg() != 0 {
+		fatalUsage()
+	}
+	if all == (strings.TrimSpace(deviceID) != "") {
+		fatalUsage()
+	}
+	return adminRequest{
+		Action:     "extend_device_expiry",
+		UserID:     strings.TrimSpace(userID),
+		Group:      strings.TrimSpace(group),
+		DeviceID:   strings.TrimSpace(deviceID),
+		All:        all,
+		TTLSeconds: ttlSeconds,
+	}
 }
 
 func parseRegisterGateway(args []string) adminRequest {
@@ -414,6 +471,7 @@ func fatalUsage() {
 	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] issueDeviceTicket --userId/-u u-1 [--group/-g default.ms.net] [--ttlSeconds/-t 300]")
 	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] listGateway")
 	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] listDevice --userId/-u u-1")
+	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] extendDeviceExpiry --userId/-u u-1 (--deviceId/-d dev-1 | --all) [--group/-g sales.ms.net] [--ttlSeconds/-t 2592000]")
 	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] registerGateway --gateway-id/-g gw-1")
 	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] dnsDomains")
 	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] dnsSnapshot --domain/-d ms.net [--group/-g default]")

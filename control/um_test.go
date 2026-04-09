@@ -181,3 +181,66 @@ func TestIssueDeviceTicketUsesSecureRandomID(t *testing.T) {
 		}
 	}
 }
+
+func TestExtendAuthedDeviceExpirySingle(t *testing.T) {
+	um := NewUserManager()
+	user, _ := um.CreateUser("extend-single")
+	tk, err := um.IssueDeviceTicket(user.UserID, "g1", time.Minute)
+	if err != nil {
+		t.Fatalf("IssueDeviceTicket failed: %v", err)
+	}
+	record, err := um.AuthDevice(user.UserID, "g1.ms.net", "dev-1", tk.Ticket, []byte("pk-dev-1"))
+	if err != nil {
+		t.Fatalf("AuthDevice failed: %v", err)
+	}
+	updated, err := um.ExtendAuthedDeviceExpiry(user.UserID, "g1", "dev-1", 2*time.Hour, false)
+	if err != nil {
+		t.Fatalf("ExtendAuthedDeviceExpiry failed: %v", err)
+	}
+	if len(updated) != 1 {
+		t.Fatalf("expected 1 updated device, got %d", len(updated))
+	}
+	if !updated[0].AuthExpireAt.After(record.AuthExpireAt) {
+		t.Fatalf("expected auth expiry to move forward: before=%v after=%v", record.AuthExpireAt, updated[0].AuthExpireAt)
+	}
+}
+
+func TestExtendAuthedDeviceExpiryAll(t *testing.T) {
+	um := NewUserManager()
+	user, _ := um.CreateUser("extend-all")
+	tk1, _ := um.IssueDeviceTicket(user.UserID, "g1", time.Minute)
+	tk2, _ := um.IssueDeviceTicket(user.UserID, "g2", time.Minute)
+	record1, err := um.AuthDevice(user.UserID, "g1.ms.net", "dev-1", tk1.Ticket, []byte("pk-dev-1"))
+	if err != nil {
+		t.Fatalf("AuthDevice dev-1 failed: %v", err)
+	}
+	record2, err := um.AuthDevice(user.UserID, "g2.ms.net", "dev-2", tk2.Ticket, []byte("pk-dev-2"))
+	if err != nil {
+		t.Fatalf("AuthDevice dev-2 failed: %v", err)
+	}
+	updated, err := um.ExtendAuthedDeviceExpiry(user.UserID, "", "", 24*time.Hour, true)
+	if err != nil {
+		t.Fatalf("ExtendAuthedDeviceExpiry all failed: %v", err)
+	}
+	if len(updated) != 2 {
+		t.Fatalf("expected 2 updated devices, got %d", len(updated))
+	}
+	records := um.ListAuthedDevicesByUser(user.UserID)
+	if len(records) != 2 {
+		t.Fatalf("expected 2 listed devices, got %d", len(records))
+	}
+	for _, record := range records {
+		switch record.DeviceID {
+		case "dev-1":
+			if !record.AuthExpireAt.After(record1.AuthExpireAt) {
+				t.Fatalf("dev-1 expiry not extended")
+			}
+		case "dev-2":
+			if !record.AuthExpireAt.After(record2.AuthExpireAt) {
+				t.Fatalf("dev-2 expiry not extended")
+			}
+		default:
+			t.Fatalf("unexpected device %s", record.DeviceID)
+		}
+	}
+}

@@ -94,6 +94,9 @@ type DeviceAdminView struct {
 	VirtualIP          string `json:"virtual_ip"`
 	ControlOnline      bool   `json:"control_online"`
 	DataPlaneReachable bool   `json:"data_plane_reachable"`
+	AuthedAtUnix       int64  `json:"authed_at_unix,omitempty"`
+	AuthExpireAtUnix   int64  `json:"auth_expire_at_unix,omitempty"`
+	AuthExpired        bool   `json:"auth_expired,omitempty"`
 	UpdatedAtUnix      int64  `json:"updated_at_unix,omitempty"`
 }
 
@@ -1685,18 +1688,31 @@ func (c *Controller) ListDevices(userID string) []DeviceAdminView {
 	if len(records) == 0 {
 		return nil
 	}
-	recordByGroupDevice := make(map[string]UMAuthDevice, len(records))
+	deviceByGroupDevice := make(map[string]DeviceAdminView, len(records))
 	for _, record := range records {
-		recordByGroupDevice[record.GroupName+"\x00"+record.DeviceID] = record
+		name := strings.TrimSpace(record.DisplayName)
+		if name == "" {
+			name = record.DeviceID
+		}
+		deviceByGroupDevice[record.GroupName+"\x00"+record.DeviceID] = DeviceAdminView{
+			UserID:           record.UserID,
+			Group:            record.GroupName,
+			Name:             name,
+			DeviceID:         record.DeviceID,
+			AuthedAtUnix:     record.AuthedAt.Unix(),
+			AuthExpireAtUnix: record.AuthExpireAt.Unix(),
+			AuthExpired:      !record.AuthExpireAt.IsZero() && time.Now().After(record.AuthExpireAt),
+			UpdatedAtUnix:    record.AuthedAt.Unix(),
+		}
 	}
 
 	c.nc.VirtualNetwork.mutex.RLock()
 	defer c.nc.VirtualNetwork.mutex.RUnlock()
 
-	devices := make([]DeviceAdminView, 0, len(records))
 	for _, network := range c.nc.VirtualNetwork.data {
 		for ip, client := range network.Clients {
-			record, ok := recordByGroupDevice[network.Group+"\x00"+client.DeviceId]
+			key := network.Group + "\x00" + client.DeviceId
+			device, ok := deviceByGroupDevice[key]
 			if !ok {
 				continue
 			}
@@ -1707,17 +1723,23 @@ func (c *Controller) ListDevices(userID string) []DeviceAdminView {
 			if client.LastJoin > updatedAt {
 				updatedAt = client.LastJoin
 			}
-			devices = append(devices, DeviceAdminView{
-				UserID:             record.UserID,
-				Group:              network.Group,
-				Name:               client.Name,
-				DeviceID:           client.DeviceId,
-				VirtualIP:          util.Uint32ToIP(ip).String(),
-				ControlOnline:      client.ControlOnline,
-				DataPlaneReachable: client.DataPlaneReachable,
-				UpdatedAtUnix:      updatedAt,
-			})
+			if strings.TrimSpace(client.Name) != "" {
+				device.Name = client.Name
+			}
+			device.Group = network.Group
+			device.VirtualIP = util.Uint32ToIP(ip).String()
+			device.ControlOnline = client.ControlOnline
+			device.DataPlaneReachable = client.DataPlaneReachable
+			if updatedAt > device.UpdatedAtUnix {
+				device.UpdatedAtUnix = updatedAt
+			}
+			deviceByGroupDevice[key] = device
 		}
+	}
+
+	devices := make([]DeviceAdminView, 0, len(deviceByGroupDevice))
+	for _, device := range deviceByGroupDevice {
+		devices = append(devices, device)
 	}
 	sort.Slice(devices, func(i, j int) bool {
 		if devices[i].Group != devices[j].Group {
@@ -1725,6 +1747,9 @@ func (c *Controller) ListDevices(userID string) []DeviceAdminView {
 		}
 		if devices[i].UserID != devices[j].UserID {
 			return devices[i].UserID < devices[j].UserID
+		}
+		if devices[i].Name != devices[j].Name {
+			return devices[i].Name < devices[j].Name
 		}
 		if devices[i].VirtualIP != devices[j].VirtualIP {
 			return devices[i].VirtualIP < devices[j].VirtualIP

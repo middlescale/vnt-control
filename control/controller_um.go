@@ -102,6 +102,16 @@ func (c *Controller) UMSetAuthedDeviceDisplayName(groupName string, deviceID str
 	return c.um.SetAuthedDeviceDisplayName(groupName, deviceID, displayName)
 }
 
+func (c *Controller) UMExtendAuthedDeviceExpiry(
+	userID string,
+	groupName string,
+	deviceID string,
+	ttl time.Duration,
+	all bool,
+) ([]UMAuthDevice, error) {
+	return c.um.ExtendAuthedDeviceExpiry(userID, groupName, deviceID, ttl, all)
+}
+
 func (c *Controller) UMRequireTicketAuthForGroup(groupName string) bool {
 	return c.um.RequireTicketAuthForGroup(groupName)
 }

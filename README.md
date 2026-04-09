@@ -164,6 +164,9 @@ make proto   # 重新生成 proto Go 代码（需安装 protoc 与插件）
 ./sdl-admin createUser -u user1
 ./sdl-admin issueDeviceTicket --userId <user_id>
 ./sdl-admin issueDeviceTicket -u <user_id> -g sales.ms.net
+./sdl-admin listDevice --userId <user_id>
+./sdl-admin extendDeviceExpiry --userId <user_id> --deviceId <device_id> --ttlSeconds 2592000
+./sdl-admin extendDeviceExpiry --userId <user_id> --all --ttlSeconds 2592000
 ./sdl-admin listGateway
 ./sdl-admin dnsDomains
 ./sdl-admin dnsSnapshot --domain ms.net
@@ -174,7 +177,7 @@ make proto   # 重新生成 proto Go 代码（需安装 protoc 与插件）
 ./sdl-admin stopDebugWatch --name laptop-01
 ```
 
-说明：`createUser` 里的 `--group` 不传时默认是 `default`（最终会落成默认域名下的 `default.<domain>`）。`--group` 可传短名（如 `sales`，会自动补全为用户所属域名下的 `sales.<user-domain>`）；若传 FQDN（如 `sales.ms.net`），会校验其必须属于该用户所属域名。`issueDeviceTicket` 里的 `--group` 可省略，默认是 `default.ms.net`；`--ttlSeconds` 也可省略，默认是 `300`。
+说明：`createUser` 里的 `--group` 不传时默认是 `default`（最终会落成默认域名下的 `default.<domain>`）。`--group` 可传短名（如 `sales`，会自动补全为用户所属域名下的 `sales.<user-domain>`）；若传 FQDN（如 `sales.ms.net`），会校验其必须属于该用户所属域名。`issueDeviceTicket` 里的 `--group` 可省略，默认是 `default.ms.net`；`--ttlSeconds` 也可省略，默认是 `300`。`listDevice` 现在会列出该用户下**全部已授权设备**，包括当前离线设备，并带上认证过期时间。`extendDeviceExpiry` 用于把某个设备或该用户下全部设备的认证过期时间往后顺延；不传 `--group` 时可跨组列设备，但延长单设备时如果同一个 `device_id` 命中多个组，需要补 `--group` 消歧。
 
 `collectDebug` 会按在线设备 `name` 定位目标节点，由 control 下发调试采集请求，节点把结构化 JSON snapshot 回传给 control，再由 `sdl-admin` 直接打印。当前实现是**同步等待返回**；成功后 control 会先把 snapshot 落盘，再把保存路径返回给 `sdl-admin`。当前支持的 section 包括：`runtime`、`gateway`、`peers`、`routes`、`nat`、`traffic`；不传 `--sections` 时默认采集全部。默认落盘目录为 `./data/debug-collect`，每个节点默认保留最近 `20` 份，同时更新同目录下的 `latest.json`。
 

@@ -450,6 +450,79 @@ func (m *UserManager) ListAuthedDevicesByUser(userID string) []UMAuthDevice {
 	return devices
 }
 
+func (m *UserManager) ExtendAuthedDeviceExpiry(
+	userID string,
+	groupName string,
+	deviceID string,
+	ttl time.Duration,
+	all bool,
+) ([]UMAuthDevice, error) {
+	userID = strings.TrimSpace(userID)
+	groupName = strings.TrimSpace(groupName)
+	deviceID = strings.TrimSpace(deviceID)
+	if userID == "" {
+		return nil, fmt.Errorf("user id is empty")
+	}
+	if ttl <= 0 {
+		return nil, fmt.Errorf("invalid ttl")
+	}
+	if !all && deviceID == "" {
+		return nil, fmt.Errorf("device id is required unless --all is set")
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	user, ok := m.users[userID]
+	if !ok {
+		return nil, fmt.Errorf("user not found")
+	}
+	if groupName != "" {
+		normalized, err := normalizeGroupForUser(groupName, user.Domain)
+		if err != nil {
+			return nil, err
+		}
+		groupName = normalized
+	}
+
+	matches := make([]string, 0)
+	for key, record := range m.authedDevices {
+		if record.UserID != userID {
+			continue
+		}
+		if groupName != "" && record.GroupName != groupName {
+			continue
+		}
+		if deviceID != "" && record.DeviceID != deviceID {
+			continue
+		}
+		matches = append(matches, key)
+	}
+	if len(matches) == 0 {
+		return nil, fmt.Errorf("authed device not found")
+	}
+	if !all && deviceID != "" && groupName == "" && len(matches) > 1 {
+		return nil, fmt.Errorf("device id %s matched multiple groups; specify --group", deviceID)
+	}
+
+	now := time.Now()
+	updated := make([]UMAuthDevice, 0, len(matches))
+	for _, key := range matches {
+		record := m.authedDevices[key]
+		base := record.AuthExpireAt
+		if base.IsZero() || base.Before(now) {
+			base = now
+		}
+		record.AuthExpireAt = base.Add(ttl)
+		m.authedDevices[key] = record
+		updated = append(updated, record)
+	}
+	if err := m.saveLocked(); err != nil {
+		return nil, err
+	}
+	return updated, nil
+}
+
 func (m *UserManager) CheckAuthedDevice(groupName string, deviceID string, pubKey []byte) error {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

@@ -858,6 +858,41 @@ func TestListDevicesIncludesOnlineState(t *testing.T) {
 	if other := ctrl.ListDevices("user-b"); len(other) != 1 || other[0].VirtualIP != util.Uint32ToIP(dstReg.GetVirtualIp()).String() || !other[0].ControlOnline {
 		t.Fatalf("unexpected user-b device list: %+v", other)
 	}
+	if device.AuthExpireAtUnix == 0 || device.AuthExpired {
+		t.Fatalf("expected auth expiry info on listed device: %+v", device)
+	}
+}
+
+func TestListDevicesIncludesOfflineAuthedDevices(t *testing.T) {
+	ctrl := newTestController(t)
+	defer ctrl.Stop()
+
+	user, err := ctrl.UMCreateUserWithID("user-offline", "ms.net", "ms.net")
+	if err != nil {
+		t.Fatalf("UMCreateUserWithID failed: %v", err)
+	}
+	ticket, err := ctrl.UMIssueDeviceTicket(user.UserID, "ms.net", time.Minute)
+	if err != nil {
+		t.Fatalf("UMIssueDeviceTicket failed: %v", err)
+	}
+	if _, err := ctrl.UMAuthDevice(user.UserID, "ms.net", "dev-offline", ticket.Ticket, []byte("pk-dev-offline")); err != nil {
+		t.Fatalf("UMAuthDevice failed: %v", err)
+	}
+
+	devices := ctrl.ListDevices(user.UserID)
+	if len(devices) != 1 {
+		t.Fatalf("expected 1 device, got %d", len(devices))
+	}
+	device := devices[0]
+	if device.DeviceID != "dev-offline" {
+		t.Fatalf("unexpected device: %+v", device)
+	}
+	if device.ControlOnline || device.DataPlaneReachable {
+		t.Fatalf("expected offline device state: %+v", device)
+	}
+	if device.AuthExpireAtUnix == 0 || device.AuthExpired {
+		t.Fatalf("expected valid auth expiry on offline device: %+v", device)
+	}
 }
 
 func TestHandleRegistrationPacketConflictAndAllowIpChange(t *testing.T) {

@@ -24,6 +24,8 @@ type adminRequest struct {
 	Sections     []string `json:"sections,omitempty"`
 	UserID       string   `json:"user_id,omitempty"`
 	Group        string   `json:"group,omitempty"`
+	DeviceID     string   `json:"device_id,omitempty"`
+	All          bool     `json:"all,omitempty"`
 	TTLSeconds   int64    `json:"ttl_seconds,omitempty"`
 	TimeoutSec   int64    `json:"timeout_sec,omitempty"`
 	DurationSec  int64    `json:"duration_sec,omitempty"`
@@ -43,6 +45,7 @@ type adminResponse struct {
 	DebugResult  json.RawMessage            `json:"debug_result,omitempty"`
 	DebugPath    string                     `json:"debug_path,omitempty"`
 	DebugWatchID uint64                     `json:"debug_watch_id,omitempty"`
+	UpdatedCount int                        `json:"updated_count,omitempty"`
 	Error        string                     `json:"error,omitempty"`
 }
 
@@ -133,6 +136,32 @@ func handleAdminConn(ctrl *control.Controller, conn net.Conn) {
 			return
 		}
 		_ = json.NewEncoder(conn).Encode(adminResponse{OK: true, Devices: ctrl.ListDevices(userID)})
+	case "extend_device_expiry":
+		userID := strings.TrimSpace(req.UserID)
+		if userID == "" {
+			_ = json.NewEncoder(conn).Encode(adminResponse{OK: false, Error: "user_id required"})
+			return
+		}
+		ttl := req.TTLSeconds
+		if ttl <= 0 {
+			ttl = int64((30 * 24 * time.Hour).Seconds())
+		}
+		updated, err := ctrl.UMExtendAuthedDeviceExpiry(
+			userID,
+			strings.TrimSpace(req.Group),
+			strings.TrimSpace(req.DeviceID),
+			time.Duration(ttl)*time.Second,
+			req.All,
+		)
+		if err != nil {
+			_ = json.NewEncoder(conn).Encode(adminResponse{OK: false, Error: err.Error()})
+			return
+		}
+		_ = json.NewEncoder(conn).Encode(adminResponse{
+			OK:           true,
+			Devices:      ctrl.ListDevices(userID),
+			UpdatedCount: len(updated),
+		})
 	case "dns_snapshot":
 		snapshot, err := ctrl.BuildDNSSnapshot(strings.TrimSpace(req.Domain), strings.TrimSpace(req.Group))
 		if err != nil {
