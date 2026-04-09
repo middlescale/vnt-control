@@ -834,6 +834,9 @@ func (c *Controller) HandleClientStatusInfoPacket(request *protocol.Packet) erro
 	for _, ip := range status.GetPublicIpList() {
 		clientStatus.PublicIPList = append(clientStatus.PublicIPList, util.Uint32ToIP(ip))
 	}
+	if ipv6 := status.GetPublicIpv6(); len(ipv6) == net.IPv6len {
+		clientStatus.PublicIPv6 = append(net.IP(nil), ipv6...)
+	}
 	for _, port := range status.GetPublicUdpPorts() {
 		if port <= 65535 {
 			clientStatus.PublicUDPPorts = append(clientStatus.PublicUDPPorts, uint16(port))
@@ -1297,30 +1300,50 @@ func buildPunchEndpoints(client ClientInfo) []*pb.PunchEndpoint {
 	if status == nil {
 		return nil
 	}
-	endpoints := make([]*pb.PunchEndpoint, 0, len(status.PublicIPList)*len(status.PublicUDPPorts)+len(status.LocalUDPPorts))
+	endpoints := make([]*pb.PunchEndpoint, 0, len(status.PublicIPList)*len(status.PublicUDPPorts)+len(status.LocalUDPPorts)*2)
 	seen := make(map[string]struct{})
 	appendEndpoint := func(ip net.IP, port uint16) {
 		if port == 0 {
 			return
 		}
-		ipv4 := ip.To4()
-		if ipv4 == nil {
+		if ip == nil {
 			return
 		}
-		key := ipv4.String() + ":" + strconv.Itoa(int(port))
+		var endpoint *pb.PunchEndpoint
+		if ipv4 := ip.To4(); ipv4 != nil {
+			endpoint = &pb.PunchEndpoint{
+				Ip:   util.IpToUint32(ipv4),
+				Port: uint32(port),
+				Tcp:  false,
+			}
+		} else if ipv6 := ip.To16(); len(ipv6) == net.IPv6len {
+			endpoint = &pb.PunchEndpoint{
+				Ipv6: append([]byte(nil), ipv6...),
+				Port: uint32(port),
+				Tcp:  false,
+			}
+		} else {
+			return
+		}
+		key := ip.String() + ":" + strconv.Itoa(int(port))
 		if _, ok := seen[key]; ok {
 			return
 		}
 		seen[key] = struct{}{}
-		endpoints = append(endpoints, &pb.PunchEndpoint{
-			Ip:   util.IpToUint32(ipv4),
-			Port: uint32(port),
-			Tcp:  false,
-		})
+		endpoints = append(endpoints, endpoint)
 	}
 	for _, ip := range status.PublicIPList {
 		for _, port := range status.PublicUDPPorts {
 			appendEndpoint(ip, port)
+		}
+	}
+	ipv6Ports := status.LocalUDPPorts
+	if len(ipv6Ports) == 0 {
+		ipv6Ports = status.PublicUDPPorts
+	}
+	if len(status.PublicIPv6) == net.IPv6len {
+		for _, port := range ipv6Ports {
+			appendEndpoint(status.PublicIPv6, port)
 		}
 	}
 	if udpAddr, ok := client.Address.(*net.UDPAddr); ok && shouldIncludeLocalUDPCandidates(udpAddr.IP) {

@@ -668,6 +668,64 @@ func TestBuildPunchStartPacketsFromStatusIncludesLocalEndpointsForPrivateRemoteA
 	}
 }
 
+func TestBuildPunchStartPacketsFromStatusIncludesIPv6Endpoints(t *testing.T) {
+	ctrl := newTestController(t)
+	defer ctrl.Stop()
+	srcReg := mustRegister(t, ctrl, newBaseRegisterReq("dev-a", "node-a"), &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1111})
+	dstReg := mustRegister(t, ctrl, newBaseRegisterReq("dev-b", "node-b"), &net.UDPAddr{IP: net.ParseIP("1.1.1.2"), Port: 2222})
+	srcStatus := &pb.ClientStatusInfo{
+		Source:         srcReg.GetVirtualIp(),
+		NatType:        pb.PunchNatType_Cone,
+		PublicIpList:   []uint32{util.IpToUint32(net.ParseIP("8.8.8.8"))},
+		PublicUdpPorts: []uint32{30001},
+		LocalUdpPorts:  []uint32{1111},
+	}
+	dstStatus := &pb.ClientStatusInfo{
+		Source:         dstReg.GetVirtualIp(),
+		NatType:        pb.PunchNatType_Cone,
+		PublicIpList:   []uint32{util.IpToUint32(net.ParseIP("9.9.9.9"))},
+		PublicUdpPorts: []uint32{30002},
+		LocalUdpPorts:  []uint32{2222},
+		PublicIpv6:     net.ParseIP("2606:4700:4700::1111"),
+	}
+	srcPayload, err := proto.Marshal(srcStatus)
+	if err != nil {
+		t.Fatalf("marshal src status failed: %v", err)
+	}
+	dstPayload, err := proto.Marshal(dstStatus)
+	if err != nil {
+		t.Fatalf("marshal dst status failed: %v", err)
+	}
+	if err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(srcReg.GetVirtualIp()), Payload: srcPayload}); err != nil {
+		t.Fatalf("update src status failed: %v", err)
+	}
+	if err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(dstReg.GetVirtualIp()), Payload: dstPayload}); err != nil {
+		t.Fatalf("update dst status failed: %v", err)
+	}
+	startPackets, err := ctrl.BuildPunchStartPacketsFromStatus(&protocol.Packet{
+		Proto: protocol.ProtocolService,
+		SrcIP: util.Uint32ToIP(srcReg.GetVirtualIp()),
+		DstIP: util.Uint32ToIP(srcReg.GetVirtualGateway()),
+	})
+	if err != nil {
+		t.Fatalf("BuildPunchStartPacketsFromStatus failed: %v", err)
+	}
+	var start pb.PunchStart
+	if err := proto.Unmarshal(startPackets[0].Payload, &start); err != nil {
+		t.Fatalf("unmarshal punch start failed: %v", err)
+	}
+	foundIPv6 := false
+	for _, ep := range start.GetPeerEndpoints() {
+		if string(ep.GetIpv6()) == string(net.ParseIP("2606:4700:4700::1111")) && ep.GetPort() == 2222 {
+			foundIPv6 = true
+			break
+		}
+	}
+	if !foundIPv6 {
+		t.Fatalf("expected ipv6 endpoint in punch start, got %+v", start.GetPeerEndpoints())
+	}
+}
+
 func TestReconcilePunchSessionsTimeoutMarksFallback(t *testing.T) {
 	ctrl := newTestController(t)
 	defer ctrl.Stop()
@@ -1230,6 +1288,7 @@ func TestHandleClientStatusInfoPacket(t *testing.T) {
 		PublicIpList:   []uint32{util.IpToUint32(net.ParseIP("8.8.8.8"))},
 		PublicUdpPorts: []uint32{54321},
 		LocalUdpPorts:  []uint32{12345},
+		PublicIpv6:     net.ParseIP("2606:4700:4700::1111"),
 		P2PList: []*pb.RouteItem{
 			{NextIp: util.IpToUint32(net.ParseIP("10.26.0.3"))},
 		},
@@ -1262,6 +1321,9 @@ func TestHandleClientStatusInfoPacket(t *testing.T) {
 	}
 	if len(client.ClientStatus.LocalUDPPorts) != 1 || client.ClientStatus.LocalUDPPorts[0] != 12345 {
 		t.Fatalf("unexpected local udp ports: %+v", client.ClientStatus.LocalUDPPorts)
+	}
+	if client.ClientStatus.PublicIPv6 == nil || !client.ClientStatus.PublicIPv6.Equal(net.ParseIP("2606:4700:4700::1111")) {
+		t.Fatalf("unexpected public ipv6: %+v", client.ClientStatus.PublicIPv6)
 	}
 	if !client.DataPlaneReachable {
 		t.Fatalf("data plane should be reachable when p2p list is non-empty")
