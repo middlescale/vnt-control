@@ -100,6 +100,8 @@
 - `CERT_CACHE_DIR`
 - `TLS_CLIENT_CA`
 - `TLS_REQUIRE_CLIENT_CERT`
+- `DEBUG_COLLECT_DIR`（远程 debug snapshot 落盘目录，默认 `./data/debug-collect`）
+- `DEBUG_COLLECT_KEEP_PER_DEVICE`（每个节点保留的历史 snapshot 数量，默认 `20`）
 - `LOG_LEVEL`
 - `ADMIN_SOCKET_PATH`（管理员命令本地 Unix Domain Socket 路径，默认 `/tmp/sdl-control-admin.sock`）
 
@@ -166,9 +168,17 @@ make proto   # 重新生成 proto Go 代码（需安装 protoc 与插件）
 ./sdl-admin dnsDomains
 ./sdl-admin dnsSnapshot --domain ms.net
 ./sdl-admin registerGateway --gateway-id gw-1
+./sdl-admin collectDebug --name laptop-01
+./sdl-admin collectDebug --name laptop-01 --group sales.ms.net --sections runtime,gateway,peers,routes,nat,traffic
+./sdl-admin startDebugWatch --name laptop-01 --sections gateway,icmp,punch,route,runtime --durationSec 300
+./sdl-admin stopDebugWatch --name laptop-01
 ```
 
 说明：`createUser` 里的 `--group` 不传时默认是 `default`（最终会落成默认域名下的 `default.<domain>`）。`--group` 可传短名（如 `sales`，会自动补全为用户所属域名下的 `sales.<user-domain>`）；若传 FQDN（如 `sales.ms.net`），会校验其必须属于该用户所属域名。`issueDeviceTicket` 里的 `--group` 可省略，默认是 `default.ms.net`；`--ttlSeconds` 也可省略，默认是 `300`。
+
+`collectDebug` 会按在线设备 `name` 定位目标节点，由 control 下发调试采集请求，节点把结构化 JSON snapshot 回传给 control，再由 `sdl-admin` 直接打印。当前实现是**同步等待返回**；成功后 control 会先把 snapshot 落盘，再把保存路径返回给 `sdl-admin`。当前支持的 section 包括：`runtime`、`gateway`、`peers`、`routes`、`nat`、`traffic`；不传 `--sections` 时默认采集全部。默认落盘目录为 `./data/debug-collect`，每个节点默认保留最近 `20` 份，同时更新同目录下的 `latest.json`。
+
+`startDebugWatch` / `stopDebugWatch` 用于**异步调试观察**：control 按 `name` 启动一个限时 watch，会话期间 SDL 会把关键事件流持续回推到 control，control 将其追加写入该 watch 目录下的 `events.jsonl`。当前已接入的事件重点覆盖 Win10 dataplane 排查需要的路径：`gateway`（connect hello / auth result）、`icmp`（tun 出站、gateway/peer EchoReply 收包与回注）、`punch`（start / watchdog outcome）、`route`（direct route 失效触发 repunch）、`runtime`（watch started）。这条能力当前是**结构化事件流**，不是把客户端全部本地日志原样转发到 control。
 
 Gateway 注册/保活分为两层：
 

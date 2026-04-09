@@ -272,6 +272,30 @@ func serveControlSession(ctrl *control.Controller, remoteAddr net.Addr, session 
 						}
 					}
 					continue
+				case protocol.AppProtoDebugCollectResponse:
+					err = ctrl.HandleDebugCollectResponse(packet)
+					if err != nil {
+						log.Errorf("HandleDebugCollectResponse error: %v", err)
+					}
+					continue
+				case protocol.AppProtoDebugWatchStartResponse:
+					err = ctrl.HandleDebugWatchStartResponse(packet)
+					if err != nil {
+						log.Errorf("HandleDebugWatchStartResponse error: %v", err)
+					}
+					continue
+				case protocol.AppProtoDebugWatchStopResponse:
+					err = ctrl.HandleDebugWatchStopResponse(packet)
+					if err != nil {
+						log.Errorf("HandleDebugWatchStopResponse error: %v", err)
+					}
+					continue
+				case protocol.AppProtoDebugWatchEvent:
+					err = ctrl.HandleDebugWatchEvent(packet)
+					if err != nil {
+						log.Errorf("HandleDebugWatchEvent error: %v", err)
+					}
+					continue
 				case protocol.AppProtoPunchRequest:
 					respPacket, err = ctrl.HandlePunchRequestPacket(packet)
 					if err != nil {

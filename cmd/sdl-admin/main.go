@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"strings"
+	"time"
 )
 
 type adminRequest struct {
@@ -17,23 +18,29 @@ type adminRequest struct {
 	GatewayID    string   `json:"gateway_id,omitempty"`
 	Endpoint     string   `json:"endpoint,omitempty"`
 	Capabilities []string `json:"capabilities,omitempty"`
+	Sections     []string `json:"sections,omitempty"`
 	UserID       string   `json:"user_id,omitempty"`
 	Group        string   `json:"group,omitempty"`
 	TTLSeconds   int64    `json:"ttl_seconds,omitempty"`
+	TimeoutSec   int64    `json:"timeout_sec,omitempty"`
+	DurationSec  int64    `json:"duration_sec,omitempty"`
 }
 
 type adminResponse struct {
-	OK           bool          `json:"ok"`
-	UserID       string        `json:"user_id,omitempty"`
-	Name         string        `json:"name,omitempty"`
-	Domain       string        `json:"domain,omitempty"`
-	Ticket       string        `json:"ticket,omitempty"`
-	ExpireAtUnix int64         `json:"expire_at_unix,omitempty"`
-	Gateways     []gatewayInfo `json:"gateways,omitempty"`
-	Devices      []deviceInfo  `json:"devices,omitempty"`
-	Domains      []string      `json:"domains,omitempty"`
-	DNSSnapshot  any           `json:"dns_snapshot,omitempty"`
-	Error        string        `json:"error,omitempty"`
+	OK           bool            `json:"ok"`
+	UserID       string          `json:"user_id,omitempty"`
+	Name         string          `json:"name,omitempty"`
+	Domain       string          `json:"domain,omitempty"`
+	Ticket       string          `json:"ticket,omitempty"`
+	ExpireAtUnix int64           `json:"expire_at_unix,omitempty"`
+	Gateways     []gatewayInfo   `json:"gateways,omitempty"`
+	Devices      []deviceInfo    `json:"devices,omitempty"`
+	Domains      []string        `json:"domains,omitempty"`
+	DNSSnapshot  any             `json:"dns_snapshot,omitempty"`
+	DebugResult  json.RawMessage `json:"debug_result,omitempty"`
+	DebugPath    string          `json:"debug_path,omitempty"`
+	DebugWatchID uint64          `json:"debug_watch_id,omitempty"`
+	Error        string          `json:"error,omitempty"`
 }
 
 type gatewayInfo struct {
@@ -86,6 +93,12 @@ func main() {
 		req = parseDNSDomains(args[1:])
 	case "dnsSnapshot", "dns_snapshot":
 		req = parseDNSSnapshot(args[1:])
+	case "collectDebug", "collect_debug":
+		req = parseCollectDebug(args[1:])
+	case "startDebugWatch", "start_debug_watch":
+		req = parseStartDebugWatch(args[1:])
+	case "stopDebugWatch", "stop_debug_watch":
+		req = parseStopDebugWatch(args[1:])
 	default:
 		fatalUsage()
 	}
@@ -99,7 +112,8 @@ func main() {
 	case "create_user":
 		fmt.Printf("created user: id=%s name=%s domain=%s\n", resp.UserID, resp.Name, resp.Domain)
 	case "issue_device_ticket":
-		fmt.Printf("issued ticket: %s expire_at_unix=%d\n", resp.Ticket, resp.ExpireAtUnix)
+		expireAt := time.Unix(resp.ExpireAtUnix, 0).Local().Format(time.RFC3339)
+		fmt.Printf("issued ticket: %s expire_at_unix=%d expire_at=%s\n", resp.Ticket, resp.ExpireAtUnix, expireAt)
 	case "register_gateway":
 		fmt.Println("gateway registered")
 	case "list_gateway":
@@ -121,6 +135,20 @@ func main() {
 			fmt.Fprintf(os.Stderr, "encode dns snapshot failed: %v\n", err)
 			os.Exit(1)
 		}
+	case "collect_debug":
+		if strings.TrimSpace(resp.DebugPath) != "" {
+			fmt.Fprintf(os.Stderr, "saved debug snapshot: %s\n", resp.DebugPath)
+		}
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(resp.DebugResult); err != nil {
+			fmt.Fprintf(os.Stderr, "encode debug result failed: %v\n", err)
+			os.Exit(1)
+		}
+	case "start_debug_watch":
+		fmt.Printf("started debug watch: id=%d path=%s\n", resp.DebugWatchID, resp.DebugPath)
+	case "stop_debug_watch":
+		fmt.Printf("stopped debug watch: id=%d path=%s\n", resp.DebugWatchID, resp.DebugPath)
 	}
 }
 
@@ -259,6 +287,102 @@ func parseDNSDomains(args []string) adminRequest {
 	return adminRequest{Action: "dns_domains"}
 }
 
+func parseCollectDebug(args []string) adminRequest {
+	fs := flag.NewFlagSet("collectDebug", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	var name string
+	var userID string
+	var group string
+	var sections string
+	var timeoutSec int64
+	fs.StringVar(&name, "name", "", "device display name")
+	fs.StringVar(&name, "n", "", "device display name")
+	fs.StringVar(&userID, "userId", "", "optional user id filter")
+	fs.StringVar(&userID, "u", "", "optional user id filter")
+	fs.StringVar(&group, "group", "", "optional group filter")
+	fs.StringVar(&group, "g", "", "optional group filter")
+	fs.StringVar(&sections, "sections", "", "comma-separated sections (runtime,gateway,peers,routes,nat,traffic)")
+	fs.StringVar(&sections, "s", "", "comma-separated sections")
+	fs.Int64Var(&timeoutSec, "timeoutSec", 10, "collection timeout seconds")
+	fs.Int64Var(&timeoutSec, "t", 10, "collection timeout seconds")
+	if err := fs.Parse(args); err != nil {
+		fatalUsage()
+	}
+	if strings.TrimSpace(name) == "" || fs.NArg() != 0 {
+		fatalUsage()
+	}
+	return adminRequest{
+		Action:     "collect_debug",
+		Name:       strings.TrimSpace(name),
+		UserID:     strings.TrimSpace(userID),
+		Group:      strings.TrimSpace(group),
+		Sections:   splitCSV(sections),
+		TimeoutSec: timeoutSec,
+	}
+}
+
+func parseStartDebugWatch(args []string) adminRequest {
+	fs := flag.NewFlagSet("startDebugWatch", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	var name, userID, group, sections string
+	var timeoutSec, durationSec int64
+	fs.StringVar(&name, "name", "", "device display name")
+	fs.StringVar(&name, "n", "", "device display name")
+	fs.StringVar(&userID, "userId", "", "optional user id filter")
+	fs.StringVar(&userID, "u", "", "optional user id filter")
+	fs.StringVar(&group, "group", "", "optional group filter")
+	fs.StringVar(&group, "g", "", "optional group filter")
+	fs.StringVar(&sections, "sections", "", "comma-separated sections (all,gateway,icmp,punch,route,runtime)")
+	fs.StringVar(&sections, "s", "", "comma-separated sections")
+	fs.Int64Var(&timeoutSec, "timeoutSec", 10, "start timeout seconds")
+	fs.Int64Var(&timeoutSec, "t", 10, "start timeout seconds")
+	fs.Int64Var(&durationSec, "durationSec", 300, "watch duration seconds")
+	fs.Int64Var(&durationSec, "d", 300, "watch duration seconds")
+	if err := fs.Parse(args); err != nil {
+		fatalUsage()
+	}
+	if strings.TrimSpace(name) == "" || fs.NArg() != 0 {
+		fatalUsage()
+	}
+	return adminRequest{
+		Action:      "start_debug_watch",
+		Name:        strings.TrimSpace(name),
+		UserID:      strings.TrimSpace(userID),
+		Group:       strings.TrimSpace(group),
+		Sections:    splitCSV(sections),
+		TimeoutSec:  timeoutSec,
+		DurationSec: durationSec,
+	}
+}
+
+func parseStopDebugWatch(args []string) adminRequest {
+	fs := flag.NewFlagSet("stopDebugWatch", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	var name, userID, group string
+	var timeoutSec int64
+	fs.StringVar(&name, "name", "", "device display name")
+	fs.StringVar(&name, "n", "", "device display name")
+	fs.StringVar(&userID, "userId", "", "optional user id filter")
+	fs.StringVar(&userID, "u", "", "optional user id filter")
+	fs.StringVar(&group, "group", "", "optional group filter")
+	fs.StringVar(&group, "g", "", "optional group filter")
+	fs.Int64Var(&timeoutSec, "timeoutSec", 10, "stop timeout seconds")
+	fs.Int64Var(&timeoutSec, "t", 10, "stop timeout seconds")
+	if err := fs.Parse(args); err != nil {
+		fatalUsage()
+	}
+	if strings.TrimSpace(name) == "" || fs.NArg() != 0 {
+		fatalUsage()
+	}
+	return adminRequest{
+		Action:     "stop_debug_watch",
+		Name:       strings.TrimSpace(name),
+		UserID:     strings.TrimSpace(userID),
+		Group:      strings.TrimSpace(group),
+		TimeoutSec: timeoutSec,
+	}
+}
+
 func call(socket string, req adminRequest) adminResponse {
 	conn, err := net.Dial("unix", socket)
 	if err != nil {
@@ -293,6 +417,9 @@ func fatalUsage() {
 	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] registerGateway --gateway-id/-g gw-1")
 	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] dnsDomains")
 	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] dnsSnapshot --domain/-d ms.net [--group/-g default]")
+	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] collectDebug --name/-n win10-node [--group/-g default.ms.net] [--userId/-u u-1] [--sections/-s runtime,gateway,peers,routes,nat,traffic] [--timeoutSec/-t 10]")
+	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] startDebugWatch --name/-n win10-node [--group/-g default.ms.net] [--userId/-u u-1] [--sections/-s all,gateway,icmp,punch,route,runtime] [--durationSec/-d 300] [--timeoutSec/-t 10]")
+	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] stopDebugWatch --name/-n win10-node [--group/-g default.ms.net] [--userId/-u u-1] [--timeoutSec/-t 10]")
 	os.Exit(2)
 }
 

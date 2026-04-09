@@ -3,12 +3,13 @@ package control
 import "net"
 
 type NetworkInfo struct {
-	Group       string
-	Netmask     net.IPMask
-	Gateway     net.IP
-	Epoch       uint64
-	Clients     map[uint32]ClientInfo
-	ReservedIPs map[uint32]string
+	Group               string
+	Netmask             net.IPMask
+	Gateway             net.IP
+	Epoch               uint64
+	Clients             map[uint32]ClientInfo
+	ClientIPsByDeviceID map[string]uint32
+	ReservedIPs         map[uint32]string
 }
 
 func NewNetworkInfo(group string, netmask net.IPMask, gateway net.IP, reservedIPs map[uint32]string) *NetworkInfo {
@@ -16,12 +17,45 @@ func NewNetworkInfo(group string, netmask net.IPMask, gateway net.IP, reservedIP
 		reservedIPs = make(map[uint32]string)
 	}
 	return &NetworkInfo{
-		Group:       group,
-		Netmask:     netmask,
-		Gateway:     gateway,
-		Clients:     make(map[uint32]ClientInfo), // key: virtual IP
-		ReservedIPs: reservedIPs,
+		Group:               group,
+		Netmask:             netmask,
+		Gateway:             gateway,
+		Clients:             make(map[uint32]ClientInfo), // key: virtual IP
+		ClientIPsByDeviceID: make(map[string]uint32),
+		ReservedIPs:         reservedIPs,
 	}
+}
+
+func (n *NetworkInfo) UpsertClient(ip uint32, client ClientInfo) {
+	if existing, ok := n.Clients[ip]; ok && existing.DeviceId != "" && existing.DeviceId != client.DeviceId {
+		if mappedIP, ok := n.ClientIPsByDeviceID[existing.DeviceId]; ok && mappedIP == ip {
+			delete(n.ClientIPsByDeviceID, existing.DeviceId)
+		}
+	}
+	n.Clients[ip] = client
+	if client.DeviceId != "" {
+		n.ClientIPsByDeviceID[client.DeviceId] = ip
+	}
+}
+
+func (n *NetworkInfo) DeleteClient(ip uint32) {
+	client, ok := n.Clients[ip]
+	if !ok {
+		return
+	}
+	delete(n.Clients, ip)
+	if client.DeviceId != "" {
+		if mappedIP, ok := n.ClientIPsByDeviceID[client.DeviceId]; ok && mappedIP == ip {
+			delete(n.ClientIPsByDeviceID, client.DeviceId)
+		}
+	}
+}
+
+func (n *NetworkInfo) FindClientIPByDeviceID(deviceID string) uint32 {
+	if deviceID == "" {
+		return 0
+	}
+	return n.ClientIPsByDeviceID[deviceID]
 }
 
 type ClientInfo struct {

@@ -40,6 +40,17 @@ type Controller struct {
 	gatewayAllow map[string]string
 	gatewaySeen  map[string]GatewayNodeInfo
 	gatewayNonce map[string]map[string]int64
+
+	debugMu                  sync.Mutex
+	debugCollectSeq          uint64
+	debugWatchSeq            uint64
+	pendingDebugCollect      map[uint64]chan DebugCollectResult
+	pendingDebugWatchStart   map[uint64]chan DebugWatchStartResult
+	pendingDebugWatchStop    map[uint64]chan DebugWatchStopResult
+	latestDebugCollect       map[string]DebugCollectResult
+	debugStore               *DebugSnapshotStore
+	activeDebugWatches       map[uint64]DebugWatchSession
+	activeDebugWatchByDevice map[string]uint64
 }
 
 type GatewayNodeInfo struct {
@@ -148,15 +159,22 @@ func NewController(cfg *config.Config) (*Controller, error) {
 			PunchPairCooldown: *NewExpireMap[string, struct{}](20 * time.Second),
 			PunchPairRetry:    *NewExpireMap[string, PunchRetryState](30 * time.Minute),
 		},
-		um:             um,
-		gs:             gatewayStore,
-		cfg:            cfg,
-		authChallenges: make(map[string]deviceAuthChallengeState),
-		handshakeCaps:  make(map[string][]string),
-		gatewayNodes:   make(map[string]GatewayNodeInfo),
-		gatewayAllow:   gatewayAllow,
-		gatewaySeen:    make(map[string]GatewayNodeInfo),
-		gatewayNonce:   make(map[string]map[string]int64),
+		um:                       um,
+		gs:                       gatewayStore,
+		cfg:                      cfg,
+		authChallenges:           make(map[string]deviceAuthChallengeState),
+		handshakeCaps:            make(map[string][]string),
+		gatewayNodes:             make(map[string]GatewayNodeInfo),
+		gatewayAllow:             gatewayAllow,
+		gatewaySeen:              make(map[string]GatewayNodeInfo),
+		gatewayNonce:             make(map[string]map[string]int64),
+		pendingDebugCollect:      make(map[uint64]chan DebugCollectResult),
+		pendingDebugWatchStart:   make(map[uint64]chan DebugWatchStartResult),
+		pendingDebugWatchStop:    make(map[uint64]chan DebugWatchStopResult),
+		latestDebugCollect:       make(map[string]DebugCollectResult),
+		debugStore:               newDebugSnapshotStore(cfg),
+		activeDebugWatches:       make(map[uint64]DebugWatchSession),
+		activeDebugWatchByDevice: make(map[string]uint64),
 	}, nil
 }
 
@@ -194,6 +212,26 @@ func newGatewayApprovalStateFromStore() (map[string]string, *JSONGatewayStore) {
 		approved[gatewayID] = endpoint
 	}
 	return approved, store
+}
+
+func newDebugSnapshotStore(cfg *config.Config) *DebugSnapshotStore {
+	path := strings.TrimSpace(os.Getenv("DEBUG_COLLECT_DIR"))
+	if path == "" && cfg != nil {
+		path = strings.TrimSpace(cfg.DebugCollectDir)
+	}
+	if path == "" {
+		path = "./data/debug-collect"
+	}
+	keepPerDevice := 20
+	if cfg != nil && cfg.DebugCollectKeepPerDevice > 0 {
+		keepPerDevice = cfg.DebugCollectKeepPerDevice
+	}
+	if value := strings.TrimSpace(os.Getenv("DEBUG_COLLECT_KEEP_PER_DEVICE")); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+			keepPerDevice = parsed
+		}
+	}
+	return NewDebugSnapshotStore(path, keepPerDevice)
 }
 
 func (c *Controller) persistGatewayApprovalLocked() {
@@ -341,7 +379,7 @@ func (c *Controller) HandleRegistrationPacketWithVirtualIP(request *protocol.Pac
 		return nil, 0, err
 	}
 	if oldIP != 0 && oldIP != virtualIP {
-		delete(netInfo.Clients, oldIP)
+		netInfo.DeleteClient(oldIP)
 		c.nc.IPSessions.Delete(NewIpSessionKey(domain, util.Uint32ToIP(oldIP)))
 	}
 	clientInfo := netInfo.Clients[virtualIP]
@@ -359,7 +397,7 @@ func (c *Controller) HandleRegistrationPacketWithVirtualIP(request *protocol.Pac
 	clientInfo.DevicePubKey = append(clientInfo.DevicePubKey[:0], registration.GetDevicePubKey()...)
 	clientInfo.OnlineKxPub = append(clientInfo.OnlineKxPub[:0], registration.GetOnlineKxPub()...)
 	clientInfo.LastJoin = now
-	netInfo.Clients[virtualIP] = clientInfo
+	netInfo.UpsertClient(virtualIP, clientInfo)
 	c.nc.IPSessions.Delete(NewIpSessionKey(domain, util.Uint32ToIP(virtualIP)))
 	c.nc.TouchCipherSession(remoteAddr)
 	netInfo.Epoch++
@@ -463,7 +501,7 @@ func (c *Controller) HandleDeviceRenamePacket(request *protocol.Packet) (*protoc
 			continue
 		}
 		client.Name = newName
-		network.Clients[srcIP] = client
+		network.UpsertClient(srcIP, client)
 		network.Epoch++
 		changed = true
 		break
@@ -507,7 +545,7 @@ func (c *Controller) clearStaleClientStateByDeviceID(domain, deviceID string) {
 		clientInfo.DataPlaneReachable = false
 		clientInfo.DataPlaneLastSeen = 0
 		clientInfo.ClientStatus = nil
-		netInfo.Clients[virtualIP] = clientInfo
+		netInfo.UpsertClient(virtualIP, clientInfo)
 		c.nc.IPSessions.Set(NewIpSessionKey(domain, util.Uint32ToIP(virtualIP)), clientInfo.Address)
 		changed = true
 	}
@@ -818,7 +856,7 @@ func (c *Controller) HandleClientStatusInfoPacket(request *protocol.Packet) erro
 			client.DataPlaneLastSeen = now
 		}
 		client.ClientStatus = clientStatus
-		network.Clients[srcIP] = client
+		network.UpsertClient(srcIP, client)
 		return nil
 	}
 	return fmt.Errorf("client %s not registered", request.SrcIP)
@@ -2136,15 +2174,6 @@ func (c *Controller) resolveDNSServiceIP(group string) string {
 	}
 }
 
-func findClientIPByDeviceID(clients map[uint32]ClientInfo, deviceID string) uint32 {
-	for ip, info := range clients {
-		if info.DeviceId == deviceID {
-			return ip
-		}
-	}
-	return 0
-}
-
 func (c *Controller) clientOwnsVirtualIP(virtualIP uint32, deviceID string) bool {
 	c.nc.VirtualNetwork.mutex.RLock()
 	defer c.nc.VirtualNetwork.mutex.RUnlock()
@@ -2198,7 +2227,7 @@ func (nc *NetworkControl) generateIP(
 	deviceID string,
 	allowIPChange bool,
 ) (virtualIP uint32, oldIP uint32, err error) {
-	oldIP = findClientIPByDeviceID(network.Clients, deviceID)
+	oldIP = network.FindClientIPByDeviceID(deviceID)
 	if requestedIP != 0 {
 		if err = validateRequestedIP(requestedIP, network.Gateway, network.Netmask); err != nil {
 			return 0, oldIP, err
@@ -2238,7 +2267,7 @@ func (nc *NetworkControl) generateIP(
 			if !client.ControlOnline {
 				key := NewIpSessionKey(network.Group, util.Uint32ToIP(ip))
 				if _, reserved := nc.IPSessions.Get(key); !reserved {
-					delete(network.Clients, ip)
+					network.DeleteClient(ip)
 				} else {
 					continue
 				}
@@ -2266,7 +2295,7 @@ func (nc *NetworkControl) TouchClientByIP(srcIP net.IP) uint16 {
 		if client, ok := network.Clients[ip]; ok {
 			client.ControlOnline = true
 			client.ControlLastSeen = now
-			network.Clients[ip] = client
+			network.UpsertClient(ip, client)
 			return uint16(network.Epoch)
 		}
 	}
@@ -2305,7 +2334,7 @@ func (nc *NetworkControl) LeaveByRemoteAddr(remoteAddr net.Addr) {
 			}
 			client.ControlOnline = false
 			client.ControlLastSeen = now
-			network.Clients[ip] = client
+			network.UpsertClient(ip, client)
 			nc.IPSessions.Set(NewIpSessionKey(network.Group, util.Uint32ToIP(ip)), remoteAddr)
 			changed = true
 		}
@@ -2342,6 +2371,24 @@ func (nc *NetworkControl) FindClientByVirtualIP(virtualIP uint32) (ClientInfo, b
 	return ClientInfo{}, false
 }
 
+func (nc *NetworkControl) FindClientByDeviceID(groupName string, deviceID string) (ClientInfo, bool) {
+	nc.VirtualNetwork.mutex.RLock()
+	defer nc.VirtualNetwork.mutex.RUnlock()
+	network, ok := nc.VirtualNetwork.data[groupName]
+	if !ok {
+		return ClientInfo{}, false
+	}
+	virtualIP := network.FindClientIPByDeviceID(deviceID)
+	if virtualIP == 0 {
+		return ClientInfo{}, false
+	}
+	client, ok := network.Clients[virtualIP]
+	if !ok {
+		return ClientInfo{}, false
+	}
+	return client, true
+}
+
 func (nc *NetworkControl) UpdateClientByVirtualIP(virtualIP uint32, update func(*ClientInfo)) bool {
 	nc.VirtualNetwork.mutex.Lock()
 	defer nc.VirtualNetwork.mutex.Unlock()
@@ -2351,7 +2398,7 @@ func (nc *NetworkControl) UpdateClientByVirtualIP(virtualIP uint32, update func(
 			continue
 		}
 		update(&client)
-		network.Clients[virtualIP] = client
+		network.UpsertClient(virtualIP, client)
 		return true
 	}
 	return false

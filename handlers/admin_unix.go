@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"os"
 	"sdl-control/control"
@@ -20,9 +21,12 @@ type adminRequest struct {
 	GatewayID    string   `json:"gateway_id,omitempty"`
 	Endpoint     string   `json:"endpoint,omitempty"`
 	Capabilities []string `json:"capabilities,omitempty"`
+	Sections     []string `json:"sections,omitempty"`
 	UserID       string   `json:"user_id,omitempty"`
 	Group        string   `json:"group,omitempty"`
 	TTLSeconds   int64    `json:"ttl_seconds,omitempty"`
+	TimeoutSec   int64    `json:"timeout_sec,omitempty"`
+	DurationSec  int64    `json:"duration_sec,omitempty"`
 }
 
 type adminResponse struct {
@@ -36,6 +40,9 @@ type adminResponse struct {
 	Gateways     []control.GatewayAdminView `json:"gateways,omitempty"`
 	Devices      []control.DeviceAdminView  `json:"devices,omitempty"`
 	DNSSnapshot  *control.DNSSnapshotView   `json:"dns_snapshot,omitempty"`
+	DebugResult  json.RawMessage            `json:"debug_result,omitempty"`
+	DebugPath    string                     `json:"debug_path,omitempty"`
+	DebugWatchID uint64                     `json:"debug_watch_id,omitempty"`
 	Error        string                     `json:"error,omitempty"`
 }
 
@@ -135,6 +142,100 @@ func handleAdminConn(ctrl *control.Controller, conn net.Conn) {
 		_ = json.NewEncoder(conn).Encode(adminResponse{OK: true, DNSSnapshot: snapshot})
 	case "dns_domains":
 		_ = json.NewEncoder(conn).Encode(adminResponse{OK: true, Domains: ctrl.ListDNSDomains()})
+	case "collect_debug":
+		timeout := req.TimeoutSec
+		if timeout <= 0 {
+			timeout = 10
+		}
+		packet, targetIP, requestID, err := ctrl.PrepareDebugCollectByName(
+			strings.TrimSpace(req.Name),
+			strings.TrimSpace(req.UserID),
+			strings.TrimSpace(req.Group),
+			req.Sections,
+		)
+		if err != nil {
+			_ = json.NewEncoder(conn).Encode(adminResponse{OK: false, Error: err.Error()})
+			return
+		}
+		if !quicStreams.writeToIP(targetIP, packet.Marshal()) {
+			ctrl.CancelDebugWatchStart(requestID)
+			_ = json.NewEncoder(conn).Encode(adminResponse{OK: false, Error: "target device is not connected"})
+			return
+		}
+		result, err := ctrl.AwaitDebugCollect(requestID, time.Duration(timeout)*time.Second)
+		if err != nil {
+			_ = json.NewEncoder(conn).Encode(adminResponse{OK: false, Error: err.Error()})
+			return
+		}
+		raw := json.RawMessage(result.SnapshotJSON)
+		if !json.Valid(raw) {
+			raw = json.RawMessage([]byte(fmt.Sprintf("{\"raw\":%q}", result.SnapshotJSON)))
+		}
+		_ = json.NewEncoder(conn).Encode(adminResponse{OK: true, DebugResult: raw, DebugPath: result.SavedPath})
+	case "start_debug_watch":
+		timeout := req.TimeoutSec
+		if timeout <= 0 {
+			timeout = 10
+		}
+		duration := req.DurationSec
+		if duration <= 0 {
+			duration = 300
+		}
+		packet, targetIP, requestID, err := ctrl.PrepareDebugWatchStartByName(
+			strings.TrimSpace(req.Name),
+			strings.TrimSpace(req.UserID),
+			strings.TrimSpace(req.Group),
+			req.Sections,
+			time.Duration(duration)*time.Second,
+		)
+		if err != nil {
+			_ = json.NewEncoder(conn).Encode(adminResponse{OK: false, Error: err.Error()})
+			return
+		}
+		if !quicStreams.writeToIP(targetIP, packet.Marshal()) {
+			ctrl.CancelDebugCollect(requestID)
+			_ = json.NewEncoder(conn).Encode(adminResponse{OK: false, Error: "target device is not connected"})
+			return
+		}
+		result, err := ctrl.AwaitDebugWatchStart(requestID, time.Duration(timeout)*time.Second)
+		if err != nil {
+			_ = json.NewEncoder(conn).Encode(adminResponse{OK: false, Error: err.Error()})
+			return
+		}
+		_ = json.NewEncoder(conn).Encode(adminResponse{
+			OK:           true,
+			DebugPath:    result.SavedPath,
+			DebugWatchID: result.WatchID,
+		})
+	case "stop_debug_watch":
+		timeout := req.TimeoutSec
+		if timeout <= 0 {
+			timeout = 10
+		}
+		packet, targetIP, requestID, err := ctrl.PrepareDebugWatchStopByName(
+			strings.TrimSpace(req.Name),
+			strings.TrimSpace(req.UserID),
+			strings.TrimSpace(req.Group),
+		)
+		if err != nil {
+			_ = json.NewEncoder(conn).Encode(adminResponse{OK: false, Error: err.Error()})
+			return
+		}
+		if !quicStreams.writeToIP(targetIP, packet.Marshal()) {
+			ctrl.CancelDebugWatchStop(requestID)
+			_ = json.NewEncoder(conn).Encode(adminResponse{OK: false, Error: "target device is not connected"})
+			return
+		}
+		result, err := ctrl.AwaitDebugWatchStop(requestID, time.Duration(timeout)*time.Second)
+		if err != nil {
+			_ = json.NewEncoder(conn).Encode(adminResponse{OK: false, Error: err.Error()})
+			return
+		}
+		_ = json.NewEncoder(conn).Encode(adminResponse{
+			OK:           true,
+			DebugPath:    result.SavedPath,
+			DebugWatchID: result.WatchID,
+		})
 	default:
 		_ = json.NewEncoder(conn).Encode(adminResponse{OK: false, Error: "unsupported action"})
 	}

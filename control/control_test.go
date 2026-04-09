@@ -73,6 +73,30 @@ func TestHandleControlPacketInvalidPingPayload(t *testing.T) {
 	}
 }
 
+func TestFindClientByDeviceIDUsesStableIndex(t *testing.T) {
+	ctrl := newTestController(t)
+	defer ctrl.Stop()
+
+	req := newBaseRegisterReq("dev-indexed", "node-indexed")
+	resp := mustRegister(t, ctrl, req, &net.UDPAddr{IP: net.ParseIP("1.1.1.7"), Port: 7777})
+
+	client, ok := ctrl.nc.FindClientByDeviceID(req.GetToken(), req.GetDeviceId())
+	if !ok {
+		t.Fatalf("client not found by device id")
+	}
+	if client.VirtualIp != resp.GetVirtualIp() {
+		t.Fatalf("unexpected virtual ip: %v", client.VirtualIp)
+	}
+
+	netInfo, ok := ctrl.nc.VirtualNetwork.Get(req.GetToken())
+	if !ok {
+		t.Fatalf("network info not found")
+	}
+	if netInfo.FindClientIPByDeviceID(req.GetDeviceId()) != resp.GetVirtualIp() {
+		t.Fatalf("unexpected indexed virtual ip")
+	}
+}
+
 func TestHandleControlPacketPingUnknownClientReturnsDisconnect(t *testing.T) {
 	ctrl := newTestController(t)
 	defer ctrl.Stop()

@@ -120,6 +120,13 @@ const (
 	AppProtoDNSQueryResponse            AppProtocol = 26
 	AppProtoDeviceRenameRequest         AppProtocol = 27
 	AppProtoDeviceRenameResponse        AppProtocol = 28
+	AppProtoDebugCollectRequest         AppProtocol = 29
+	AppProtoDebugCollectResponse        AppProtocol = 30
+	AppProtoDebugWatchStartRequest      AppProtocol = 31
+	AppProtoDebugWatchStartResponse     AppProtocol = 32
+	AppProtoDebugWatchStopRequest       AppProtocol = 33
+	AppProtoDebugWatchStopResponse      AppProtocol = 34
+	AppProtoDebugWatchEvent             AppProtocol = 35
 	AppProtoUnknown                     AppProtocol = 255
 )
 
@@ -175,6 +182,20 @@ func AppProtocolFromUint8(val uint8) AppProtocol {
 		return AppProtoDeviceRenameRequest
 	case 28:
 		return AppProtoDeviceRenameResponse
+	case 29:
+		return AppProtoDebugCollectRequest
+	case 30:
+		return AppProtoDebugCollectResponse
+	case 31:
+		return AppProtoDebugWatchStartRequest
+	case 32:
+		return AppProtoDebugWatchStartResponse
+	case 33:
+		return AppProtoDebugWatchStopRequest
+	case 34:
+		return AppProtoDebugWatchStopResponse
+	case 35:
+		return AppProtoDebugWatchEvent
 	default:
 		return AppProtoUnknown
 	}
