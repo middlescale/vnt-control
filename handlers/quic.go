@@ -9,12 +9,15 @@ import (
 	"net"
 	"sdl-control/control"
 	"sdl-control/protocol"
+	"sdl-control/protocol/pb"
+	"sdl-control/util"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/quic-go/quic-go"
 	log "github.com/sirupsen/logrus"
+	"google.golang.org/protobuf/proto"
 )
 
 type framedSession interface {
@@ -32,6 +35,46 @@ type streamHub struct {
 	mu        sync.RWMutex
 	byIP      map[uint32]*sessionStream
 	ipsByAddr map[string]map[uint32]struct{}
+}
+
+func logPunchStartDispatch(prefix string, push *protocol.Packet, dispatched bool) {
+	if push == nil || push.DstIP == nil {
+		return
+	}
+	var start pb.PunchStart
+	if err := proto.Unmarshal(push.Payload, &start); err != nil {
+		if dispatched {
+			log.Infof("%s: %s", prefix, push.DstIP)
+		} else {
+			log.Warnf("%s: %s", prefix, push.DstIP)
+		}
+		return
+	}
+	peer := "-"
+	if start.GetTarget() != 0 {
+		peer = util.Uint32ToIP(start.GetTarget()).String()
+	}
+	if dispatched {
+		log.Infof(
+			"%s session_id=%d attempt=%d deliver_to=%s peer=%s peer_endpoint_count=%d",
+			prefix,
+			start.GetSessionId(),
+			start.GetAttempt(),
+			push.DstIP,
+			peer,
+			len(start.GetPeerEndpoints()),
+		)
+		return
+	}
+	log.Warnf(
+		"%s session_id=%d attempt=%d deliver_to=%s peer=%s peer_endpoint_count=%d",
+		prefix,
+		start.GetSessionId(),
+		start.GetAttempt(),
+		push.DstIP,
+		peer,
+		len(start.GetPeerEndpoints()),
+	)
 }
 
 func newStreamHub() *streamHub {
@@ -265,9 +308,9 @@ func serveControlSession(ctrl *control.Controller, remoteAddr net.Addr, session 
 								continue
 							}
 							if !quicStreams.writeToIP(ipToUint32(push.DstIP), push.Marshal()) {
-								log.Warnf("status-triggered PunchStart dispatch failed: %s", push.DstIP)
+								logPunchStartDispatch("status-triggered PunchStart dispatch failed", push, false)
 							} else {
-								log.Infof("status-triggered PunchStart dispatched: %s", push.DstIP)
+								logPunchStartDispatch("status-triggered PunchStart dispatched", push, true)
 							}
 						}
 					}
@@ -312,7 +355,9 @@ func serveControlSession(ctrl *control.Controller, remoteAddr net.Addr, session 
 							continue
 						}
 						if !quicStreams.writeToIP(ipToUint32(push.DstIP), push.Marshal()) {
-							log.Warnf("PunchStart dispatch failed, peer not available: %s", push.DstIP)
+							logPunchStartDispatch("PunchStart dispatch failed, peer not available", push, false)
+						} else {
+							logPunchStartDispatch("PunchStart dispatched", push, true)
 						}
 					}
 				case protocol.AppProtoPunchAck:

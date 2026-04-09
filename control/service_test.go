@@ -380,6 +380,39 @@ func TestPunchSessionLifecycleHandlers(t *testing.T) {
 	}
 }
 
+func TestPunchLogHelpers(t *testing.T) {
+	source := util.IpToUint32(net.ParseIP("10.26.0.2"))
+	target := util.IpToUint32(net.ParseIP("10.26.0.3"))
+	session := &PunchSession{Source: source, Target: target}
+
+	if peer := punchPeerIP(session, source); peer != target {
+		t.Fatalf("unexpected source peer: %s", util.Uint32ToIP(peer))
+	}
+	if peer := punchPeerIP(session, target); peer != source {
+		t.Fatalf("unexpected target peer: %s", util.Uint32ToIP(peer))
+	}
+	if peer := punchPeerIP(session, util.IpToUint32(net.ParseIP("10.26.0.9"))); peer != 0 {
+		t.Fatalf("unexpected unknown peer: %d", peer)
+	}
+
+	if got := formatPunchEndpoint(nil); got != "-" {
+		t.Fatalf("unexpected nil endpoint format: %q", got)
+	}
+	if got := formatPunchEndpoint(&pb.PunchEndpoint{
+		Ip:   util.IpToUint32(net.ParseIP("1.2.3.4")),
+		Port: 51820,
+	}); got != "1.2.3.4:51820/udp" {
+		t.Fatalf("unexpected ipv4 endpoint format: %q", got)
+	}
+	if got := formatPunchEndpoint(&pb.PunchEndpoint{
+		Ipv6: net.ParseIP("2001:db8::1"),
+		Port: 443,
+		Tcp:  true,
+	}); got != "[2001:db8::1]:443/tcp" {
+		t.Fatalf("unexpected ipv6 endpoint format: %q", got)
+	}
+}
+
 func TestBuildPunchStartPackets(t *testing.T) {
 	ctrl := newTestController(t)
 	defer ctrl.Stop()

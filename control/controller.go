@@ -1111,9 +1111,11 @@ func (c *Controller) HandlePunchAckPacket(request *protocol.Packet) error {
 	if session.Results == nil {
 		session.Results = make(map[uint32]*pb.PunchResult)
 	}
+	peer := punchPeerIP(session, source)
 	log.Infof(
-		"PunchAck detail src=%s session_id=%d attempt=%d accepted=%v reason=%q",
+		"PunchAck detail src=%s dst=%s session_id=%d attempt=%d accepted=%v reason=%q",
 		request.SrcIP,
+		formatPunchIP(peer),
 		ack.GetSessionId(),
 		ack.GetAttempt(),
 		ack.GetAccepted(),
@@ -1154,13 +1156,16 @@ func (c *Controller) HandlePunchResultPacket(request *protocol.Packet) error {
 	if session.Results == nil {
 		session.Results = make(map[uint32]*pb.PunchResult)
 	}
+	peer := punchPeerIP(session, source)
 	log.Infof(
-		"PunchResult detail src=%s session_id=%d attempt=%d code=%s reason=%q",
+		"PunchResult detail src=%s dst=%s session_id=%d attempt=%d code=%s reason=%q selected_endpoint=%s",
 		request.SrcIP,
+		formatPunchIP(peer),
 		result.GetSessionId(),
 		result.GetAttempt(),
 		result.GetCode().String(),
 		result.GetReason(),
+		formatPunchEndpoint(result.GetSelectedEndpoint()),
 	)
 	session.Results[source] = &result
 	pairKey := punchPairKey(session.Source, session.Target)
@@ -1324,6 +1329,44 @@ func buildPunchEndpoints(client ClientInfo) []*pb.PunchEndpoint {
 		}
 	}
 	return endpoints
+}
+
+func punchPeerIP(session *PunchSession, source uint32) uint32 {
+	if session == nil {
+		return 0
+	}
+	switch source {
+	case session.Source:
+		return session.Target
+	case session.Target:
+		return session.Source
+	default:
+		return 0
+	}
+}
+
+func formatPunchIP(ip uint32) string {
+	if ip == 0 {
+		return "-"
+	}
+	return util.Uint32ToIP(ip).String()
+}
+
+func formatPunchEndpoint(endpoint *pb.PunchEndpoint) string {
+	if endpoint == nil {
+		return "-"
+	}
+	protoName := "udp"
+	if endpoint.GetTcp() {
+		protoName = "tcp"
+	}
+	if ipv6 := net.IP(endpoint.GetIpv6()); len(ipv6) > 0 {
+		return fmt.Sprintf("[%s]:%d/%s", ipv6.String(), endpoint.GetPort(), protoName)
+	}
+	if endpoint.GetIp() == 0 {
+		return fmt.Sprintf("-:%d/%s", endpoint.GetPort(), protoName)
+	}
+	return fmt.Sprintf("%s:%d/%s", util.Uint32ToIP(endpoint.GetIp()), endpoint.GetPort(), protoName)
 }
 
 func shouldIncludeLocalUDPCandidates(ip net.IP) bool {
