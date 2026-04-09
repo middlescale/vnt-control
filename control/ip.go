@@ -80,13 +80,11 @@ type ClientInfo struct {
 }
 
 type ClientStatusInfo struct {
-	P2PList        []net.IP
-	PublicIPList   []net.IP
-	PublicIPv6     net.IP
-	PublicUDPPorts []uint16
-	LocalUDPPorts  []uint16
-	UpStream       uint64
-	DownStream     uint64
-	IsCone         bool
-	UpdateTime     int64 // Unix时间戳 (timestamp)
+	P2PList            []net.IP
+	PublicUDPEndpoints []*net.UDPAddr
+	LocalUDPPorts      []uint16
+	UpStream           uint64
+	DownStream         uint64
+	IsCone             bool
+	UpdateTime         int64 // Unix时间戳 (timestamp)
 }

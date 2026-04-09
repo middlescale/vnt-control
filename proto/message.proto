@@ -334,10 +334,9 @@ message ClientStatusInfo {
     uint64 up_stream = 3;
     uint64 down_stream = 4;
     PunchNatType nat_type = 5;
-    repeated fixed32 public_ip_list = 6;
-    repeated uint32 public_udp_ports = 7;
+    reserved 6, 7, 9;
     repeated uint32 local_udp_ports = 8;
-    bytes public_ipv6 = 9;
+    repeated PunchEndpoint public_udp_endpoints = 10;
 }
 message RouteItem {
     fixed32 next_ip = 1;
