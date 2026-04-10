@@ -86,5 +86,6 @@ type ClientStatusInfo struct {
 	UpStream           uint64
 	DownStream         uint64
 	IsCone             bool
+	PunchTriggerReason string
 	UpdateTime         int64 // Unix时间戳 (timestamp)
 }

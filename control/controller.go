@@ -108,27 +108,29 @@ const gatewayReportFreshnessWindow = 2 * time.Minute
 type PunchSessionState string
 
 const (
-	PunchSessionCreated    PunchSessionState = "created"
-	PunchSessionDispatch   PunchSessionState = "dispatching"
-	PunchSessionInProgress PunchSessionState = "in_progress"
-	PunchSessionSuccess    PunchSessionState = "success"
-	PunchSessionFailed     PunchSessionState = "failed"
-	PunchSessionTimeout    PunchSessionState = "timeout"
-	PunchSessionCanceled   PunchSessionState = "canceled"
+	PunchSessionScheduled PunchSessionState = "scheduled"
+	PunchSessionSending   PunchSessionState = "sending"
+	PunchSessionWaiting   PunchSessionState = "waiting"
+	PunchSessionSuccess   PunchSessionState = "success"
+	PunchSessionFailed    PunchSessionState = "failed"
+	PunchSessionTimeout   PunchSessionState = "timeout"
 )
 
 type PunchSession struct {
-	SessionID      uint64
-	Source         uint32
-	Target         uint32
-	Attempt        uint32
-	DeadlineUnixMs int64
-	State          PunchSessionState
-	RequestedAt    int64
-	LastReason     string
-	RelayFallback  bool
-	Ack            map[uint32]bool
-	Results        map[uint32]*pb.PunchResult
+	SessionID       uint64
+	Source          uint32
+	Target          uint32
+	Attempt         uint32
+	AttemptBudget   uint32
+	DeadlineUnixMs  int64
+	TriggerReason   string
+	SelectionPolicy string
+	State           PunchSessionState
+	RequestedAt     int64
+	LastReason      string
+	RelayFallback   bool
+	Ack             map[uint32]bool
+	Results         map[uint32]*pb.PunchResult
 }
 
 type PunchRetryState struct {
@@ -825,6 +827,7 @@ func (c *Controller) HandleClientStatusInfoPacket(request *protocol.Packet) erro
 		UpStream:           status.GetUpStream(),
 		DownStream:         status.GetDownStream(),
 		IsCone:             status.GetNatType() == pb.PunchNatType_Cone,
+		PunchTriggerReason: status.GetPunchTriggerReason().String(),
 		UpdateTime:         now,
 	}
 	for _, item := range status.GetP2PList() {
@@ -889,6 +892,9 @@ func (c *Controller) BuildPunchStartPacketsFromStatus(request *protocol.Packet) 
 			if targetIP == srcIP || !targetClient.ControlOnline || targetClient.ClientStatus == nil {
 				continue
 			}
+			if clientsHaveMutualP2PPath(srcClient, srcIP, targetClient, targetIP) {
+				continue
+			}
 			pairKey := punchPairKey(srcIP, targetIP)
 			if _, cooling := c.nc.PunchPairCooldown.Get(pairKey); cooling {
 				continue
@@ -909,40 +915,57 @@ func (c *Controller) BuildPunchStartPacketsFromStatus(request *protocol.Packet) 
 			}
 			sessionID := uint64(time.Now().UnixNano())
 			attempt := uint32(1)
+			attemptBudget := uint32(maxPunchAttemptsPerPair)
 			if hasRetry {
 				attempt = retryState.Attempt + 1
 			}
 			deadline := now.Add(5 * time.Second).UnixMilli()
+			triggerReason := pb.PunchTriggerReason_PunchTriggerStatusUpdate
+			if srcClient.ClientStatus != nil {
+				if parsed, ok := pb.PunchTriggerReason_value[srcClient.ClientStatus.PunchTriggerReason]; ok {
+					triggerReason = pb.PunchTriggerReason(parsed)
+				}
+			}
+			selectionPolicy := pb.PunchEndpointSelectionPolicy_PunchEndpointSelectionAll
 			session := &PunchSession{
-				SessionID:      sessionID,
-				Source:         srcIP,
-				Target:         targetIP,
-				Attempt:        attempt,
-				DeadlineUnixMs: deadline,
-				State:          PunchSessionDispatch,
-				RequestedAt:    now.Unix(),
-				Ack:            make(map[uint32]bool),
-				Results:        make(map[uint32]*pb.PunchResult),
+				SessionID:       sessionID,
+				Source:          srcIP,
+				Target:          targetIP,
+				Attempt:         attempt,
+				AttemptBudget:   attemptBudget,
+				DeadlineUnixMs:  deadline,
+				TriggerReason:   triggerReason.String(),
+				SelectionPolicy: selectionPolicy.String(),
+				State:           PunchSessionScheduled,
+				RequestedAt:     now.Unix(),
+				Ack:             make(map[uint32]bool),
+				Results:         make(map[uint32]*pb.PunchResult),
 			}
 			c.nc.PunchSessions.Set(punchSessionKey(sessionID, attempt), session)
 			c.nc.PunchPairCooldown.Set(pairKey, struct{}{})
 			sourceStart := &pb.PunchStart{
-				SessionId:      sessionID,
-				Source:         srcIP,
-				Target:         targetIP,
-				PeerEndpoints:  targetEndpoints,
-				Attempt:        attempt,
-				TimeoutMs:      3000,
-				DeadlineUnixMs: deadline,
+				SessionId:               sessionID,
+				Source:                  srcIP,
+				Target:                  targetIP,
+				PeerEndpoints:           targetEndpoints,
+				Attempt:                 attempt,
+				TimeoutMs:               3000,
+				DeadlineUnixMs:          deadline,
+				TriggerReason:           triggerReason,
+				AttemptBudget:           attemptBudget,
+				EndpointSelectionPolicy: selectionPolicy,
 			}
 			targetStart := &pb.PunchStart{
-				SessionId:      sessionID,
-				Source:         targetIP,
-				Target:         srcIP,
-				PeerEndpoints:  sourceEndpoints,
-				Attempt:        attempt,
-				TimeoutMs:      3000,
-				DeadlineUnixMs: deadline,
+				SessionId:               sessionID,
+				Source:                  targetIP,
+				Target:                  srcIP,
+				PeerEndpoints:           sourceEndpoints,
+				Attempt:                 attempt,
+				TimeoutMs:               3000,
+				DeadlineUnixMs:          deadline,
+				TriggerReason:           triggerReason,
+				AttemptBudget:           attemptBudget,
+				EndpointSelectionPolicy: selectionPolicy,
 			}
 			sourcePayload, err := proto.Marshal(sourceStart)
 			if err != nil {
@@ -979,6 +1002,23 @@ func (c *Controller) BuildPunchStartPacketsFromStatus(request *protocol.Packet) 
 	return nil, nil
 }
 
+func clientReportsDirectPeer(client ClientInfo, peerIP uint32) bool {
+	if client.ClientStatus == nil {
+		return false
+	}
+	peer := util.Uint32ToIP(peerIP)
+	for _, ip := range client.ClientStatus.P2PList {
+		if ip != nil && ip.Equal(peer) {
+			return true
+		}
+	}
+	return false
+}
+
+func clientsHaveMutualP2PPath(srcClient ClientInfo, srcIP uint32, targetClient ClientInfo, targetIP uint32) bool {
+	return clientReportsDirectPeer(srcClient, targetIP) && clientReportsDirectPeer(targetClient, srcIP)
+}
+
 func (c *Controller) HandlePunchRequestPacket(request *protocol.Packet) (*protocol.Packet, error) {
 	var req pb.PunchRequest
 	if err := proto.Unmarshal(request.Payload, &req); err != nil {
@@ -996,18 +1036,24 @@ func (c *Controller) HandlePunchRequestPacket(request *protocol.Packet) (*protoc
 	}
 	now := time.Now().Unix()
 	session := &PunchSession{
-		SessionID:      req.GetSessionId(),
-		Source:         sourceIP,
-		Target:         req.GetTarget(),
-		Attempt:        req.GetAttempt(),
-		DeadlineUnixMs: req.GetDeadlineUnixMs(),
-		State:          PunchSessionDispatch,
-		RequestedAt:    now,
-		Ack:            map[uint32]bool{sourceIP: true},
-		Results:        make(map[uint32]*pb.PunchResult),
+		SessionID:       req.GetSessionId(),
+		Source:          sourceIP,
+		Target:          req.GetTarget(),
+		Attempt:         req.GetAttempt(),
+		AttemptBudget:   req.GetAttemptBudget(),
+		DeadlineUnixMs:  req.GetDeadlineUnixMs(),
+		TriggerReason:   req.GetTriggerReason().String(),
+		SelectionPolicy: req.GetEndpointSelectionPolicy().String(),
+		State:           PunchSessionScheduled,
+		RequestedAt:     now,
+		Ack:             map[uint32]bool{sourceIP: true},
+		Results:         make(map[uint32]*pb.PunchResult),
 	}
 	if session.DeadlineUnixMs == 0 {
 		session.DeadlineUnixMs = time.Now().Add(5 * time.Second).UnixMilli()
+	}
+	if session.AttemptBudget == 0 {
+		session.AttemptBudget = maxPunchAttemptsPerPair
 	}
 	c.nc.PunchSessions.Set(punchSessionKey(req.GetSessionId(), req.GetAttempt()), session)
 	ack := &pb.PunchAck{
@@ -1015,6 +1061,7 @@ func (c *Controller) HandlePunchRequestPacket(request *protocol.Packet) (*protoc
 		Source:    sourceIP,
 		Attempt:   req.GetAttempt(),
 		Accepted:  true,
+		Phase:     pb.PunchSessionPhase_PunchPhaseScheduled,
 	}
 	payload, err := proto.Marshal(ack)
 	if err != nil {
@@ -1051,22 +1098,28 @@ func (c *Controller) BuildPunchStartPackets(request *protocol.Packet) ([]*protoc
 		return nil, fmt.Errorf("punch target %s not registered", util.Uint32ToIP(req.GetTarget()))
 	}
 	sourceStart := &pb.PunchStart{
-		SessionId:      req.GetSessionId(),
-		Source:         sourceIP,
-		Target:         req.GetTarget(),
-		PeerEndpoints:  req.GetTargetEndpoints(),
-		Attempt:        req.GetAttempt(),
-		TimeoutMs:      req.GetTimeoutMs(),
-		DeadlineUnixMs: req.GetDeadlineUnixMs(),
+		SessionId:               req.GetSessionId(),
+		Source:                  sourceIP,
+		Target:                  req.GetTarget(),
+		PeerEndpoints:           req.GetTargetEndpoints(),
+		Attempt:                 req.GetAttempt(),
+		TimeoutMs:               req.GetTimeoutMs(),
+		DeadlineUnixMs:          req.GetDeadlineUnixMs(),
+		TriggerReason:           req.GetTriggerReason(),
+		AttemptBudget:           req.GetAttemptBudget(),
+		EndpointSelectionPolicy: req.GetEndpointSelectionPolicy(),
 	}
 	targetStart := &pb.PunchStart{
-		SessionId:      req.GetSessionId(),
-		Source:         req.GetTarget(),
-		Target:         sourceIP,
-		PeerEndpoints:  req.GetSourceEndpoints(),
-		Attempt:        req.GetAttempt(),
-		TimeoutMs:      req.GetTimeoutMs(),
-		DeadlineUnixMs: req.GetDeadlineUnixMs(),
+		SessionId:               req.GetSessionId(),
+		Source:                  req.GetTarget(),
+		Target:                  sourceIP,
+		PeerEndpoints:           req.GetSourceEndpoints(),
+		Attempt:                 req.GetAttempt(),
+		TimeoutMs:               req.GetTimeoutMs(),
+		DeadlineUnixMs:          req.GetDeadlineUnixMs(),
+		TriggerReason:           req.GetTriggerReason(),
+		AttemptBudget:           req.GetAttemptBudget(),
+		EndpointSelectionPolicy: req.GetEndpointSelectionPolicy(),
 	}
 	sourcePayload, err := proto.Marshal(sourceStart)
 	if err != nil {
@@ -1121,15 +1174,29 @@ func (c *Controller) HandlePunchAckPacket(request *protocol.Packet) error {
 		session.Results = make(map[uint32]*pb.PunchResult)
 	}
 	peer := punchPeerIP(session, source)
-	log.Infof(
-		"PunchAck detail src=%s dst=%s session_id=%d attempt=%d accepted=%v reason=%q",
-		request.SrcIP,
-		formatPunchIP(peer),
-		ack.GetSessionId(),
-		ack.GetAttempt(),
-		ack.GetAccepted(),
-		ack.GetReason(),
-	)
+	if !ack.GetAccepted() {
+		log.Infof(
+			"PunchAck detail src=%s dst=%s session_id=%d attempt=%d accepted=%v phase=%s reason=%q",
+			request.SrcIP,
+			formatPunchIP(peer),
+			ack.GetSessionId(),
+			ack.GetAttempt(),
+			ack.GetAccepted(),
+			ack.GetPhase().String(),
+			ack.GetReason(),
+		)
+	} else {
+		log.Debugf(
+			"PunchAck detail src=%s dst=%s session_id=%d attempt=%d accepted=%v phase=%s reason=%q",
+			request.SrcIP,
+			formatPunchIP(peer),
+			ack.GetSessionId(),
+			ack.GetAttempt(),
+			ack.GetAccepted(),
+			ack.GetPhase().String(),
+			ack.GetReason(),
+		)
+	}
 	session.Ack[source] = ack.GetAccepted()
 	pairKey := punchPairKey(session.Source, session.Target)
 	if !ack.GetAccepted() {
@@ -1139,7 +1206,12 @@ func (c *Controller) HandlePunchAckPacket(request *protocol.Packet) error {
 		c.nc.PunchPairCooldown.Delete(pairKey)
 		c.updatePunchRetryState(pairKey, session.State)
 	} else if len(session.Ack) >= 2 {
-		session.State = PunchSessionInProgress
+		session.State = PunchSessionWaiting
+	} else {
+		session.State = punchSessionStateFromPhase(ack.GetPhase())
+		if session.State == PunchSessionScheduled {
+			session.State = PunchSessionSending
+		}
 	}
 	c.nc.PunchSessions.Set(key, session)
 	return nil
@@ -1166,30 +1238,45 @@ func (c *Controller) HandlePunchResultPacket(request *protocol.Packet) error {
 		session.Results = make(map[uint32]*pb.PunchResult)
 	}
 	peer := punchPeerIP(session, source)
-	log.Infof(
-		"PunchResult detail src=%s dst=%s session_id=%d attempt=%d code=%s reason=%q selected_endpoint=%s",
-		request.SrcIP,
-		formatPunchIP(peer),
-		result.GetSessionId(),
-		result.GetAttempt(),
-		result.GetCode().String(),
-		result.GetReason(),
-		formatPunchEndpoint(result.GetSelectedEndpoint()),
-	)
+	if result.GetCode() == pb.PunchResultCode_PunchResultSuccess {
+		log.Debugf(
+			"PunchResult detail src=%s dst=%s session_id=%d attempt=%d phase=%s code=%s reason=%q selected_endpoint=%s",
+			request.SrcIP,
+			formatPunchIP(peer),
+			result.GetSessionId(),
+			result.GetAttempt(),
+			result.GetPhase().String(),
+			result.GetCode().String(),
+			result.GetReason(),
+			formatPunchEndpoint(result.GetSelectedEndpoint()),
+		)
+	} else {
+		log.Infof(
+			"PunchResult detail src=%s dst=%s session_id=%d attempt=%d phase=%s code=%s reason=%q selected_endpoint=%s",
+			request.SrcIP,
+			formatPunchIP(peer),
+			result.GetSessionId(),
+			result.GetAttempt(),
+			result.GetPhase().String(),
+			result.GetCode().String(),
+			result.GetReason(),
+			formatPunchEndpoint(result.GetSelectedEndpoint()),
+		)
+	}
 	session.Results[source] = &result
 	pairKey := punchPairKey(session.Source, session.Target)
 	switch result.GetCode() {
 	case pb.PunchResultCode_PunchResultSuccess:
 		session.State = PunchSessionSuccess
 		session.RelayFallback = false
-	case pb.PunchResultCode_PunchResultTimeout:
+	case pb.PunchResultCode_PunchResultTimeout, pb.PunchResultCode_PunchResultNoResponse:
 		session.State = PunchSessionTimeout
 		session.RelayFallback = true
-	case pb.PunchResultCode_PunchResultCanceled:
-		session.State = PunchSessionFailed
-		session.RelayFallback = true
 	default:
-		session.State = PunchSessionFailed
+		session.State = punchSessionStateFromPhase(result.GetPhase())
+		if session.State != PunchSessionFailed {
+			session.State = PunchSessionFailed
+		}
 		session.RelayFallback = true
 	}
 	session.LastReason = result.GetReason()
@@ -1206,7 +1293,7 @@ func (c *Controller) ReconcilePunchSessions(nowUnixMs int64) {
 		if session == nil {
 			continue
 		}
-		if (session.State == PunchSessionDispatch || session.State == PunchSessionInProgress) &&
+		if (session.State == PunchSessionScheduled || session.State == PunchSessionSending || session.State == PunchSessionWaiting) &&
 			session.DeadlineUnixMs > 0 && nowUnixMs > session.DeadlineUnixMs {
 			session.State = PunchSessionTimeout
 			if session.LastReason == "" {
@@ -1289,11 +1376,30 @@ func retryBackoffDuration(attempt uint32) time.Duration {
 	return d
 }
 
+func punchSessionStateFromPhase(phase pb.PunchSessionPhase) PunchSessionState {
+	switch phase {
+	case pb.PunchSessionPhase_PunchPhaseScheduled, pb.PunchSessionPhase_PunchPhaseUnknown:
+		return PunchSessionScheduled
+	case pb.PunchSessionPhase_PunchPhaseSending:
+		return PunchSessionSending
+	case pb.PunchSessionPhase_PunchPhaseWaiting:
+		return PunchSessionWaiting
+	case pb.PunchSessionPhase_PunchPhaseSuccess:
+		return PunchSessionSuccess
+	case pb.PunchSessionPhase_PunchPhaseTimeout:
+		return PunchSessionTimeout
+	case pb.PunchSessionPhase_PunchPhaseFailed:
+		return PunchSessionFailed
+	default:
+		return PunchSessionFailed
+	}
+}
+
 func (c *Controller) updatePunchRetryState(pairKey string, status PunchSessionState) {
 	switch status {
 	case PunchSessionSuccess:
 		c.nc.PunchPairRetry.Delete(pairKey)
-	case PunchSessionFailed, PunchSessionTimeout, PunchSessionCanceled:
+	case PunchSessionFailed, PunchSessionTimeout:
 		state, _ := c.nc.PunchPairRetry.Get(pairKey)
 		state.Attempt++
 		state.NextAllowedUnixMs = time.Now().Add(retryBackoffDuration(state.Attempt)).UnixMilli()

@@ -44,7 +44,7 @@ func logPunchStartDispatch(prefix string, push *protocol.Packet, dispatched bool
 	var start pb.PunchStart
 	if err := proto.Unmarshal(push.Payload, &start); err != nil {
 		if dispatched {
-			log.Infof("%s: %s", prefix, push.DstIP)
+			log.Debugf("%s: %s", prefix, push.DstIP)
 		} else {
 			log.Warnf("%s: %s", prefix, push.DstIP)
 		}
@@ -55,7 +55,7 @@ func logPunchStartDispatch(prefix string, push *protocol.Packet, dispatched bool
 		peer = util.Uint32ToIP(start.GetTarget()).String()
 	}
 	if dispatched {
-		log.Infof(
+		log.Debugf(
 			"%s session_id=%d attempt=%d deliver_to=%s peer=%s peer_endpoint_count=%d",
 			prefix,
 			start.GetSessionId(),
@@ -301,7 +301,7 @@ func serveControlSession(ctrl *control.Controller, remoteAddr net.Addr, session 
 						log.Errorf("BuildPunchStartPacketsFromStatus error: %v", err)
 					} else {
 						if len(startPackets) > 0 {
-							log.Infof("status-triggered PunchStart packets: %d", len(startPackets))
+							log.Debugf("status-triggered PunchStart packets: %d", len(startPackets))
 						}
 						for _, push := range startPackets {
 							if push == nil || push.DstIP == nil {

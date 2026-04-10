@@ -229,9 +229,12 @@ func TestPunchCoordProtoContractRoundTrip(t *testing.T) {
 		TargetEndpoints: []*pb.PunchEndpoint{
 			{Ip: util.IpToUint32(net.ParseIP("2.2.2.2")), Port: 6000, Tcp: false},
 		},
-		Attempt:        1,
-		TimeoutMs:      2000,
-		DeadlineUnixMs: 10000,
+		Attempt:                 1,
+		TimeoutMs:               2000,
+		DeadlineUnixMs:          10000,
+		TriggerReason:           pb.PunchTriggerReason_PunchTriggerManualRequest,
+		AttemptBudget:           3,
+		EndpointSelectionPolicy: pb.PunchEndpointSelectionPolicy_PunchEndpointSelectionAll,
 	}
 	buf, err := proto.Marshal(req)
 	if err != nil {
@@ -247,11 +250,15 @@ func TestPunchCoordProtoContractRoundTrip(t *testing.T) {
 	if decoded.GetSourceNatType() != pb.PunchNatType_Cone || decoded.GetTargetNatType() != pb.PunchNatType_Symmetric {
 		t.Fatalf("unexpected decoded nat types: source=%v target=%v", decoded.GetSourceNatType(), decoded.GetTargetNatType())
 	}
+	if decoded.GetTriggerReason() != pb.PunchTriggerReason_PunchTriggerManualRequest || decoded.GetAttemptBudget() != 3 || decoded.GetEndpointSelectionPolicy() != pb.PunchEndpointSelectionPolicy_PunchEndpointSelectionAll {
+		t.Fatalf("unexpected decoded punch semantics: %+v", decoded)
+	}
 	ack := &pb.PunchAck{
 		SessionId: req.GetSessionId(),
 		Source:    req.GetTarget(),
 		Attempt:   req.GetAttempt(),
 		Accepted:  true,
+		Phase:     pb.PunchSessionPhase_PunchPhaseSending,
 	}
 	ackBuf, err := proto.Marshal(ack)
 	if err != nil {
@@ -261,7 +268,7 @@ func TestPunchCoordProtoContractRoundTrip(t *testing.T) {
 	if err := proto.Unmarshal(ackBuf, &ackDecoded); err != nil {
 		t.Fatalf("unmarshal punch ack failed: %v", err)
 	}
-	if !ackDecoded.GetAccepted() || ackDecoded.GetSessionId() != req.GetSessionId() || ackDecoded.GetAttempt() != req.GetAttempt() {
+	if !ackDecoded.GetAccepted() || ackDecoded.GetSessionId() != req.GetSessionId() || ackDecoded.GetAttempt() != req.GetAttempt() || ackDecoded.GetPhase() != pb.PunchSessionPhase_PunchPhaseSending {
 		t.Fatalf("unexpected decoded punch ack: %+v", ackDecoded)
 	}
 	result := &pb.PunchResult{
@@ -271,6 +278,7 @@ func TestPunchCoordProtoContractRoundTrip(t *testing.T) {
 		Attempt:   req.GetAttempt(),
 		Code:      pb.PunchResultCode(99),
 		Reason:    "compat-enum",
+		Phase:     pb.PunchSessionPhase_PunchPhaseFailed,
 		SelectedEndpoint: &pb.PunchEndpoint{
 			Ip:   req.GetSourceEndpoints()[0].GetIp(),
 			Port: req.GetSourceEndpoints()[0].GetPort(),
@@ -284,7 +292,7 @@ func TestPunchCoordProtoContractRoundTrip(t *testing.T) {
 	if err := proto.Unmarshal(resultBuf, &resultDecoded); err != nil {
 		t.Fatalf("unmarshal punch result failed: %v", err)
 	}
-	if resultDecoded.GetCode() != pb.PunchResultCode(99) || resultDecoded.GetSelectedEndpoint() == nil || resultDecoded.GetSelectedEndpoint().GetPort() != req.GetSourceEndpoints()[0].GetPort() {
+	if resultDecoded.GetCode() != pb.PunchResultCode(99) || resultDecoded.GetPhase() != pb.PunchSessionPhase_PunchPhaseFailed || resultDecoded.GetSelectedEndpoint() == nil || resultDecoded.GetSelectedEndpoint().GetPort() != req.GetSourceEndpoints()[0].GetPort() {
 		t.Fatalf("unexpected decoded punch result: %+v", resultDecoded)
 	}
 }
@@ -295,10 +303,13 @@ func TestPunchSessionLifecycleHandlers(t *testing.T) {
 	srcReg := mustRegister(t, ctrl, newBaseRegisterReq("dev-a", "node-a"), &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1111})
 	dstReg := mustRegister(t, ctrl, newBaseRegisterReq("dev-b", "node-b"), &net.UDPAddr{IP: net.ParseIP("1.1.1.2"), Port: 2222})
 	req := &pb.PunchRequest{
-		SessionId: 2001,
-		Source:    srcReg.GetVirtualIp(),
-		Target:    dstReg.GetVirtualIp(),
-		Attempt:   1,
+		SessionId:               2001,
+		Source:                  srcReg.GetVirtualIp(),
+		Target:                  dstReg.GetVirtualIp(),
+		Attempt:                 1,
+		AttemptBudget:           3,
+		TriggerReason:           pb.PunchTriggerReason_PunchTriggerManualRequest,
+		EndpointSelectionPolicy: pb.PunchEndpointSelectionPolicy_PunchEndpointSelectionAll,
 		SourceEndpoints: []*pb.PunchEndpoint{
 			{Ip: util.IpToUint32(net.ParseIP("8.8.8.8")), Port: 30001},
 		},
@@ -324,7 +335,7 @@ func TestPunchSessionLifecycleHandlers(t *testing.T) {
 		t.Fatalf("unexpected punch request response app proto: %v", resp.AppProto)
 	}
 	session, ok := ctrl.nc.FindPunchSession(req.GetSessionId(), req.GetAttempt())
-	if !ok || session.State != PunchSessionDispatch {
+	if !ok || session.State != PunchSessionScheduled {
 		t.Fatalf("unexpected session after request: %+v", session)
 	}
 
@@ -333,6 +344,7 @@ func TestPunchSessionLifecycleHandlers(t *testing.T) {
 		Source:    dstReg.GetVirtualIp(),
 		Attempt:   req.GetAttempt(),
 		Accepted:  true,
+		Phase:     pb.PunchSessionPhase_PunchPhaseSending,
 	}
 	ackPayload, err := proto.Marshal(ack)
 	if err != nil {
@@ -347,7 +359,7 @@ func TestPunchSessionLifecycleHandlers(t *testing.T) {
 		t.Fatalf("HandlePunchAckPacket failed: %v", err)
 	}
 	session, ok = ctrl.nc.FindPunchSession(req.GetSessionId(), req.GetAttempt())
-	if !ok || session.State != PunchSessionInProgress {
+	if !ok || session.State != PunchSessionWaiting {
 		t.Fatalf("unexpected session after ack: %+v", session)
 	}
 
@@ -358,6 +370,7 @@ func TestPunchSessionLifecycleHandlers(t *testing.T) {
 		Attempt:   req.GetAttempt(),
 		Code:      pb.PunchResultCode_PunchResultSuccess,
 		Reason:    "ok",
+		Phase:     pb.PunchSessionPhase_PunchPhaseSuccess,
 	}
 	resultPayload, err := proto.Marshal(result)
 	if err != nil {
@@ -473,7 +486,7 @@ func TestHandlePunchAckAndResultInitializeSessionMaps(t *testing.T) {
 		Target:         dstIP,
 		Attempt:        attempt,
 		DeadlineUnixMs: time.Now().Add(5 * time.Second).UnixMilli(),
-		State:          PunchSessionDispatch,
+		State:          PunchSessionScheduled,
 		RequestedAt:    time.Now().Unix(),
 	})
 
@@ -482,6 +495,7 @@ func TestHandlePunchAckAndResultInitializeSessionMaps(t *testing.T) {
 		Source:    dstIP,
 		Attempt:   attempt,
 		Accepted:  true,
+		Phase:     pb.PunchSessionPhase_PunchPhaseSending,
 	})
 	if err != nil {
 		t.Fatalf("marshal punch ack failed: %v", err)
@@ -502,6 +516,7 @@ func TestHandlePunchAckAndResultInitializeSessionMaps(t *testing.T) {
 		Attempt:   attempt,
 		Code:      pb.PunchResultCode_PunchResultSuccess,
 		Reason:    "ok",
+		Phase:     pb.PunchSessionPhase_PunchPhaseSuccess,
 	})
 	if err != nil {
 		t.Fatalf("marshal punch result failed: %v", err)
@@ -536,9 +551,10 @@ func TestBuildPunchStartPacketsFromStatus(t *testing.T) {
 	srcReg := mustRegister(t, ctrl, newBaseRegisterReq("dev-a", "node-a"), &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1111})
 	dstReg := mustRegister(t, ctrl, newBaseRegisterReq("dev-b", "node-b"), &net.UDPAddr{IP: net.ParseIP("1.1.1.2"), Port: 2222})
 	srcStatus := &pb.ClientStatusInfo{
-		Source:        srcReg.GetVirtualIp(),
-		NatType:       pb.PunchNatType_Cone,
-		LocalUdpPorts: []uint32{1111},
+		Source:             srcReg.GetVirtualIp(),
+		NatType:            pb.PunchNatType_Cone,
+		LocalUdpPorts:      []uint32{1111},
+		PunchTriggerReason: pb.PunchTriggerReason_PunchTriggerRouteTimeout,
 		PublicUdpEndpoints: []*pb.PunchEndpoint{
 			{Ip: util.IpToUint32(net.ParseIP("8.8.8.8")), Port: 30001},
 		},
@@ -580,6 +596,9 @@ func TestBuildPunchStartPacketsFromStatus(t *testing.T) {
 	if err := proto.Unmarshal(startPackets[0].Payload, &start); err != nil {
 		t.Fatalf("unmarshal punch start failed: %v", err)
 	}
+	if start.GetTriggerReason() != pb.PunchTriggerReason_PunchTriggerRouteTimeout || start.GetAttemptBudget() != 3 || start.GetEndpointSelectionPolicy() != pb.PunchEndpointSelectionPolicy_PunchEndpointSelectionAll {
+		t.Fatalf("unexpected punch start semantics: %+v", start)
+	}
 	var foundPublic, foundLocal bool
 	for _, ep := range start.GetPeerEndpoints() {
 		switch {
@@ -605,6 +624,60 @@ func TestBuildPunchStartPacketsFromStatus(t *testing.T) {
 	}
 	if len(next) != 0 {
 		t.Fatalf("expected cooldown to suppress immediate re-trigger, got %d packets", len(next))
+	}
+}
+
+func TestBuildPunchStartPacketsFromStatusSkipsExistingMutualP2P(t *testing.T) {
+	ctrl := newTestController(t)
+	defer ctrl.Stop()
+	srcReg := mustRegister(t, ctrl, newBaseRegisterReq("dev-a", "node-a"), &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1111})
+	dstReg := mustRegister(t, ctrl, newBaseRegisterReq("dev-b", "node-b"), &net.UDPAddr{IP: net.ParseIP("1.1.1.2"), Port: 2222})
+	srcStatus := &pb.ClientStatusInfo{
+		Source:        srcReg.GetVirtualIp(),
+		NatType:       pb.PunchNatType_Cone,
+		LocalUdpPorts: []uint32{1111},
+		P2PList: []*pb.RouteItem{
+			{NextIp: dstReg.GetVirtualIp()},
+		},
+		PublicUdpEndpoints: []*pb.PunchEndpoint{
+			{Ip: util.IpToUint32(net.ParseIP("8.8.8.8")), Port: 30001},
+		},
+	}
+	dstStatus := &pb.ClientStatusInfo{
+		Source:        dstReg.GetVirtualIp(),
+		NatType:       pb.PunchNatType_Cone,
+		LocalUdpPorts: []uint32{2222},
+		P2PList: []*pb.RouteItem{
+			{NextIp: srcReg.GetVirtualIp()},
+		},
+		PublicUdpEndpoints: []*pb.PunchEndpoint{
+			{Ip: util.IpToUint32(net.ParseIP("9.9.9.9")), Port: 30002},
+		},
+	}
+	srcPayload, err := proto.Marshal(srcStatus)
+	if err != nil {
+		t.Fatalf("marshal src status failed: %v", err)
+	}
+	dstPayload, err := proto.Marshal(dstStatus)
+	if err != nil {
+		t.Fatalf("marshal dst status failed: %v", err)
+	}
+	if err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(srcReg.GetVirtualIp()), Payload: srcPayload}); err != nil {
+		t.Fatalf("update src status failed: %v", err)
+	}
+	if err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(dstReg.GetVirtualIp()), Payload: dstPayload}); err != nil {
+		t.Fatalf("update dst status failed: %v", err)
+	}
+	startPackets, err := ctrl.BuildPunchStartPacketsFromStatus(&protocol.Packet{
+		Proto: protocol.ProtocolService,
+		SrcIP: util.Uint32ToIP(srcReg.GetVirtualIp()),
+		DstIP: util.Uint32ToIP(srcReg.GetVirtualGateway()),
+	})
+	if err != nil {
+		t.Fatalf("BuildPunchStartPacketsFromStatus failed: %v", err)
+	}
+	if len(startPackets) != 0 {
+		t.Fatalf("expected mutual p2p path to suppress punch, got %d packets", len(startPackets))
 	}
 }
 
@@ -806,7 +879,7 @@ func TestReconcilePunchSessionsTimeoutMarksFallback(t *testing.T) {
 		Target:         util.IpToUint32(net.ParseIP("10.26.0.3")),
 		Attempt:        attempt,
 		DeadlineUnixMs: time.Now().Add(-time.Second).UnixMilli(),
-		State:          PunchSessionInProgress,
+		State:          PunchSessionWaiting,
 		RequestedAt:    time.Now().Unix(),
 		Ack:            map[uint32]bool{},
 		Results:        map[uint32]*pb.PunchResult{},
