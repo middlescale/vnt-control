@@ -41,6 +41,9 @@ type Controller struct {
 	gatewaySeen  map[string]GatewayNodeInfo
 	gatewayNonce map[string]map[string]int64
 
+	renameMu            sync.Mutex
+	pendingDeviceRename map[string]PendingDeviceRename
+
 	debugMu                  sync.Mutex
 	debugCollectSeq          uint64
 	debugWatchSeq            uint64
@@ -98,6 +101,16 @@ type DeviceAdminView struct {
 	AuthExpireAtUnix   int64  `json:"auth_expire_at_unix,omitempty"`
 	AuthExpired        bool   `json:"auth_expired,omitempty"`
 	UpdatedAtUnix      int64  `json:"updated_at_unix,omitempty"`
+}
+
+type PendingDeviceRename struct {
+	RequestID       uint64
+	SourceVirtualIP uint32
+	UserID          string
+	Group           string
+	DeviceID        string
+	RequestedName   string
+	RequestedAtUnix int64
 }
 
 const maxPunchAttemptsPerPair = 3
@@ -173,6 +186,7 @@ func NewController(cfg *config.Config) (*Controller, error) {
 		gatewayAllow:             gatewayAllow,
 		gatewaySeen:              make(map[string]GatewayNodeInfo),
 		gatewayNonce:             make(map[string]map[string]int64),
+		pendingDeviceRename:      make(map[string]PendingDeviceRename),
 		pendingDebugCollect:      make(map[uint64]chan DebugCollectResult),
 		pendingDebugWatchStart:   make(map[uint64]chan DebugWatchStartResult),
 		pendingDebugWatchStop:    make(map[uint64]chan DebugWatchStopResult),
@@ -436,7 +450,15 @@ func (c *Controller) HandleDeviceRenamePacket(request *protocol.Packet) (*protoc
 		return nil, 0, err
 	}
 	deviceID := strings.TrimSpace(req.GetDeviceId())
-	newName := strings.TrimSpace(req.GetNewName())
+	newName, err := normalizeRenameName(req.GetNewName())
+	if err != nil {
+		resp, packetErr := c.buildServicePacket(request, protocol.AppProtoDeviceRenameResponse, &pb.DeviceRenameResponse{
+			RequestId: req.GetRequestId(),
+			Ok:        false,
+			Reason:    err.Error(),
+		})
+		return resp, 0, packetErr
+	}
 	if deviceID == "" {
 		resp, err := c.buildServicePacket(request, protocol.AppProtoDeviceRenameResponse, &pb.DeviceRenameResponse{
 			RequestId: req.GetRequestId(),
@@ -445,24 +467,9 @@ func (c *Controller) HandleDeviceRenamePacket(request *protocol.Packet) (*protoc
 		})
 		return resp, 0, err
 	}
-	if newName == "" {
-		resp, err := c.buildServicePacket(request, protocol.AppProtoDeviceRenameResponse, &pb.DeviceRenameResponse{
-			RequestId: req.GetRequestId(),
-			Ok:        false,
-			Reason:    "name is empty",
-		})
-		return resp, 0, err
-	}
-	if len(newName) > 128 {
-		resp, err := c.buildServicePacket(request, protocol.AppProtoDeviceRenameResponse, &pb.DeviceRenameResponse{
-			RequestId: req.GetRequestId(),
-			Ok:        false,
-			Reason:    "name too long",
-		})
-		return resp, 0, err
-	}
 	srcIP := util.IpToUint32(request.SrcIP)
 	groupName := ""
+	userID := ""
 	c.nc.VirtualNetwork.mutex.RLock()
 	for _, network := range c.nc.VirtualNetwork.data {
 		client, ok := network.Clients[srcIP]
@@ -479,6 +486,7 @@ func (c *Controller) HandleDeviceRenamePacket(request *protocol.Packet) (*protoc
 			return resp, 0, err
 		}
 		groupName = network.Group
+		userID, _ = c.userIDForAuthedDevice(network.Group, client.DeviceId)
 		break
 	}
 	c.nc.VirtualNetwork.mutex.RUnlock()
@@ -490,42 +498,21 @@ func (c *Controller) HandleDeviceRenamePacket(request *protocol.Packet) (*protoc
 		})
 		return resp, 0, err
 	}
-	if err := c.UMSetAuthedDeviceDisplayName(groupName, deviceID, newName); err != nil {
-		resp, packetErr := c.buildServicePacket(request, protocol.AppProtoDeviceRenameResponse, &pb.DeviceRenameResponse{
-			RequestId: req.GetRequestId(),
-			Ok:        false,
-			Reason:    err.Error(),
-		})
-		return resp, 0, packetErr
-	}
-	changed := false
-	c.nc.VirtualNetwork.mutex.Lock()
-	for _, network := range c.nc.VirtualNetwork.data {
-		client, ok := network.Clients[srcIP]
-		if !ok || client.DeviceId != deviceID {
-			continue
-		}
-		client.Name = newName
-		network.UpsertClient(srcIP, client)
-		network.Epoch++
-		changed = true
-		break
-	}
-	c.nc.VirtualNetwork.mutex.Unlock()
-	if !changed {
-		resp, err := c.buildServicePacket(request, protocol.AppProtoDeviceRenameResponse, &pb.DeviceRenameResponse{
-			RequestId: req.GetRequestId(),
-			Ok:        false,
-			Reason:    "device not registered",
-		})
-		return resp, 0, err
-	}
-	resp, err := c.buildServicePacket(request, protocol.AppProtoDeviceRenameResponse, &pb.DeviceRenameResponse{
-		RequestId:   req.GetRequestId(),
-		Ok:          true,
-		AppliedName: newName,
+	c.queuePendingDeviceRename(PendingDeviceRename{
+		RequestID:       req.GetRequestId(),
+		SourceVirtualIP: srcIP,
+		UserID:          userID,
+		Group:           groupName,
+		DeviceID:        deviceID,
+		RequestedName:   newName,
 	})
-	return resp, srcIP, err
+	resp, err := c.buildServicePacket(request, protocol.AppProtoDeviceRenameResponse, &pb.DeviceRenameResponse{
+		RequestId:       req.GetRequestId(),
+		Ok:              true,
+		Reason:          "pending admin approval",
+		PendingApproval: true,
+	})
+	return resp, 0, err
 }
 
 func (c *Controller) clearStaleClientStateByDeviceID(domain, deviceID string) {

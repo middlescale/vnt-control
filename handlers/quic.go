@@ -286,10 +286,12 @@ func serveControlSession(ctrl *control.Controller, remoteAddr net.Addr, session 
 						log.Errorf("HandleDeviceRenamePacket error: %v", err)
 						continue
 					}
-					deferredPushPackets, err = ctrl.BuildPushDeviceListPacketsForPeerChange(virtualIP)
-					if err != nil {
-						log.Errorf("BuildPushDeviceListPacketsForPeerChange error: %v", err)
-						deferredPushPackets = nil
+					if virtualIP != 0 {
+						deferredPushPackets, err = ctrl.BuildPushDeviceListPacketsForPeerChange(virtualIP)
+						if err != nil {
+							log.Errorf("BuildPushDeviceListPacketsForPeerChange error: %v", err)
+							deferredPushPackets = nil
+						}
 					}
 				case protocol.AppProtoClientStatusInfo:
 					err = ctrl.HandleClientStatusInfoPacket(packet)
