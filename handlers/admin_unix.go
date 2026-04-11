@@ -186,6 +186,11 @@ func handleAdminConn(ctrl *control.Controller, conn net.Conn) {
 					}
 				}
 			}
+			if notifyPacket, notifyErr := ctrl.BuildDeviceRenameNotifyPacket(changedIP, 0, appliedName); notifyErr != nil {
+				log.Errorf("BuildDeviceRenameNotifyPacket error: %v", notifyErr)
+			} else if notifyPacket != nil && !quicStreams.writeToIP(changedIP, notifyPacket.Marshal()) {
+				log.Warnf("DeviceRenameResponse dispatch failed: %s", util.Uint32ToIP(changedIP))
+			}
 		}
 		_ = json.NewEncoder(conn).Encode(adminResponse{OK: true, Name: appliedName})
 	case "rename_device":
@@ -211,6 +216,11 @@ func handleAdminConn(ctrl *control.Controller, conn net.Conn) {
 						log.Warnf("PushDeviceList dispatch failed: %s", push.DstIP)
 					}
 				}
+			}
+			if notifyPacket, notifyErr := ctrl.BuildDeviceRenameNotifyPacket(changedIP, 0, appliedName); notifyErr != nil {
+				log.Errorf("BuildDeviceRenameNotifyPacket error: %v", notifyErr)
+			} else if notifyPacket != nil && !quicStreams.writeToIP(changedIP, notifyPacket.Marshal()) {
+				log.Warnf("DeviceRenameResponse dispatch failed: %s", util.Uint32ToIP(changedIP))
 			}
 		}
 		_ = json.NewEncoder(conn).Encode(adminResponse{OK: true, Name: appliedName})

@@ -647,6 +647,35 @@ func (c *Controller) BuildPushDeviceListPacketsForPeerChange(changedIP uint32) (
 	return nil, nil
 }
 
+func (c *Controller) BuildDeviceRenameNotifyPacket(
+	targetIP uint32,
+	requestID uint64,
+	appliedName string,
+) (*protocol.Packet, error) {
+	if targetIP == 0 {
+		return nil, nil
+	}
+	resp := &pb.DeviceRenameResponse{
+		RequestId:   requestID,
+		Ok:          true,
+		AppliedName: appliedName,
+	}
+	payload, err := proto.Marshal(resp)
+	if err != nil {
+		return nil, fmt.Errorf("DeviceRenameResponse marshal error: %v", err)
+	}
+	return &protocol.Packet{
+		Ver:       protocol.V3,
+		Proto:     protocol.ProtocolService,
+		AppProto:  protocol.AppProtoDeviceRenameResponse,
+		SourceTTL: protocol.MAX_TTL,
+		TTL:       protocol.MAX_TTL,
+		SrcIP:     net.ParseIP("0.0.0.1"),
+		DstIP:     util.Uint32ToIP(targetIP),
+		Payload:   payload,
+	}, nil
+}
+
 func (c *Controller) buildDisconnectPacket(request *protocol.Packet) *protocol.Packet {
 	return &protocol.Packet{
 		Ver:       protocol.V3,
