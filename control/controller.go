@@ -2242,9 +2242,6 @@ func validateRegistrationRequest(reg *pb.RegistrationRequest) error {
 	if len(reg.GetDevicePubKey()) == 0 {
 		return fmt.Errorf("device_pub_key is empty")
 	}
-	if len(reg.GetOnlineKxPub()) != 32 {
-		return fmt.Errorf("online_kx_pub length error")
-	}
 	return nil
 }
 
