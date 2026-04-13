@@ -41,9 +41,6 @@ type Controller struct {
 	gatewaySeen  map[string]GatewayNodeInfo
 	gatewayNonce map[string]map[string]int64
 
-	renameMu            sync.Mutex
-	pendingDeviceRename map[string]PendingDeviceRename
-
 	debugMu                  sync.Mutex
 	debugCollectSeq          uint64
 	debugWatchSeq            uint64
@@ -101,16 +98,6 @@ type DeviceAdminView struct {
 	AuthExpireAtUnix   int64  `json:"auth_expire_at_unix,omitempty"`
 	AuthExpired        bool   `json:"auth_expired,omitempty"`
 	UpdatedAtUnix      int64  `json:"updated_at_unix,omitempty"`
-}
-
-type PendingDeviceRename struct {
-	RequestID       uint64
-	SourceVirtualIP uint32
-	UserID          string
-	Group           string
-	DeviceID        string
-	RequestedName   string
-	RequestedAtUnix int64
 }
 
 const maxPunchAttemptsPerPair = 3
@@ -186,7 +173,6 @@ func NewController(cfg *config.Config) (*Controller, error) {
 		gatewayAllow:             gatewayAllow,
 		gatewaySeen:              make(map[string]GatewayNodeInfo),
 		gatewayNonce:             make(map[string]map[string]int64),
-		pendingDeviceRename:      make(map[string]PendingDeviceRename),
 		pendingDebugCollect:      make(map[uint64]chan DebugCollectResult),
 		pendingDebugWatchStart:   make(map[uint64]chan DebugWatchStartResult),
 		pendingDebugWatchStop:    make(map[uint64]chan DebugWatchStopResult),
@@ -469,7 +455,6 @@ func (c *Controller) HandleDeviceRenamePacket(request *protocol.Packet) (*protoc
 	}
 	srcIP := util.IpToUint32(request.SrcIP)
 	groupName := ""
-	userID := ""
 	c.nc.VirtualNetwork.mutex.RLock()
 	for _, network := range c.nc.VirtualNetwork.data {
 		client, ok := network.Clients[srcIP]
@@ -486,7 +471,6 @@ func (c *Controller) HandleDeviceRenamePacket(request *protocol.Packet) (*protoc
 			return resp, 0, err
 		}
 		groupName = network.Group
-		userID, _ = c.userIDForAuthedDevice(network.Group, client.DeviceId)
 		break
 	}
 	c.nc.VirtualNetwork.mutex.RUnlock()
@@ -498,21 +482,21 @@ func (c *Controller) HandleDeviceRenamePacket(request *protocol.Packet) (*protoc
 		})
 		return resp, 0, err
 	}
-	c.queuePendingDeviceRename(PendingDeviceRename{
-		RequestID:       req.GetRequestId(),
-		SourceVirtualIP: srcIP,
-		UserID:          userID,
-		Group:           groupName,
-		DeviceID:        deviceID,
-		RequestedName:   newName,
-	})
+	changedIP, err := c.applyDeviceRename(groupName, deviceID, newName)
+	if err != nil {
+		resp, packetErr := c.buildServicePacket(request, protocol.AppProtoDeviceRenameResponse, &pb.DeviceRenameResponse{
+			RequestId: req.GetRequestId(),
+			Ok:        false,
+			Reason:    err.Error(),
+		})
+		return resp, 0, packetErr
+	}
 	resp, err := c.buildServicePacket(request, protocol.AppProtoDeviceRenameResponse, &pb.DeviceRenameResponse{
-		RequestId:       req.GetRequestId(),
-		Ok:              true,
-		Reason:          "pending admin approval",
-		PendingApproval: true,
+		RequestId:   req.GetRequestId(),
+		Ok:          true,
+		AppliedName: newName,
 	})
-	return resp, 0, err
+	return resp, changedIP, err
 }
 
 func (c *Controller) clearStaleClientStateByDeviceID(domain, deviceID string) {
@@ -912,21 +896,24 @@ func (c *Controller) BuildPunchStartPacketsFromStatus(request *protocol.Packet) 
 				continue
 			}
 			pairKey := punchPairKey(srcIP, targetIP)
-			if _, cooling := c.nc.PunchPairCooldown.Get(pairKey); cooling {
+			if !c.nc.PunchPairCooldown.SetIfAbsent(pairKey, struct{}{}) {
 				continue
 			}
 			retryState, hasRetry := c.nc.PunchPairRetry.Get(pairKey)
 			if hasRetry {
 				if retryState.Attempt >= maxPunchAttemptsPerPair {
+					c.nc.PunchPairCooldown.Delete(pairKey)
 					continue
 				}
 				if nowMs < retryState.NextAllowedUnixMs {
+					c.nc.PunchPairCooldown.Delete(pairKey)
 					continue
 				}
 			}
 			sourceEndpoints := buildPunchEndpoints(srcClient)
 			targetEndpoints := buildPunchEndpoints(targetClient)
 			if len(sourceEndpoints) == 0 || len(targetEndpoints) == 0 {
+				c.nc.PunchPairCooldown.Delete(pairKey)
 				continue
 			}
 			sessionID := uint64(time.Now().UnixNano())
@@ -958,7 +945,6 @@ func (c *Controller) BuildPunchStartPacketsFromStatus(request *protocol.Packet) 
 				Results:         make(map[uint32]*pb.PunchResult),
 			}
 			c.nc.PunchSessions.Set(punchSessionKey(sessionID, attempt), session)
-			c.nc.PunchPairCooldown.Set(pairKey, struct{}{})
 			sourceStart := &pb.PunchStart{
 				SessionId:               sessionID,
 				Source:                  srcIP,
@@ -1280,22 +1266,44 @@ func (c *Controller) HandlePunchResultPacket(request *protocol.Packet) error {
 		)
 	}
 	session.Results[source] = &result
+	session.LastReason = result.GetReason()
+	if len(session.Results) < 2 {
+		session.State = PunchSessionWaiting
+		c.nc.PunchSessions.Set(key, session)
+		return nil
+	}
 	pairKey := punchPairKey(session.Source, session.Target)
-	switch result.GetCode() {
-	case pb.PunchResultCode_PunchResultSuccess:
+	success := true
+	timeout := false
+	lastReason := session.LastReason
+	for _, item := range session.Results {
+		if item == nil {
+			success = false
+			continue
+		}
+		if item.GetReason() != "" {
+			lastReason = item.GetReason()
+		}
+		switch item.GetCode() {
+		case pb.PunchResultCode_PunchResultSuccess:
+		case pb.PunchResultCode_PunchResultTimeout, pb.PunchResultCode_PunchResultNoResponse:
+			success = false
+			timeout = true
+		default:
+			success = false
+		}
+	}
+	session.LastReason = lastReason
+	if success {
 		session.State = PunchSessionSuccess
 		session.RelayFallback = false
-	case pb.PunchResultCode_PunchResultTimeout, pb.PunchResultCode_PunchResultNoResponse:
+	} else if timeout {
 		session.State = PunchSessionTimeout
 		session.RelayFallback = true
-	default:
-		session.State = punchSessionStateFromPhase(result.GetPhase())
-		if session.State != PunchSessionFailed {
-			session.State = PunchSessionFailed
-		}
+	} else {
+		session.State = PunchSessionFailed
 		session.RelayFallback = true
 	}
-	session.LastReason = result.GetReason()
 	c.nc.PunchPairCooldown.Delete(pairKey)
 	c.updatePunchRetryState(pairKey, session.State)
 	c.nc.PunchSessions.Set(key, session)
@@ -2677,6 +2685,32 @@ func (e *ExpireMap[K, T]) Get(key K) (T, bool) {
 		return zero, false
 	}
 	return val, true
+}
+
+// SetIfAbsent stores value only when the key is missing or expired.
+func (e *ExpireMap[K, T]) SetIfAbsent(key K, value T) bool {
+	var deadline int64
+	if e.ttl > 0 {
+		deadline = time.Now().Add(time.Duration(e.ttl)).UnixNano()
+	}
+
+	e.mutex.Lock()
+	defer e.mutex.Unlock()
+
+	if currentDeadline, hasExp := e.expiration[key]; hasExp && currentDeadline > 0 && time.Now().UnixNano() > currentDeadline {
+		delete(e.data, key)
+		delete(e.expiration, key)
+	}
+	if _, exists := e.data[key]; exists {
+		return false
+	}
+	e.data[key] = value
+	if deadline == 0 {
+		delete(e.expiration, key)
+	} else {
+		e.expiration[key] = deadline
+	}
+	return true
 }
 
 // Delete removes a key immediately.

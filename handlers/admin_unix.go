@@ -8,7 +8,6 @@ import (
 	"net"
 	"os"
 	"sdl-control/control"
-	"sdl-control/util"
 	"strings"
 	"time"
 
@@ -163,67 +162,6 @@ func handleAdminConn(ctrl *control.Controller, conn net.Conn) {
 			Devices:      ctrl.ListDevices(userID),
 			UpdatedCount: len(updated),
 		})
-	case "approve_device_rename":
-		appliedName, changedIP, err := ctrl.ApprovePendingDeviceRename(
-			strings.TrimSpace(req.DeviceID),
-			strings.TrimSpace(req.UserID),
-			strings.TrimSpace(req.Group),
-		)
-		if err != nil {
-			_ = json.NewEncoder(conn).Encode(adminResponse{OK: false, Error: err.Error()})
-			return
-		}
-		if changedIP != 0 {
-			if pushPackets, pushErr := ctrl.BuildPushDeviceListPacketsForPeerChange(changedIP); pushErr != nil {
-				log.Errorf("BuildPushDeviceListPacketsForPeerChange error: %v", pushErr)
-			} else {
-				for _, push := range pushPackets {
-					if push == nil || push.DstIP == nil {
-						continue
-					}
-					if !quicStreams.writeToIP(util.IpToUint32(push.DstIP), push.Marshal()) {
-						log.Warnf("PushDeviceList dispatch failed: %s", push.DstIP)
-					}
-				}
-			}
-			if notifyPacket, notifyErr := ctrl.BuildDeviceRenameNotifyPacket(changedIP, 0, appliedName); notifyErr != nil {
-				log.Errorf("BuildDeviceRenameNotifyPacket error: %v", notifyErr)
-			} else if notifyPacket != nil && !quicStreams.writeToIP(changedIP, notifyPacket.Marshal()) {
-				log.Warnf("DeviceRenameResponse dispatch failed: %s", util.Uint32ToIP(changedIP))
-			}
-		}
-		_ = json.NewEncoder(conn).Encode(adminResponse{OK: true, Name: appliedName})
-	case "rename_device":
-		appliedName, changedIP, err := ctrl.RenameDeviceByAdmin(
-			strings.TrimSpace(req.DeviceID),
-			strings.TrimSpace(req.UserID),
-			strings.TrimSpace(req.Group),
-			strings.TrimSpace(req.Name),
-		)
-		if err != nil {
-			_ = json.NewEncoder(conn).Encode(adminResponse{OK: false, Error: err.Error()})
-			return
-		}
-		if changedIP != 0 {
-			if pushPackets, pushErr := ctrl.BuildPushDeviceListPacketsForPeerChange(changedIP); pushErr != nil {
-				log.Errorf("BuildPushDeviceListPacketsForPeerChange error: %v", pushErr)
-			} else {
-				for _, push := range pushPackets {
-					if push == nil || push.DstIP == nil {
-						continue
-					}
-					if !quicStreams.writeToIP(util.IpToUint32(push.DstIP), push.Marshal()) {
-						log.Warnf("PushDeviceList dispatch failed: %s", push.DstIP)
-					}
-				}
-			}
-			if notifyPacket, notifyErr := ctrl.BuildDeviceRenameNotifyPacket(changedIP, 0, appliedName); notifyErr != nil {
-				log.Errorf("BuildDeviceRenameNotifyPacket error: %v", notifyErr)
-			} else if notifyPacket != nil && !quicStreams.writeToIP(changedIP, notifyPacket.Marshal()) {
-				log.Warnf("DeviceRenameResponse dispatch failed: %s", util.Uint32ToIP(changedIP))
-			}
-		}
-		_ = json.NewEncoder(conn).Encode(adminResponse{OK: true, Name: appliedName})
 	case "dns_snapshot":
 		snapshot, err := ctrl.BuildDNSSnapshot(strings.TrimSpace(req.Domain), strings.TrimSpace(req.Group))
 		if err != nil {
