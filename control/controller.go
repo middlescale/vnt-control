@@ -330,10 +330,10 @@ func (c *Controller) HandleRegistrationPacketWithVirtualIP(request *protocol.Pac
 		c.clearStaleClientStateByDeviceID(domain, registration.GetDeviceId())
 		return nil, 0, fmt.Errorf("device %s auth check failed for group %s: %w", registration.GetDeviceId(), domain, err)
 	}
-	displayName := strings.TrimSpace(registration.GetName())
+	displayName := sanitizeDNSHostnameLabel(registration.GetName(), registration.GetDeviceId())
 	if existing, ok := c.UMGetAuthedDevice(domain, registration.GetDeviceId()); ok {
 		if persisted := strings.TrimSpace(existing.DisplayName); persisted != "" {
-			displayName = persisted
+			displayName = sanitizeDNSHostnameLabel(persisted, registration.GetDeviceId())
 		}
 	}
 

@@ -8,6 +8,7 @@ import (
 	"sdl-control/protocol/pb"
 	"sort"
 	"strings"
+	"unicode"
 )
 
 const (
@@ -117,10 +118,7 @@ func (c *Controller) BuildDNSSnapshot(domain, group string) (*DNSSnapshotView, e
 			continue
 		}
 		for ip, client := range network.Clients {
-			name := strings.ToLower(strings.TrimSpace(client.Name))
-			if name == "" {
-				name = strings.ToLower(strings.TrimSpace(client.DeviceId))
-			}
+			name := sanitizeDNSHostnameLabel(client.Name, client.DeviceId)
 			updatedAt := client.ControlLastSeen
 			if client.DataPlaneLastSeen > updatedAt {
 				updatedAt = client.DataPlaneLastSeen
@@ -223,13 +221,59 @@ func (c *Controller) buildDNSGroupScopes(domain, group string) ([]dnsGroupScope,
 }
 
 func buildDNSFQDN(shortName, group, domain string, includeGroup bool) string {
-	shortName = strings.ToLower(strings.TrimSpace(shortName))
+	shortName = sanitizeDNSHostnameLabel(shortName, "device")
 	group = strings.ToLower(strings.TrimSpace(group))
 	domain = strings.ToLower(strings.TrimSpace(domain))
 	if includeGroup && group != "" {
 		return shortName + "." + group + "." + domain
 	}
 	return shortName + "." + domain
+}
+
+func sanitizeDNSHostnameLabel(name, fallback string) string {
+	if label := sanitizeDNSLabel(name); label != "" {
+		return label
+	}
+	if label := sanitizeDNSLabel(fallback); label != "" {
+		return label
+	}
+	return "device"
+}
+
+func sanitizeDNSLabel(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	value = strings.TrimSuffix(value, ".")
+	value = strings.TrimSuffix(value, ".local")
+	if value == "" {
+		return ""
+	}
+
+	var b strings.Builder
+	b.Grow(len(value))
+	lastHyphen := false
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+			lastHyphen = false
+		case r == '-', r == '.', r == '_', unicode.IsSpace(r):
+			if !lastHyphen && b.Len() > 0 {
+				b.WriteByte('-')
+				lastHyphen = true
+			}
+		default:
+			if !lastHyphen && b.Len() > 0 {
+				b.WriteByte('-')
+				lastHyphen = true
+			}
+		}
+	}
+
+	label := strings.Trim(b.String(), "-")
+	if len(label) > 63 {
+		label = strings.Trim(label[:63], "-")
+	}
+	return label
 }
 
 func computeDNSEpoch(snapshot *DNSSnapshotView) uint64 {

@@ -1429,6 +1429,68 @@ func TestRegistrationUsesPersistedDisplayName(t *testing.T) {
 	}
 }
 
+func TestRegistrationNormalizesStoredDeviceName(t *testing.T) {
+	ctrl := newTestController(t)
+	defer ctrl.Stop()
+
+	resp := mustRegister(t, ctrl, newBaseRegisterReq("dev-macos-name", "hxmdeMacBook-Air.local"), &net.UDPAddr{IP: net.ParseIP("1.1.1.18"), Port: 1818})
+	client, ok := ctrl.nc.FindClientByVirtualIP(resp.GetVirtualIp())
+	if !ok {
+		t.Fatalf("client not found")
+	}
+	if client.Name != "hxmdemacbook-air" {
+		t.Fatalf("expected normalized client name, got %+v", client)
+	}
+}
+
+func TestRenameNormalizesStoredDeviceName(t *testing.T) {
+	ctrl := newTestController(t)
+	defer ctrl.Stop()
+
+	resp := mustRegister(t, ctrl, newBaseRegisterReq("dev-rename-normalize", "node-b"), &net.UDPAddr{IP: net.ParseIP("1.1.1.19"), Port: 1919})
+	req := &pb.DeviceRenameRequest{
+		RequestId: 9,
+		DeviceId:  "dev-rename-normalize",
+		NewName:   "hxmdeMacBook-Air.local",
+	}
+	payload, err := proto.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal rename request failed: %v", err)
+	}
+	packet := &protocol.Packet{
+		Proto:    protocol.ProtocolService,
+		AppProto: protocol.AppProtoDeviceRenameRequest,
+		SrcIP:    util.Uint32ToIP(resp.GetVirtualIp()),
+		DstIP:    net.ParseIP("0.0.0.1"),
+		Payload:  payload,
+	}
+	respPacket, _, err := ctrl.HandleDeviceRenamePacket(packet)
+	if err != nil {
+		t.Fatalf("HandleDeviceRenamePacket failed: %v", err)
+	}
+	var ack pb.DeviceRenameResponse
+	if err := proto.Unmarshal(respPacket.Payload, &ack); err != nil {
+		t.Fatalf("unmarshal rename response failed: %v", err)
+	}
+	if ack.GetAppliedName() != "hxmdemacbook-air" {
+		t.Fatalf("expected normalized applied name, got %+v", ack)
+	}
+	client, ok := ctrl.nc.FindClientByVirtualIP(resp.GetVirtualIp())
+	if !ok {
+		t.Fatalf("renamed client not found")
+	}
+	if client.Name != "hxmdemacbook-air" {
+		t.Fatalf("expected normalized client name after rename, got %+v", client)
+	}
+	record, ok := ctrl.UMGetAuthedDevice("ms.net", "dev-rename-normalize")
+	if !ok {
+		t.Fatalf("authed device not found after rename")
+	}
+	if record.DisplayName != "hxmdemacbook-air" {
+		t.Fatalf("expected normalized persisted display name, got %+v", record)
+	}
+}
+
 func TestHandleClientStatusInfoPacket(t *testing.T) {
 	ctrl := newTestController(t)
 	defer ctrl.Stop()
@@ -1950,6 +2012,9 @@ func TestBuildDNSSnapshotReturnsRecords(t *testing.T) {
 	if record.FQDN != "laptop.default.ms.net" {
 		t.Fatalf("unexpected fqdn: %+v", record)
 	}
+	if record.ShortName != "laptop" {
+		t.Fatalf("unexpected short name: %+v", record)
+	}
 	if record.VirtualIP != util.Uint32ToIP(resp.GetVirtualIp()).String() {
 		t.Fatalf("unexpected virtual ip: %+v", record)
 	}
@@ -2003,6 +2068,62 @@ func TestBuildDNSSnapshotEpochIgnoresReachabilityState(t *testing.T) {
 	}
 	if before.Epoch != after.Epoch {
 		t.Fatalf("expected epoch unchanged for reachability-only update: before=%d after=%d", before.Epoch, after.Epoch)
+	}
+}
+
+func TestBuildDNSSnapshotUsesNormalizedStoredName(t *testing.T) {
+	ctrl := newControllerWithConfig(t, &config.Config{
+		DefaultDomain: "ms.net",
+		Domains: map[string]config.DomainConfig{
+			"ms.net": {
+				Groups: map[string]config.GroupConfig{
+					"default": {Gateway: net.ParseIP("10.26.0.1"), Netmask: "255.255.255.0"},
+				},
+			},
+		},
+		DefaultGatewayID:    "gw-default",
+		GatewayTicketSecret: testGatewayTicketSecret,
+	})
+	defer ctrl.Stop()
+
+	req := newBaseRegisterReq("dev-dns-macos", "hxmdeMacBook-Air.local")
+	req.Token = "default.ms.net"
+	req.Name = "hxmdeMacBook-Air.local"
+	mustRegister(t, ctrl, req, &net.UDPAddr{IP: net.ParseIP("1.1.1.52"), Port: 5252})
+
+	snapshot, err := ctrl.BuildDNSSnapshot("ms.net", "default")
+	if err != nil {
+		t.Fatalf("BuildDNSSnapshot failed: %v", err)
+	}
+	if len(snapshot.Records) != 1 {
+		t.Fatalf("unexpected records: %+v", snapshot.Records)
+	}
+	record := snapshot.Records[0]
+	if record.ShortName != "hxmdemacbook-air" {
+		t.Fatalf("unexpected normalized short name: %+v", record)
+	}
+	if record.FQDN != "hxmdemacbook-air.default.ms.net" {
+		t.Fatalf("unexpected normalized fqdn: %+v", record)
+	}
+}
+
+func TestSanitizeDNSHostnameLabel(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		fallback string
+		want     string
+	}{
+		{name: "strips local suffix", input: "hxmdeMacBook-Air.local", fallback: "device-id", want: "hxmdemacbook-air"},
+		{name: "replaces separators", input: "Mac Book.Pro_01", fallback: "device-id", want: "mac-book-pro-01"},
+		{name: "falls back when empty", input: " .local ", fallback: "dev-123", want: "dev-123"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := sanitizeDNSHostnameLabel(tt.input, tt.fallback); got != tt.want {
+				t.Fatalf("sanitizeDNSHostnameLabel(%q, %q)=%q, want %q", tt.input, tt.fallback, got, tt.want)
+			}
+		})
 	}
 }
 

@@ -13,6 +13,10 @@ func normalizeRenameName(newName string) (string, error) {
 	if len(newName) > 128 {
 		return "", fmt.Errorf("name too long")
 	}
+	newName = sanitizeDNSHostnameLabel(newName, "")
+	if newName == "" {
+		return "", fmt.Errorf("name is empty")
+	}
 	return newName, nil
 }
 
