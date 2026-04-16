@@ -159,7 +159,6 @@ func NewController(cfg *config.Config) (*Controller, error) {
 		nc: NetworkControl{
 			VirtualNetwork:    *NewExpireMap[string, *NetworkInfo](7 * 24 * time.Hour),
 			IPSessions:        *NewExpireMap[IpSessionKey, net.Addr](24 * time.Hour),
-			CipherSessions:    *NewExpireMap[string, struct{}](24 * time.Hour),
 			PunchSessions:     *NewExpireMap[string, *PunchSession](10 * time.Minute),
 			PunchPairCooldown: *NewExpireMap[string, struct{}](20 * time.Second),
 			PunchPairRetry:    *NewExpireMap[string, PunchRetryState](30 * time.Minute),
@@ -262,7 +261,6 @@ func (c *Controller) persistGatewayApprovalLocked() {
 func (c *Controller) Stop() {
 	c.nc.VirtualNetwork.Stop()
 	c.nc.IPSessions.Stop()
-	c.nc.CipherSessions.Stop()
 	c.nc.PunchSessions.Stop()
 	c.nc.PunchPairCooldown.Stop()
 	c.nc.PunchPairRetry.Stop()
@@ -404,7 +402,6 @@ func (c *Controller) HandleRegistrationPacketWithVirtualIP(request *protocol.Pac
 	clientInfo.LastJoin = now
 	netInfo.UpsertClient(virtualIP, clientInfo)
 	c.nc.IPSessions.Delete(NewIpSessionKey(domain, util.Uint32ToIP(virtualIP)))
-	c.nc.TouchCipherSession(remoteAddr)
 	netInfo.Epoch++
 	registrationResp.VirtualIp = virtualIP
 	registrationResp.GatewayAccessGrant = c.buildGatewayAccessGrant(virtualIP, registration.GetDeviceId())
@@ -1563,8 +1560,6 @@ type NetworkControl struct {
 	VirtualNetwork ExpireMap[string, *NetworkInfo]
 	// 用来做地址分配和回收
 	IPSessions ExpireMap[IpSessionKey, net.Addr]
-	// 链路上的加密会话上下文占位（按远端地址跟踪）
-	CipherSessions ExpireMap[string, struct{}]
 	// 打洞会话状态（session_id + attempt）
 	PunchSessions ExpireMap[string, *PunchSession]
 	// 打洞触发冷却（pair key）
@@ -2518,17 +2513,6 @@ func (nc *NetworkControl) TouchClientByIP(srcIP net.IP) uint16 {
 	return 0
 }
 
-func (c *Controller) TouchCipherSession(remoteAddr net.Addr) {
-	c.nc.TouchCipherSession(remoteAddr)
-}
-
-func (nc *NetworkControl) TouchCipherSession(remoteAddr net.Addr) {
-	if remoteAddr == nil {
-		return
-	}
-	nc.CipherSessions.Set(remoteAddr.String(), struct{}{})
-}
-
 func (c *Controller) LeaveByRemoteAddr(remoteAddr net.Addr) {
 	c.nc.LeaveByRemoteAddr(remoteAddr)
 }
@@ -2538,7 +2522,6 @@ func (nc *NetworkControl) LeaveByRemoteAddr(remoteAddr net.Addr) {
 		return
 	}
 	addr := remoteAddr.String()
-	nc.CipherSessions.Delete(addr)
 	now := time.Now().Unix()
 	nc.VirtualNetwork.mutex.Lock()
 	defer nc.VirtualNetwork.mutex.Unlock()

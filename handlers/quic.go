@@ -167,7 +167,6 @@ func handleSession(ctrl *control.Controller, conn *quic.Conn) {
 }
 
 func serveControlSession(ctrl *control.Controller, remoteAddr net.Addr, session framedSession) {
-	ctrl.TouchCipherSession(remoteAddr)
 	defer quicStreams.unregisterRemote(remoteAddr)
 	defer ctrl.LeaveByRemoteAddr(remoteAddr)
 	defer session.Close()
