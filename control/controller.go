@@ -1457,8 +1457,15 @@ func (c *Controller) ReconcilePunchSessions(nowUnixMs int64) {
 				log.Debugf("ignoring stale punch timeout pair update for session_id=%d attempt=%d pair=%s", session.SessionID, session.Attempt, pairKey)
 				continue
 			}
+			// Unblock future punches by releasing the cooldown. The retry-state increment
+			// (attempt counter / backoff) is managed by HandlePunchResultPacket when both
+			// clients' results arrive, which avoids double-counting here.
 			c.nc.PunchPairCooldown.Delete(pairKey)
-			c.updatePunchRetryState(pairKey, session.State)
+			if len(session.Results) < 2 {
+				// Fallback: no client results arrived yet (e.g. client crashed mid-punch).
+				// Update retry state so the next attempt uses the correct backoff.
+				c.updatePunchRetryState(pairKey, session.State)
+			}
 		}
 	}
 }
@@ -1597,6 +1604,14 @@ func hasNewerPunchSessionForPairLocked(data map[string]*PunchSession, session *P
 			continue
 		}
 		if candidate.SessionID == session.SessionID && candidate.Attempt == session.Attempt {
+			continue
+		}
+		// Terminal sessions (from a prior punch series that succeeded/failed/timed out)
+		// must not be treated as newer; after a reconnection the new series resets to
+		// attempt=1 and a stale attempt=N terminal session would incorrectly supersede it.
+		if candidate.State == PunchSessionSuccess ||
+			candidate.State == PunchSessionFailed ||
+			candidate.State == PunchSessionTimeout {
 			continue
 		}
 		if candidate.Attempt > session.Attempt {
