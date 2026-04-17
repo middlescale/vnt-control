@@ -1063,10 +1063,10 @@ func clientsHaveFreshPunchSnapshot(srcClient ClientInfo, targetClient ClientInfo
 	if newestJoin == 0 {
 		return true
 	}
-	if now.Unix()-newestJoin >= int64(punchStatusFreshSnapshotWindow/time.Second) {
-		return true
-	}
-	return srcClient.ClientStatus.UpdateTime >= newestJoin && targetClient.ClientStatus.UpdateTime >= newestJoin
+	// Always enforce the minimum settle window after registration.
+	// A fresh snapshot alone is not sufficient — we must wait for the full settle
+	// window so that both sides have had time to update their endpoint info.
+	return now.Unix()-newestJoin >= int64(punchStatusFreshSnapshotWindow/time.Second)
 }
 
 func (c *Controller) HandlePunchRequestPacket(request *protocol.Packet) (*protocol.Packet, error) {
@@ -1418,7 +1418,13 @@ func (c *Controller) HandlePunchResultPacket(request *protocol.Packet) error {
 		session.RelayFallback = true
 	}
 	if c.isLatestPunchSessionForPair(session) {
-		c.nc.PunchPairCooldown.Delete(pairKey)
+		// Only delete the cooldown for failures/timeouts so rapid re-punch is prevented.
+		// On success, let the 20s TTL expire naturally; the successful P2P route is now
+		// in place and we don't want a follow-up status event to trigger a fresh punch
+		// that would tear it down via clear_direct_paths.
+		if !success {
+			c.nc.PunchPairCooldown.Delete(pairKey)
+		}
 		c.updatePunchRetryState(pairKey, session.State)
 	} else {
 		log.Debugf("ignoring stale punch result pair update for session_id=%d attempt=%d pair=%s", session.SessionID, session.Attempt, pairKey)
