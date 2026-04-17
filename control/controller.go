@@ -406,6 +406,17 @@ func (c *Controller) HandleRegistrationPacketWithVirtualIP(request *protocol.Pac
 	clientInfo.LastJoin = now
 	netInfo.UpsertClient(virtualIP, clientInfo)
 	c.nc.IPSessions.Delete(NewIpSessionKey(domain, util.Uint32ToIP(virtualIP)))
+	// Reset punch retry state for all pairs involving this client so re-registering
+	// clients start fresh (attempt counter is not shared across registration epochs).
+	for peerIP := range netInfo.Clients {
+		if peerIP == virtualIP {
+			continue
+		}
+		for _, key := range []string{punchPairKey(virtualIP, peerIP), punchPairKey(peerIP, virtualIP)} {
+			c.nc.PunchPairRetry.Delete(key)
+			c.nc.PunchPairCooldown.Delete(key)
+		}
+	}
 	netInfo.Epoch++
 	registrationResp.VirtualIp = virtualIP
 	registrationResp.GatewayAccessGrant = c.buildGatewayAccessGrant(virtualIP, registration.GetDeviceId())
