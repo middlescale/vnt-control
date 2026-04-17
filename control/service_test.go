@@ -338,13 +338,22 @@ func TestPunchSessionLifecycleHandlers(t *testing.T) {
 	if !ok || session.State != PunchSessionScheduled {
 		t.Fatalf("unexpected session after request: %+v", session)
 	}
+	var reqAck pb.PunchAck
+	if err := proto.Unmarshal(resp.Payload, &reqAck); err != nil {
+		t.Fatalf("unmarshal request ack failed: %v", err)
+	}
+	if reqAck.GetSourceOwner() != session.SourceOwner || reqAck.GetTargetOwner() != session.TargetOwner {
+		t.Fatalf("request ack owners mismatch: %+v session=%+v", reqAck, session)
+	}
 
 	ack := &pb.PunchAck{
-		SessionId: req.GetSessionId(),
-		Source:    dstReg.GetVirtualIp(),
-		Attempt:   req.GetAttempt(),
-		Accepted:  true,
-		Phase:     pb.PunchSessionPhase_PunchPhaseSending,
+		SessionId:   req.GetSessionId(),
+		Source:      dstReg.GetVirtualIp(),
+		Attempt:     req.GetAttempt(),
+		Accepted:    true,
+		Phase:       pb.PunchSessionPhase_PunchPhaseSending,
+		SourceOwner: session.TargetOwner,
+		TargetOwner: session.SourceOwner,
 	}
 	ackPayload, err := proto.Marshal(ack)
 	if err != nil {
@@ -364,13 +373,15 @@ func TestPunchSessionLifecycleHandlers(t *testing.T) {
 	}
 
 	result := &pb.PunchResult{
-		SessionId: req.GetSessionId(),
-		Source:    dstReg.GetVirtualIp(),
-		Target:    srcReg.GetVirtualIp(),
-		Attempt:   req.GetAttempt(),
-		Code:      pb.PunchResultCode_PunchResultSuccess,
-		Reason:    "ok",
-		Phase:     pb.PunchSessionPhase_PunchPhaseSuccess,
+		SessionId:   req.GetSessionId(),
+		Source:      dstReg.GetVirtualIp(),
+		Target:      srcReg.GetVirtualIp(),
+		Attempt:     req.GetAttempt(),
+		Code:        pb.PunchResultCode_PunchResultSuccess,
+		Reason:      "ok",
+		Phase:       pb.PunchSessionPhase_PunchPhaseSuccess,
+		SourceOwner: session.TargetOwner,
+		TargetOwner: session.SourceOwner,
 	}
 	resultPayload, err := proto.Marshal(result)
 	if err != nil {
@@ -390,13 +401,15 @@ func TestPunchSessionLifecycleHandlers(t *testing.T) {
 	}
 
 	resultPayload, err = proto.Marshal(&pb.PunchResult{
-		SessionId: req.GetSessionId(),
-		Source:    srcReg.GetVirtualIp(),
-		Target:    dstReg.GetVirtualIp(),
-		Attempt:   req.GetAttempt(),
-		Code:      pb.PunchResultCode_PunchResultSuccess,
-		Reason:    "ok",
-		Phase:     pb.PunchSessionPhase_PunchPhaseSuccess,
+		SessionId:   req.GetSessionId(),
+		Source:      srcReg.GetVirtualIp(),
+		Target:      dstReg.GetVirtualIp(),
+		Attempt:     req.GetAttempt(),
+		Code:        pb.PunchResultCode_PunchResultSuccess,
+		Reason:      "ok",
+		Phase:       pb.PunchSessionPhase_PunchPhaseSuccess,
+		SourceOwner: session.SourceOwner,
+		TargetOwner: session.TargetOwner,
 	})
 	if err != nil {
 		t.Fatalf("marshal second punch result failed: %v", err)
@@ -494,6 +507,20 @@ func TestBuildPunchStartPackets(t *testing.T) {
 	if second.AppProto != protocol.AppProtoPunchStart || !second.DstIP.Equal(util.Uint32ToIP(dstReg.GetVirtualIp())) {
 		t.Fatalf("unexpected second punch start packet: %+v", second)
 	}
+	var firstStart pb.PunchStart
+	if err := proto.Unmarshal(first.Payload, &firstStart); err != nil {
+		t.Fatalf("unmarshal first punch start failed: %v", err)
+	}
+	if firstStart.GetSourceOwner() == 0 || firstStart.GetTargetOwner() == 0 {
+		t.Fatalf("expected owner fields in first punch start: %+v", firstStart)
+	}
+	var secondStart pb.PunchStart
+	if err := proto.Unmarshal(second.Payload, &secondStart); err != nil {
+		t.Fatalf("unmarshal second punch start failed: %v", err)
+	}
+	if firstStart.GetSourceOwner() != secondStart.GetTargetOwner() || firstStart.GetTargetOwner() != secondStart.GetSourceOwner() {
+		t.Fatalf("expected mirrored owners in punch starts: first=%+v second=%+v", firstStart, secondStart)
+	}
 }
 
 func TestHandlePunchAckAndResultInitializeSessionMaps(t *testing.T) {
@@ -570,6 +597,245 @@ func TestHandlePunchAckAndResultInitializeSessionMaps(t *testing.T) {
 	}
 }
 
+func TestHandlePunchAckRejectDoesNotAdvanceRetryForStaleAttempt(t *testing.T) {
+	ctrl := newTestController(t)
+	defer ctrl.Stop()
+
+	srcIP := util.IpToUint32(net.ParseIP("10.26.0.2"))
+	dstIP := util.IpToUint32(net.ParseIP("10.26.0.3"))
+	pairKey := punchPairKey(srcIP, dstIP)
+	ctrl.nc.PunchPairRetry.Set(pairKey, PunchRetryState{Attempt: 2, NextAllowedUnixMs: 12345})
+	ctrl.nc.PunchPairCooldown.Set(pairKey, struct{}{})
+	ctrl.nc.PunchSessions.Set(punchSessionKey(5001, 1), &PunchSession{
+		SessionID:      5001,
+		Source:         srcIP,
+		Target:         dstIP,
+		Attempt:        1,
+		DeadlineUnixMs: time.Now().Add(5 * time.Second).UnixMilli(),
+		State:          PunchSessionSending,
+		RequestedAt:    time.Now().Add(-2 * time.Second).Unix(),
+	})
+	ctrl.nc.PunchSessions.Set(punchSessionKey(5002, 2), &PunchSession{
+		SessionID:      5002,
+		Source:         srcIP,
+		Target:         dstIP,
+		Attempt:        2,
+		DeadlineUnixMs: time.Now().Add(5 * time.Second).UnixMilli(),
+		State:          PunchSessionSending,
+		RequestedAt:    time.Now().Unix(),
+	})
+
+	ackPayload, err := proto.Marshal(&pb.PunchAck{
+		SessionId: 5001,
+		Source:    dstIP,
+		Attempt:   1,
+		Accepted:  false,
+		Phase:     pb.PunchSessionPhase_PunchPhaseFailed,
+		Reason:    "superseded",
+	})
+	if err != nil {
+		t.Fatalf("marshal punch ack failed: %v", err)
+	}
+	if err := ctrl.HandlePunchAckPacket(&protocol.Packet{
+		Proto:    protocol.ProtocolService,
+		AppProto: protocol.AppProtoPunchAck,
+		SrcIP:    util.Uint32ToIP(dstIP),
+		Payload:  ackPayload,
+	}); err != nil {
+		t.Fatalf("HandlePunchAckPacket failed: %v", err)
+	}
+
+	retry, ok := ctrl.nc.PunchPairRetry.Get(pairKey)
+	if !ok {
+		t.Fatalf("retry state missing")
+	}
+	if retry.Attempt != 2 || retry.NextAllowedUnixMs != 12345 {
+		t.Fatalf("stale reject should not advance retry: %+v", retry)
+	}
+	if _, ok := ctrl.nc.PunchPairCooldown.Get(pairKey); !ok {
+		t.Fatalf("stale reject should not clear cooldown")
+	}
+}
+
+func TestHandlePunchAckIgnoredWhenRegistrationOwnerChanged(t *testing.T) {
+	ctrl := newTestController(t)
+	defer ctrl.Stop()
+	srcReg := mustRegister(t, ctrl, newBaseRegisterReq("dev-a", "node-a"), &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1111})
+	dstReg := mustRegister(t, ctrl, newBaseRegisterReq("dev-b", "node-b"), &net.UDPAddr{IP: net.ParseIP("1.1.1.2"), Port: 2222})
+	srcClient, ok := ctrl.nc.FindClientByVirtualIP(srcReg.GetVirtualIp())
+	if !ok {
+		t.Fatalf("source client missing")
+	}
+	dstClient, ok := ctrl.nc.FindClientByVirtualIP(dstReg.GetVirtualIp())
+	if !ok {
+		t.Fatalf("target client missing")
+	}
+	ctrl.nc.PunchSessions.Set(punchSessionKey(6001, 1), &PunchSession{
+		SessionID:      6001,
+		Source:         srcReg.GetVirtualIp(),
+		Target:         dstReg.GetVirtualIp(),
+		SourceOwner:    srcClient.RegistrationEpoch,
+		TargetOwner:    dstClient.RegistrationEpoch,
+		Attempt:        1,
+		DeadlineUnixMs: time.Now().Add(5 * time.Second).UnixMilli(),
+		State:          PunchSessionSending,
+		RequestedAt:    time.Now().Unix(),
+	})
+	ctrl.nc.UpdateClientByVirtualIP(dstReg.GetVirtualIp(), func(client *ClientInfo) {
+		client.RegistrationEpoch++
+	})
+
+	ackPayload, err := proto.Marshal(&pb.PunchAck{
+		SessionId: 6001,
+		Source:    dstReg.GetVirtualIp(),
+		Attempt:   1,
+		Accepted:  true,
+		Phase:     pb.PunchSessionPhase_PunchPhaseSending,
+	})
+	if err != nil {
+		t.Fatalf("marshal punch ack failed: %v", err)
+	}
+	if err := ctrl.HandlePunchAckPacket(&protocol.Packet{
+		Proto:    protocol.ProtocolService,
+		AppProto: protocol.AppProtoPunchAck,
+		SrcIP:    util.Uint32ToIP(dstReg.GetVirtualIp()),
+		Payload:  ackPayload,
+	}); err != nil {
+		t.Fatalf("HandlePunchAckPacket failed: %v", err)
+	}
+	session, ok := ctrl.nc.FindPunchSession(6001, 1)
+	if !ok {
+		t.Fatalf("session not found")
+	}
+	if len(session.Ack) != 0 {
+		t.Fatalf("owner-mismatched ack should be ignored: %+v", session.Ack)
+	}
+	if session.State != PunchSessionSending {
+		t.Fatalf("owner-mismatched ack should not advance state: %s", session.State)
+	}
+}
+
+func TestHandlePunchAckIgnoredWhenPacketOwnersMismatch(t *testing.T) {
+	ctrl := newTestController(t)
+	defer ctrl.Stop()
+	srcReg := mustRegister(t, ctrl, newBaseRegisterReq("dev-a", "node-a"), &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1111})
+	dstReg := mustRegister(t, ctrl, newBaseRegisterReq("dev-b", "node-b"), &net.UDPAddr{IP: net.ParseIP("1.1.1.2"), Port: 2222})
+	srcClient, ok := ctrl.nc.FindClientByVirtualIP(srcReg.GetVirtualIp())
+	if !ok {
+		t.Fatalf("source client missing")
+	}
+	dstClient, ok := ctrl.nc.FindClientByVirtualIP(dstReg.GetVirtualIp())
+	if !ok {
+		t.Fatalf("target client missing")
+	}
+	ctrl.nc.PunchSessions.Set(punchSessionKey(6002, 1), &PunchSession{
+		SessionID:      6002,
+		Source:         srcReg.GetVirtualIp(),
+		Target:         dstReg.GetVirtualIp(),
+		SourceOwner:    srcClient.RegistrationEpoch,
+		TargetOwner:    dstClient.RegistrationEpoch,
+		Attempt:        1,
+		DeadlineUnixMs: time.Now().Add(5 * time.Second).UnixMilli(),
+		State:          PunchSessionSending,
+		RequestedAt:    time.Now().Unix(),
+	})
+
+	ackPayload, err := proto.Marshal(&pb.PunchAck{
+		SessionId:   6002,
+		Source:      dstReg.GetVirtualIp(),
+		Attempt:     1,
+		Accepted:    true,
+		Phase:       pb.PunchSessionPhase_PunchPhaseSending,
+		SourceOwner: dstClient.RegistrationEpoch + 1,
+		TargetOwner: srcClient.RegistrationEpoch,
+	})
+	if err != nil {
+		t.Fatalf("marshal punch ack failed: %v", err)
+	}
+	if err := ctrl.HandlePunchAckPacket(&protocol.Packet{
+		Proto:    protocol.ProtocolService,
+		AppProto: protocol.AppProtoPunchAck,
+		SrcIP:    util.Uint32ToIP(dstReg.GetVirtualIp()),
+		Payload:  ackPayload,
+	}); err != nil {
+		t.Fatalf("HandlePunchAckPacket failed: %v", err)
+	}
+	session, ok := ctrl.nc.FindPunchSession(6002, 1)
+	if !ok {
+		t.Fatalf("session not found")
+	}
+	if len(session.Ack) != 0 {
+		t.Fatalf("packet-owner-mismatched ack should be ignored: %+v", session.Ack)
+	}
+	if session.State != PunchSessionSending {
+		t.Fatalf("packet-owner-mismatched ack should not advance state: %s", session.State)
+	}
+}
+
+func TestHandlePunchResultIgnoredWhenPacketOwnersMismatch(t *testing.T) {
+	ctrl := newTestController(t)
+	defer ctrl.Stop()
+	srcReg := mustRegister(t, ctrl, newBaseRegisterReq("dev-a", "node-a"), &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1111})
+	dstReg := mustRegister(t, ctrl, newBaseRegisterReq("dev-b", "node-b"), &net.UDPAddr{IP: net.ParseIP("1.1.1.2"), Port: 2222})
+	srcClient, ok := ctrl.nc.FindClientByVirtualIP(srcReg.GetVirtualIp())
+	if !ok {
+		t.Fatalf("source client missing")
+	}
+	dstClient, ok := ctrl.nc.FindClientByVirtualIP(dstReg.GetVirtualIp())
+	if !ok {
+		t.Fatalf("target client missing")
+	}
+	ctrl.nc.PunchSessions.Set(punchSessionKey(6003, 1), &PunchSession{
+		SessionID:      6003,
+		Source:         srcReg.GetVirtualIp(),
+		Target:         dstReg.GetVirtualIp(),
+		SourceOwner:    srcClient.RegistrationEpoch,
+		TargetOwner:    dstClient.RegistrationEpoch,
+		Attempt:        1,
+		DeadlineUnixMs: time.Now().Add(5 * time.Second).UnixMilli(),
+		State:          PunchSessionWaiting,
+		RequestedAt:    time.Now().Unix(),
+		Ack: map[uint32]bool{
+			srcReg.GetVirtualIp(): true,
+			dstReg.GetVirtualIp(): true,
+		},
+		Results: make(map[uint32]*pb.PunchResult),
+	})
+
+	resultPayload, err := proto.Marshal(&pb.PunchResult{
+		SessionId:   6003,
+		Source:      dstReg.GetVirtualIp(),
+		Target:      srcReg.GetVirtualIp(),
+		Attempt:     1,
+		Code:        pb.PunchResultCode_PunchResultSuccess,
+		Reason:      "ok",
+		Phase:       pb.PunchSessionPhase_PunchPhaseSuccess,
+		SourceOwner: dstClient.RegistrationEpoch + 1,
+		TargetOwner: srcClient.RegistrationEpoch,
+	})
+	if err != nil {
+		t.Fatalf("marshal punch result failed: %v", err)
+	}
+	if err := ctrl.HandlePunchResultPacket(&protocol.Packet{
+		Proto:    protocol.ProtocolService,
+		AppProto: protocol.AppProtoPunchResult,
+		SrcIP:    util.Uint32ToIP(dstReg.GetVirtualIp()),
+		Payload:  resultPayload,
+	}); err != nil {
+		t.Fatalf("HandlePunchResultPacket failed: %v", err)
+	}
+	session, ok := ctrl.nc.FindPunchSession(6003, 1)
+	if !ok {
+		t.Fatalf("session not found")
+	}
+	if len(session.Results) != 0 {
+		t.Fatalf("packet-owner-mismatched result should be ignored: %+v", session.Results)
+	}
+	if session.State != PunchSessionWaiting {
+		t.Fatalf("packet-owner-mismatched result should not advance state: %s", session.State)
+	}
+}
+
 func TestBuildPunchStartPacketsFromStatus(t *testing.T) {
 	ctrl := newTestController(t)
 	defer ctrl.Stop()
@@ -606,6 +872,7 @@ func TestBuildPunchStartPacketsFromStatus(t *testing.T) {
 	if err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(dstReg.GetVirtualIp()), Payload: dstPayload}); err != nil {
 		t.Fatalf("update dst status failed: %v", err)
 	}
+	ageClientsForStatusTriggeredPunch(ctrl, srcReg.GetVirtualIp(), dstReg.GetVirtualIp())
 	startPackets, err := ctrl.BuildPunchStartPacketsFromStatus(&protocol.Packet{
 		Proto: protocol.ProtocolService,
 		SrcIP: util.Uint32ToIP(srcReg.GetVirtualIp()),
@@ -693,6 +960,7 @@ func TestBuildPunchStartPacketsFromStatusSkipsExistingMutualP2P(t *testing.T) {
 	if err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(dstReg.GetVirtualIp()), Payload: dstPayload}); err != nil {
 		t.Fatalf("update dst status failed: %v", err)
 	}
+	ageClientsForStatusTriggeredPunch(ctrl, srcReg.GetVirtualIp(), dstReg.GetVirtualIp())
 	startPackets, err := ctrl.BuildPunchStartPacketsFromStatus(&protocol.Packet{
 		Proto: protocol.ProtocolService,
 		SrcIP: util.Uint32ToIP(srcReg.GetVirtualIp()),
@@ -741,6 +1009,7 @@ func TestBuildPunchStartPacketsFromStatusIncludesLocalEndpointsForPrivateRemoteA
 	if err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(dstReg.GetVirtualIp()), Payload: dstPayload}); err != nil {
 		t.Fatalf("update dst status failed: %v", err)
 	}
+	ageClientsForStatusTriggeredPunch(ctrl, srcReg.GetVirtualIp(), dstReg.GetVirtualIp())
 	startPackets, err := ctrl.BuildPunchStartPacketsFromStatus(&protocol.Packet{
 		Proto: protocol.ProtocolService,
 		SrcIP: util.Uint32ToIP(srcReg.GetVirtualIp()),
@@ -806,6 +1075,7 @@ func TestBuildPunchStartPacketsFromStatusIncludesIPv6Endpoints(t *testing.T) {
 	if err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(dstReg.GetVirtualIp()), Payload: dstPayload}); err != nil {
 		t.Fatalf("update dst status failed: %v", err)
 	}
+	ageClientsForStatusTriggeredPunch(ctrl, srcReg.GetVirtualIp(), dstReg.GetVirtualIp())
 	startPackets, err := ctrl.BuildPunchStartPacketsFromStatus(&protocol.Packet{
 		Proto: protocol.ProtocolService,
 		SrcIP: util.Uint32ToIP(srcReg.GetVirtualIp()),
@@ -867,6 +1137,7 @@ func TestBuildPunchStartPacketsFromStatusPrefersExplicitEndpointPairs(t *testing
 	if err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(dstReg.GetVirtualIp()), Payload: dstPayload}); err != nil {
 		t.Fatalf("update dst status failed: %v", err)
 	}
+	ageClientsForStatusTriggeredPunch(ctrl, srcReg.GetVirtualIp(), dstReg.GetVirtualIp())
 	startPackets, err := ctrl.BuildPunchStartPacketsFromStatus(&protocol.Packet{
 		Proto: protocol.ProtocolService,
 		SrcIP: util.Uint32ToIP(srcReg.GetVirtualIp()),
@@ -934,6 +1205,58 @@ func TestReconcilePunchSessionsTimeoutMarksFallback(t *testing.T) {
 	}
 }
 
+func TestReconcilePunchSessionsIgnoresStaleTimeoutForRetryState(t *testing.T) {
+	ctrl := newTestController(t)
+	defer ctrl.Stop()
+	srcIP := util.IpToUint32(net.ParseIP("10.26.0.2"))
+	dstIP := util.IpToUint32(net.ParseIP("10.26.0.3"))
+	pairKey := punchPairKey(srcIP, dstIP)
+	ctrl.nc.PunchPairRetry.Set(pairKey, PunchRetryState{Attempt: 1, NextAllowedUnixMs: 22222})
+	ctrl.nc.PunchPairCooldown.Set(pairKey, struct{}{})
+	ctrl.nc.PunchSessions.Set(punchSessionKey(9101, 1), &PunchSession{
+		SessionID:      9101,
+		Source:         srcIP,
+		Target:         dstIP,
+		Attempt:        1,
+		DeadlineUnixMs: time.Now().Add(-time.Second).UnixMilli(),
+		State:          PunchSessionWaiting,
+		RequestedAt:    time.Now().Add(-2 * time.Second).Unix(),
+		Ack:            map[uint32]bool{},
+		Results:        map[uint32]*pb.PunchResult{},
+	})
+	ctrl.nc.PunchSessions.Set(punchSessionKey(9102, 2), &PunchSession{
+		SessionID:      9102,
+		Source:         srcIP,
+		Target:         dstIP,
+		Attempt:        2,
+		DeadlineUnixMs: time.Now().Add(5 * time.Second).UnixMilli(),
+		State:          PunchSessionSending,
+		RequestedAt:    time.Now().Unix(),
+		Ack:            map[uint32]bool{},
+		Results:        map[uint32]*pb.PunchResult{},
+	})
+
+	ctrl.ReconcilePunchSessions(time.Now().UnixMilli())
+
+	retry, ok := ctrl.nc.PunchPairRetry.Get(pairKey)
+	if !ok {
+		t.Fatalf("retry state missing")
+	}
+	if retry.Attempt != 1 || retry.NextAllowedUnixMs != 22222 {
+		t.Fatalf("stale timeout should not advance retry: %+v", retry)
+	}
+	if _, ok := ctrl.nc.PunchPairCooldown.Get(pairKey); !ok {
+		t.Fatalf("stale timeout should not clear cooldown")
+	}
+	session, ok := ctrl.nc.FindPunchSession(9101, 1)
+	if !ok {
+		t.Fatalf("stale session missing")
+	}
+	if session.State != PunchSessionTimeout {
+		t.Fatalf("stale session should still become timeout, got %s", session.State)
+	}
+}
+
 func TestBuildPunchStartPacketsFromStatusHonorsRetryPolicy(t *testing.T) {
 	ctrl := newTestController(t)
 	defer ctrl.Stop()
@@ -967,6 +1290,7 @@ func TestBuildPunchStartPacketsFromStatusHonorsRetryPolicy(t *testing.T) {
 	if err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(dstReg.GetVirtualIp()), Payload: dstPayload}); err != nil {
 		t.Fatalf("update dst status failed: %v", err)
 	}
+	ageClientsForStatusTriggeredPunch(ctrl, srcReg.GetVirtualIp(), dstReg.GetVirtualIp())
 	pairKey := punchPairKey(srcReg.GetVirtualIp(), dstReg.GetVirtualIp())
 	ctrl.nc.PunchPairRetry.Set(pairKey, PunchRetryState{
 		Attempt:           maxPunchAttemptsPerPair,
@@ -1039,6 +1363,7 @@ func TestFailedRegistrationClearsStalePunchCandidateState(t *testing.T) {
 	if err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(dstReg.GetVirtualIp()), Payload: dstPayload}); err != nil {
 		t.Fatalf("update dst status failed: %v", err)
 	}
+	ageClientsForStatusTriggeredPunch(ctrl, srcReg.GetVirtualIp(), dstReg.GetVirtualIp())
 
 	delete(ctrl.um.authedDevices, "ms.net|dev-b")
 	if _, _, err := ctrl.HandleRegistrationPacketWithVirtualIP(newRegistrationPacket(t, dstReq), dstRemote); err == nil {
@@ -1055,6 +1380,167 @@ func TestFailedRegistrationClearsStalePunchCandidateState(t *testing.T) {
 	}
 	if len(packets) != 0 {
 		t.Fatalf("expected stale unauthenticated peer to be excluded from punch, got %d packets", len(packets))
+	}
+}
+
+func TestBuildPunchStartPacketsFromStatusDefersFreshRestartUntilSnapshotSettles(t *testing.T) {
+	ctrl := newTestController(t)
+	defer ctrl.Stop()
+	srcReg := mustRegister(t, ctrl, newBaseRegisterReq("dev-a", "node-a"), &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1111})
+	dstReg := mustRegister(t, ctrl, newBaseRegisterReq("dev-b", "node-b"), &net.UDPAddr{IP: net.ParseIP("1.1.1.2"), Port: 2222})
+	srcStatus := &pb.ClientStatusInfo{
+		Source:        srcReg.GetVirtualIp(),
+		NatType:       pb.PunchNatType_Cone,
+		LocalUdpPorts: []uint32{1111},
+		PublicUdpEndpoints: []*pb.PunchEndpoint{
+			{Ip: util.IpToUint32(net.ParseIP("8.8.8.8")), Port: 30001},
+		},
+	}
+	dstStatus := &pb.ClientStatusInfo{
+		Source:        dstReg.GetVirtualIp(),
+		NatType:       pb.PunchNatType_Cone,
+		LocalUdpPorts: []uint32{2222},
+		PublicUdpEndpoints: []*pb.PunchEndpoint{
+			{Ip: util.IpToUint32(net.ParseIP("9.9.9.9")), Port: 30002},
+		},
+	}
+	srcPayload, err := proto.Marshal(srcStatus)
+	if err != nil {
+		t.Fatalf("marshal src status failed: %v", err)
+	}
+	dstPayload, err := proto.Marshal(dstStatus)
+	if err != nil {
+		t.Fatalf("marshal dst status failed: %v", err)
+	}
+	if err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(srcReg.GetVirtualIp()), Payload: srcPayload}); err != nil {
+		t.Fatalf("update src status failed: %v", err)
+	}
+	if err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(dstReg.GetVirtualIp()), Payload: dstPayload}); err != nil {
+		t.Fatalf("update dst status failed: %v", err)
+	}
+	markClientJoinNow(ctrl, srcReg.GetVirtualIp())
+	markClientStatusOld(ctrl, dstReg.GetVirtualIp(), 3)
+	packets, err := ctrl.BuildPunchStartPacketsFromStatus(&protocol.Packet{
+		Proto: protocol.ProtocolService,
+		SrcIP: util.Uint32ToIP(srcReg.GetVirtualIp()),
+		DstIP: util.Uint32ToIP(srcReg.GetVirtualGateway()),
+	})
+	if err != nil {
+		t.Fatalf("BuildPunchStartPacketsFromStatus failed: %v", err)
+	}
+	if len(packets) != 0 {
+		t.Fatalf("expected fresh restart settle window to suppress punch, got %d packets", len(packets))
+	}
+}
+
+func TestBuildPunchStartPacketsFromStatusRejectsStaleStatusOwner(t *testing.T) {
+	ctrl := newTestController(t)
+	defer ctrl.Stop()
+	srcReg := mustRegister(t, ctrl, newBaseRegisterReq("dev-a", "node-a"), &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1111})
+	dstReg := mustRegister(t, ctrl, newBaseRegisterReq("dev-b", "node-b"), &net.UDPAddr{IP: net.ParseIP("1.1.1.2"), Port: 2222})
+	srcStatus := &pb.ClientStatusInfo{
+		Source:        srcReg.GetVirtualIp(),
+		NatType:       pb.PunchNatType_Cone,
+		LocalUdpPorts: []uint32{1111},
+		PublicUdpEndpoints: []*pb.PunchEndpoint{
+			{Ip: util.IpToUint32(net.ParseIP("8.8.8.8")), Port: 30001},
+		},
+	}
+	dstStatus := &pb.ClientStatusInfo{
+		Source:        dstReg.GetVirtualIp(),
+		NatType:       pb.PunchNatType_Cone,
+		LocalUdpPorts: []uint32{2222},
+		PublicUdpEndpoints: []*pb.PunchEndpoint{
+			{Ip: util.IpToUint32(net.ParseIP("9.9.9.9")), Port: 30002},
+		},
+	}
+	srcPayload, err := proto.Marshal(srcStatus)
+	if err != nil {
+		t.Fatalf("marshal src status failed: %v", err)
+	}
+	dstPayload, err := proto.Marshal(dstStatus)
+	if err != nil {
+		t.Fatalf("marshal dst status failed: %v", err)
+	}
+	if err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(srcReg.GetVirtualIp()), Payload: srcPayload}); err != nil {
+		t.Fatalf("update src status failed: %v", err)
+	}
+	if err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(dstReg.GetVirtualIp()), Payload: dstPayload}); err != nil {
+		t.Fatalf("update dst status failed: %v", err)
+	}
+	ageClientsForStatusTriggeredPunch(ctrl, srcReg.GetVirtualIp(), dstReg.GetVirtualIp())
+	bumpClientRegistrationEpoch(ctrl, dstReg.GetVirtualIp())
+
+	packets, err := ctrl.BuildPunchStartPacketsFromStatus(&protocol.Packet{
+		Proto: protocol.ProtocolService,
+		SrcIP: util.Uint32ToIP(srcReg.GetVirtualIp()),
+		DstIP: util.Uint32ToIP(srcReg.GetVirtualGateway()),
+	})
+	if err != nil {
+		t.Fatalf("BuildPunchStartPacketsFromStatus failed: %v", err)
+	}
+	if len(packets) != 0 {
+		t.Fatalf("expected stale status owner to suppress punch, got %d packets", len(packets))
+	}
+}
+
+func ageClientsForStatusTriggeredPunch(ctrl *Controller, ips ...uint32) {
+	ctrl.nc.VirtualNetwork.mutex.Lock()
+	defer ctrl.nc.VirtualNetwork.mutex.Unlock()
+	aged := time.Now().Add(-punchStatusFreshSnapshotWindow - time.Second).Unix()
+	for _, network := range ctrl.nc.VirtualNetwork.data {
+		for _, ip := range ips {
+			client, ok := network.Clients[ip]
+			if !ok {
+				continue
+			}
+			client.LastJoin = aged
+			network.UpsertClient(ip, client)
+		}
+	}
+}
+
+func markClientJoinNow(ctrl *Controller, ip uint32) {
+	ctrl.nc.VirtualNetwork.mutex.Lock()
+	defer ctrl.nc.VirtualNetwork.mutex.Unlock()
+	now := time.Now().Unix()
+	for _, network := range ctrl.nc.VirtualNetwork.data {
+		client, ok := network.Clients[ip]
+		if !ok {
+			continue
+		}
+		client.LastJoin = now
+		if client.ClientStatus != nil {
+			client.ClientStatus.UpdateTime = now
+		}
+		network.UpsertClient(ip, client)
+	}
+}
+
+func markClientStatusOld(ctrl *Controller, ip uint32, ageSeconds int64) {
+	ctrl.nc.VirtualNetwork.mutex.Lock()
+	defer ctrl.nc.VirtualNetwork.mutex.Unlock()
+	now := time.Now().Unix() - ageSeconds
+	for _, network := range ctrl.nc.VirtualNetwork.data {
+		client, ok := network.Clients[ip]
+		if !ok || client.ClientStatus == nil {
+			continue
+		}
+		client.ClientStatus.UpdateTime = now
+		network.UpsertClient(ip, client)
+	}
+}
+
+func bumpClientRegistrationEpoch(ctrl *Controller, ip uint32) {
+	ctrl.nc.VirtualNetwork.mutex.Lock()
+	defer ctrl.nc.VirtualNetwork.mutex.Unlock()
+	for _, network := range ctrl.nc.VirtualNetwork.data {
+		client, ok := network.Clients[ip]
+		if !ok {
+			continue
+		}
+		client.RegistrationEpoch++
+		network.UpsertClient(ip, client)
 	}
 }
 
@@ -1301,6 +1787,9 @@ func TestHandlePullDeviceListPacket(t *testing.T) {
 	if string(list.GetDeviceInfoList()[0].GetOnlineKxPub()) != string(testOnlineKxPub("dev-a")) {
 		t.Fatalf("unexpected online kx pub in list: %+v", list.GetDeviceInfoList()[0])
 	}
+	if list.GetDeviceInfoList()[0].GetRegistrationEpoch() != resp1.GetRegistrationEpoch() {
+		t.Fatalf("unexpected registration epoch in list: %+v", list.GetDeviceInfoList()[0])
+	}
 }
 
 func TestBuildPushDeviceListPacketsForPeerChange(t *testing.T) {
@@ -1341,6 +1830,9 @@ func TestBuildPushDeviceListPacketsForPeerChange(t *testing.T) {
 	item := list.GetDeviceInfoList()[0]
 	if item.GetVirtualIp() != resp2.GetVirtualIp() || item.GetDeviceId() != "dev-b" {
 		t.Fatalf("unexpected device info item: %+v", item)
+	}
+	if item.GetRegistrationEpoch() != resp2.GetRegistrationEpoch() {
+		t.Fatalf("unexpected registration epoch in item: %+v", item)
 	}
 }
 

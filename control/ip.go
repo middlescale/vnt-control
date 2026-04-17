@@ -61,6 +61,7 @@ func (n *NetworkInfo) FindClientIPByDeviceID(deviceID string) uint32 {
 type ClientInfo struct {
 	DeviceId           string
 	Name               string
+	RegistrationEpoch  uint64
 	ControlOnline      bool
 	ControlLastSeen    int64 // Unix时间戳 (timestamp)
 	DataPlaneReachable bool
@@ -87,5 +88,6 @@ type ClientStatusInfo struct {
 	DownStream         uint64
 	IsCone             bool
 	PunchTriggerReason string
+	RegistrationEpoch  uint64
 	UpdateTime         int64 // Unix时间戳 (timestamp)
 }

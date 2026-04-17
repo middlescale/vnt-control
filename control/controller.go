@@ -104,6 +104,7 @@ const maxPunchAttemptsPerPair = 3
 const gatewayNodeLease = 90 * time.Second
 const deviceAuthChallengeTTL = 60 * time.Second
 const gatewayReportFreshnessWindow = 2 * time.Minute
+const punchStatusFreshSnapshotWindow = 2 * time.Second
 
 type PunchSessionState string
 
@@ -120,6 +121,8 @@ type PunchSession struct {
 	SessionID       uint64
 	Source          uint32
 	Target          uint32
+	SourceOwner     uint64
+	TargetOwner     uint64
 	Attempt         uint32
 	AttemptBudget   uint32
 	DeadlineUnixMs  int64
@@ -391,6 +394,7 @@ func (c *Controller) HandleRegistrationPacketWithVirtualIP(request *protocol.Pac
 	clientInfo.Name = displayName
 	clientInfo.Version = registration.GetVersion()
 	clientInfo.Capabilities = negotiatedCapabilities
+	clientInfo.RegistrationEpoch++
 	clientInfo.ControlOnline = true
 	clientInfo.ControlLastSeen = now
 	clientInfo.DataPlaneReachable = false
@@ -406,6 +410,7 @@ func (c *Controller) HandleRegistrationPacketWithVirtualIP(request *protocol.Pac
 	registrationResp.VirtualIp = virtualIP
 	registrationResp.GatewayAccessGrant = c.buildGatewayAccessGrant(virtualIP, registration.GetDeviceId())
 	registrationResp.Epoch = uint32(netInfo.Epoch)
+	registrationResp.RegistrationEpoch = clientInfo.RegistrationEpoch
 	registrationResp.DeviceInfoList = buildDeviceInfoList(netInfo.Clients, virtualIP)
 
 	respBytes, err := proto.Marshal(registrationResp)
@@ -861,6 +866,7 @@ func (c *Controller) HandleClientStatusInfoPacket(request *protocol.Packet) erro
 		if !ok {
 			continue
 		}
+		clientStatus.RegistrationEpoch = client.RegistrationEpoch
 		client.ControlOnline = true
 		client.ControlLastSeen = now
 		client.DataPlaneReachable = reachable
@@ -890,6 +896,9 @@ func (c *Controller) BuildPunchStartPacketsFromStatus(request *protocol.Packet) 
 				continue
 			}
 			if clientsHaveMutualP2PPath(srcClient, srcIP, targetClient, targetIP) {
+				continue
+			}
+			if !clientsHaveFreshPunchSnapshot(srcClient, targetClient, now) {
 				continue
 			}
 			pairKey := punchPairKey(srcIP, targetIP)
@@ -931,6 +940,8 @@ func (c *Controller) BuildPunchStartPacketsFromStatus(request *protocol.Packet) 
 				SessionID:       sessionID,
 				Source:          srcIP,
 				Target:          targetIP,
+				SourceOwner:     srcClient.RegistrationEpoch,
+				TargetOwner:     targetClient.RegistrationEpoch,
 				Attempt:         attempt,
 				AttemptBudget:   attemptBudget,
 				DeadlineUnixMs:  deadline,
@@ -941,11 +952,14 @@ func (c *Controller) BuildPunchStartPacketsFromStatus(request *protocol.Packet) 
 				Ack:             make(map[uint32]bool),
 				Results:         make(map[uint32]*pb.PunchResult),
 			}
+			c.supersedeOlderPunchSessions(session)
 			c.nc.PunchSessions.Set(punchSessionKey(sessionID, attempt), session)
 			sourceStart := &pb.PunchStart{
 				SessionId:               sessionID,
 				Source:                  srcIP,
 				Target:                  targetIP,
+				SourceOwner:             srcClient.RegistrationEpoch,
+				TargetOwner:             targetClient.RegistrationEpoch,
 				PeerEndpoints:           targetEndpoints,
 				Attempt:                 attempt,
 				TimeoutMs:               3000,
@@ -958,6 +972,8 @@ func (c *Controller) BuildPunchStartPacketsFromStatus(request *protocol.Packet) 
 				SessionId:               sessionID,
 				Source:                  targetIP,
 				Target:                  srcIP,
+				SourceOwner:             targetClient.RegistrationEpoch,
+				TargetOwner:             srcClient.RegistrationEpoch,
 				PeerEndpoints:           sourceEndpoints,
 				Attempt:                 attempt,
 				TimeoutMs:               3000,
@@ -1018,6 +1034,30 @@ func clientsHaveMutualP2PPath(srcClient ClientInfo, srcIP uint32, targetClient C
 	return clientReportsDirectPeer(srcClient, targetIP) && clientReportsDirectPeer(targetClient, srcIP)
 }
 
+func clientsHaveFreshPunchSnapshot(srcClient ClientInfo, targetClient ClientInfo, now time.Time) bool {
+	if srcClient.ClientStatus == nil || targetClient.ClientStatus == nil {
+		return false
+	}
+	if srcClient.ClientStatus.RegistrationEpoch != srcClient.RegistrationEpoch ||
+		targetClient.ClientStatus.RegistrationEpoch != targetClient.RegistrationEpoch {
+		return false
+	}
+	if srcClient.ClientStatus.UpdateTime < srcClient.LastJoin || targetClient.ClientStatus.UpdateTime < targetClient.LastJoin {
+		return false
+	}
+	newestJoin := srcClient.LastJoin
+	if targetClient.LastJoin > newestJoin {
+		newestJoin = targetClient.LastJoin
+	}
+	if newestJoin == 0 {
+		return true
+	}
+	if now.Unix()-newestJoin >= int64(punchStatusFreshSnapshotWindow/time.Second) {
+		return true
+	}
+	return srcClient.ClientStatus.UpdateTime >= newestJoin && targetClient.ClientStatus.UpdateTime >= newestJoin
+}
+
 func (c *Controller) HandlePunchRequestPacket(request *protocol.Packet) (*protocol.Packet, error) {
 	var req pb.PunchRequest
 	if err := proto.Unmarshal(request.Payload, &req); err != nil {
@@ -1033,11 +1073,21 @@ func (c *Controller) HandlePunchRequestPacket(request *protocol.Packet) (*protoc
 	if _, ok := c.nc.FindClientByVirtualIP(req.GetTarget()); !ok {
 		return nil, fmt.Errorf("punch target %s not registered", util.Uint32ToIP(req.GetTarget()))
 	}
+	sourceClient, ok := c.nc.FindClientByVirtualIP(sourceIP)
+	if !ok {
+		return nil, fmt.Errorf("punch source %s not registered", util.Uint32ToIP(sourceIP))
+	}
+	targetClient, ok := c.nc.FindClientByVirtualIP(req.GetTarget())
+	if !ok {
+		return nil, fmt.Errorf("punch target %s not registered", util.Uint32ToIP(req.GetTarget()))
+	}
 	now := time.Now().Unix()
 	session := &PunchSession{
 		SessionID:       req.GetSessionId(),
 		Source:          sourceIP,
 		Target:          req.GetTarget(),
+		SourceOwner:     sourceClient.RegistrationEpoch,
+		TargetOwner:     targetClient.RegistrationEpoch,
 		Attempt:         req.GetAttempt(),
 		AttemptBudget:   req.GetAttemptBudget(),
 		DeadlineUnixMs:  req.GetDeadlineUnixMs(),
@@ -1054,13 +1104,16 @@ func (c *Controller) HandlePunchRequestPacket(request *protocol.Packet) (*protoc
 	if session.AttemptBudget == 0 {
 		session.AttemptBudget = maxPunchAttemptsPerPair
 	}
+	c.supersedeOlderPunchSessions(session)
 	c.nc.PunchSessions.Set(punchSessionKey(req.GetSessionId(), req.GetAttempt()), session)
 	ack := &pb.PunchAck{
-		SessionId: req.GetSessionId(),
-		Source:    sourceIP,
-		Attempt:   req.GetAttempt(),
-		Accepted:  true,
-		Phase:     pb.PunchSessionPhase_PunchPhaseScheduled,
+		SessionId:   req.GetSessionId(),
+		Source:      sourceIP,
+		Attempt:     req.GetAttempt(),
+		Accepted:    true,
+		Phase:       pb.PunchSessionPhase_PunchPhaseScheduled,
+		SourceOwner: session.SourceOwner,
+		TargetOwner: session.TargetOwner,
 	}
 	payload, err := proto.Marshal(ack)
 	if err != nil {
@@ -1090,16 +1143,20 @@ func (c *Controller) BuildPunchStartPackets(request *protocol.Packet) ([]*protoc
 	if req.GetSessionId() == 0 || req.GetAttempt() == 0 {
 		return nil, fmt.Errorf("invalid punch request, session_id and attempt must be non-zero")
 	}
-	if _, ok := c.nc.FindClientByVirtualIP(sourceIP); !ok {
+	sourceClient, ok := c.nc.FindClientByVirtualIP(sourceIP)
+	if !ok {
 		return nil, fmt.Errorf("punch source %s not registered", util.Uint32ToIP(sourceIP))
 	}
-	if _, ok := c.nc.FindClientByVirtualIP(req.GetTarget()); !ok {
+	targetClient, ok := c.nc.FindClientByVirtualIP(req.GetTarget())
+	if !ok {
 		return nil, fmt.Errorf("punch target %s not registered", util.Uint32ToIP(req.GetTarget()))
 	}
 	sourceStart := &pb.PunchStart{
 		SessionId:               req.GetSessionId(),
 		Source:                  sourceIP,
 		Target:                  req.GetTarget(),
+		SourceOwner:             sourceClient.RegistrationEpoch,
+		TargetOwner:             targetClient.RegistrationEpoch,
 		PeerEndpoints:           req.GetTargetEndpoints(),
 		Attempt:                 req.GetAttempt(),
 		TimeoutMs:               req.GetTimeoutMs(),
@@ -1112,6 +1169,8 @@ func (c *Controller) BuildPunchStartPackets(request *protocol.Packet) ([]*protoc
 		SessionId:               req.GetSessionId(),
 		Source:                  req.GetTarget(),
 		Target:                  sourceIP,
+		SourceOwner:             targetClient.RegistrationEpoch,
+		TargetOwner:             sourceClient.RegistrationEpoch,
 		PeerEndpoints:           req.GetSourceEndpoints(),
 		Attempt:                 req.GetAttempt(),
 		TimeoutMs:               req.GetTimeoutMs(),
@@ -1172,6 +1231,28 @@ func (c *Controller) HandlePunchAckPacket(request *protocol.Packet) error {
 	if session.Results == nil {
 		session.Results = make(map[uint32]*pb.PunchResult)
 	}
+	pairKey := punchPairKey(session.Source, session.Target)
+	if !punchPacketOwnersMatchSession(session, source, ack.GetSourceOwner(), ack.GetTargetOwner()) {
+		log.Debugf(
+			"ignoring punch ack with mismatched packet owners session_id=%d attempt=%d pair=%s packet_source=%s source_owner=%d target_owner=%d",
+			session.SessionID,
+			session.Attempt,
+			pairKey,
+			request.SrcIP,
+			ack.GetSourceOwner(),
+			ack.GetTargetOwner(),
+		)
+		return nil
+	}
+	if !c.punchSessionOwnerMatches(session) {
+		log.Debugf(
+			"ignoring stale punch ack due to owner mismatch session_id=%d attempt=%d pair=%s",
+			session.SessionID,
+			session.Attempt,
+			pairKey,
+		)
+		return nil
+	}
 	peer := punchPeerIP(session, source)
 	if !ack.GetAccepted() {
 		log.Infof(
@@ -1197,13 +1278,16 @@ func (c *Controller) HandlePunchAckPacket(request *protocol.Packet) error {
 		)
 	}
 	session.Ack[source] = ack.GetAccepted()
-	pairKey := punchPairKey(session.Source, session.Target)
 	if !ack.GetAccepted() {
 		session.State = PunchSessionFailed
 		session.LastReason = ack.GetReason()
 		session.RelayFallback = true
-		c.nc.PunchPairCooldown.Delete(pairKey)
-		c.updatePunchRetryState(pairKey, session.State)
+		if c.isLatestPunchSessionForPair(session) {
+			c.nc.PunchPairCooldown.Delete(pairKey)
+			c.updatePunchRetryState(pairKey, session.State)
+		} else {
+			log.Debugf("ignoring stale punch ack pair update for session_id=%d attempt=%d pair=%s", session.SessionID, session.Attempt, pairKey)
+		}
 	} else if len(session.Ack) >= 2 {
 		session.State = PunchSessionWaiting
 	} else {
@@ -1235,6 +1319,27 @@ func (c *Controller) HandlePunchResultPacket(request *protocol.Packet) error {
 	}
 	if session.Results == nil {
 		session.Results = make(map[uint32]*pb.PunchResult)
+	}
+	if !punchPacketOwnersMatchSession(session, source, result.GetSourceOwner(), result.GetTargetOwner()) {
+		log.Debugf(
+			"ignoring punch result with mismatched packet owners session_id=%d attempt=%d pair=%s packet_source=%s source_owner=%d target_owner=%d",
+			session.SessionID,
+			session.Attempt,
+			punchPairKey(session.Source, session.Target),
+			request.SrcIP,
+			result.GetSourceOwner(),
+			result.GetTargetOwner(),
+		)
+		return nil
+	}
+	if !c.punchSessionOwnerMatches(session) {
+		log.Debugf(
+			"ignoring stale punch result due to owner mismatch session_id=%d attempt=%d pair=%s",
+			session.SessionID,
+			session.Attempt,
+			punchPairKey(session.Source, session.Target),
+		);
+		return nil
 	}
 	peer := punchPeerIP(session, source)
 	if result.GetCode() == pb.PunchResultCode_PunchResultSuccess {
@@ -1301,8 +1406,12 @@ func (c *Controller) HandlePunchResultPacket(request *protocol.Packet) error {
 		session.State = PunchSessionFailed
 		session.RelayFallback = true
 	}
-	c.nc.PunchPairCooldown.Delete(pairKey)
-	c.updatePunchRetryState(pairKey, session.State)
+	if c.isLatestPunchSessionForPair(session) {
+		c.nc.PunchPairCooldown.Delete(pairKey)
+		c.updatePunchRetryState(pairKey, session.State)
+	} else {
+		log.Debugf("ignoring stale punch result pair update for session_id=%d attempt=%d pair=%s", session.SessionID, session.Attempt, pairKey)
+	}
 	c.nc.PunchSessions.Set(key, session)
 	return nil
 }
@@ -1323,6 +1432,14 @@ func (c *Controller) ReconcilePunchSessions(nowUnixMs int64) {
 			session.RelayFallback = true
 			c.nc.PunchSessions.data[key] = session
 			pairKey := punchPairKey(session.Source, session.Target)
+			if !c.punchSessionOwnerMatches(session) {
+				log.Debugf("ignoring stale punch timeout due to owner mismatch session_id=%d attempt=%d pair=%s", session.SessionID, session.Attempt, pairKey)
+				continue
+			}
+			if hasNewerPunchSessionForPairLocked(c.nc.PunchSessions.data, session) {
+				log.Debugf("ignoring stale punch timeout pair update for session_id=%d attempt=%d pair=%s", session.SessionID, session.Attempt, pairKey)
+				continue
+			}
 			c.nc.PunchPairCooldown.Delete(pairKey)
 			c.updatePunchRetryState(pairKey, session.State)
 		}
@@ -1373,6 +1490,111 @@ func (c *Controller) HandleControlPacket(request *protocol.Packet, remoteAddr ne
 
 func punchSessionKey(sessionID uint64, attempt uint32) string {
 	return fmt.Sprintf("%d:%d", sessionID, attempt)
+}
+
+func (c *Controller) isLatestPunchSessionForPair(session *PunchSession) bool {
+	c.nc.PunchSessions.mutex.RLock()
+	defer c.nc.PunchSessions.mutex.RUnlock()
+	return !hasNewerPunchSessionForPairLocked(c.nc.PunchSessions.data, session)
+}
+
+func (c *Controller) supersedeOlderPunchSessions(session *PunchSession) {
+	if session == nil {
+		return
+	}
+	pairKey := punchPairKey(session.Source, session.Target)
+	c.nc.PunchSessions.mutex.Lock()
+	defer c.nc.PunchSessions.mutex.Unlock()
+	for key, existing := range c.nc.PunchSessions.data {
+		if existing == nil || punchPairKey(existing.Source, existing.Target) != pairKey {
+			continue
+		}
+		if existing.SessionID == session.SessionID && existing.Attempt == session.Attempt {
+			continue
+		}
+		if existing.State == PunchSessionSuccess ||
+			existing.State == PunchSessionFailed ||
+			existing.State == PunchSessionTimeout {
+			continue
+		}
+		existing.State = PunchSessionFailed
+		existing.LastReason = "superseded by new attempt"
+		existing.RelayFallback = true
+		c.nc.PunchSessions.data[key] = existing
+	}
+}
+
+func (c *Controller) punchSessionOwnerMatches(session *PunchSession) bool {
+	if session == nil {
+		return false
+	}
+	if session.SourceOwner == 0 && session.TargetOwner == 0 {
+		return true
+	}
+	sourceClient, ok := c.nc.FindClientByVirtualIP(session.Source)
+	if !ok || sourceClient.RegistrationEpoch != session.SourceOwner {
+		return false
+	}
+	targetClient, ok := c.nc.FindClientByVirtualIP(session.Target)
+	if !ok || targetClient.RegistrationEpoch != session.TargetOwner {
+		return false
+	}
+	return true
+}
+
+func punchPacketOwnersMatchSession(session *PunchSession, source uint32, sourceOwner uint64, targetOwner uint64) bool {
+	if session == nil {
+		return false
+	}
+	if sourceOwner == 0 && targetOwner == 0 {
+		return true
+	}
+	expectedSourceOwner, expectedTargetOwner, ok := punchSessionOwnersForSource(session, source)
+	if !ok {
+		return false
+	}
+	return sourceOwner == expectedSourceOwner && targetOwner == expectedTargetOwner
+}
+
+func punchSessionOwnersForSource(session *PunchSession, source uint32) (uint64, uint64, bool) {
+	if session == nil {
+		return 0, 0, false
+	}
+	switch source {
+	case session.Source:
+		return session.SourceOwner, session.TargetOwner, true
+	case session.Target:
+		return session.TargetOwner, session.SourceOwner, true
+	default:
+		return 0, 0, false
+	}
+}
+
+func hasNewerPunchSessionForPairLocked(data map[string]*PunchSession, session *PunchSession) bool {
+	if session == nil {
+		return false
+	}
+	pairKey := punchPairKey(session.Source, session.Target)
+	for _, candidate := range data {
+		if candidate == nil || punchPairKey(candidate.Source, candidate.Target) != pairKey {
+			continue
+		}
+		if candidate.SessionID == session.SessionID && candidate.Attempt == session.Attempt {
+			continue
+		}
+		if candidate.Attempt > session.Attempt {
+			return true
+		}
+		if candidate.Attempt == session.Attempt {
+			if candidate.RequestedAt > session.RequestedAt {
+				return true
+			}
+			if candidate.RequestedAt == session.RequestedAt && candidate.SessionID > session.SessionID {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func punchPairKey(a, b uint32) string {
@@ -2403,11 +2625,12 @@ func buildDeviceInfoList(clients map[uint32]ClientInfo, selfIP uint32) []*pb.Dev
 			continue
 		}
 		item := &pb.DeviceInfo{
-			Name:         info.Name,
-			VirtualIp:    ip,
-			DeviceId:     info.DeviceId,
-			DevicePubKey: append([]byte(nil), info.DevicePubKey...),
-			OnlineKxPub:  append([]byte(nil), info.OnlineKxPub...),
+			Name:              info.Name,
+			VirtualIp:         ip,
+			DeviceId:          info.DeviceId,
+			DevicePubKey:      append([]byte(nil), info.DevicePubKey...),
+			OnlineKxPub:       append([]byte(nil), info.OnlineKxPub...),
+			RegistrationEpoch: info.RegistrationEpoch,
 		}
 		if info.ControlOnline {
 			item.DeviceStatus = 0
