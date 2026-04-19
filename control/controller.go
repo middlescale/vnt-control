@@ -469,7 +469,6 @@ func (c *Controller) HandleDeviceRenamePacket(request *protocol.Packet) (*protoc
 	}
 	srcIP := util.IpToUint32(request.SrcIP)
 	groupName := ""
-	userID := ""
 	c.nc.VirtualNetwork.mutex.RLock()
 	for _, network := range c.nc.VirtualNetwork.data {
 		client, ok := network.Clients[srcIP]
@@ -486,7 +485,6 @@ func (c *Controller) HandleDeviceRenamePacket(request *protocol.Packet) (*protoc
 			return resp, 0, err
 		}
 		groupName = network.Group
-		userID, _ = c.userIDForAuthedDevice(network.Group, client.DeviceId)
 		break
 	}
 	c.nc.VirtualNetwork.mutex.RUnlock()
@@ -498,19 +496,20 @@ func (c *Controller) HandleDeviceRenamePacket(request *protocol.Packet) (*protoc
 		})
 		return resp, 0, err
 	}
-	c.queuePendingDeviceRename(PendingDeviceRename{
-		RequestID:       req.GetRequestId(),
-		SourceVirtualIP: srcIP,
-		UserID:          userID,
-		Group:           groupName,
-		DeviceID:        deviceID,
-		RequestedName:   newName,
-	})
+	if err := c.UMSetAuthedDeviceDisplayName(groupName, deviceID, newName); err != nil {
+		resp, packetErr := c.buildServicePacket(request, protocol.AppProtoDeviceRenameResponse, &pb.DeviceRenameResponse{
+			RequestId: req.GetRequestId(),
+			Ok:        false,
+			Reason:    err.Error(),
+		})
+		return resp, 0, packetErr
+	}
+	c.clearPendingDeviceRename(groupName, deviceID)
 	resp, err := c.buildServicePacket(request, protocol.AppProtoDeviceRenameResponse, &pb.DeviceRenameResponse{
-		RequestId:       req.GetRequestId(),
-		Ok:              true,
-		Reason:          "pending admin approval",
-		PendingApproval: true,
+		RequestId:   req.GetRequestId(),
+		Ok:          true,
+		Reason:      "restart required to apply rename",
+		AppliedName: newName,
 	})
 	return resp, 0, err
 }

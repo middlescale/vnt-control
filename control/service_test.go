@@ -1353,7 +1353,7 @@ func TestHandleDeviceRenamePacket(t *testing.T) {
 	if err := proto.Unmarshal(respPacket.Payload, &ack); err != nil {
 		t.Fatalf("unmarshal rename response failed: %v", err)
 	}
-	if !ack.GetOk() || !ack.GetPendingApproval() || ack.GetRequestId() != 7 {
+	if !ack.GetOk() || ack.GetPendingApproval() || ack.GetRequestId() != 7 || ack.GetAppliedName() != "renamed-node" {
 		t.Fatalf("unexpected rename response: %+v", ack)
 	}
 
@@ -1362,21 +1362,17 @@ func TestHandleDeviceRenamePacket(t *testing.T) {
 		t.Fatalf("renamed client not found")
 	}
 	if client.Name != "node-b" {
-		t.Fatalf("unexpected client name after pending rename: %+v", client)
+		t.Fatalf("unexpected client name before restart: %+v", client)
 	}
 	record, ok := ctrl.UMGetAuthedDevice("ms.net", "dev-b")
 	if !ok {
 		t.Fatalf("authed device not found after rename")
 	}
-	if record.DisplayName != "" {
-		t.Fatalf("unexpected persisted display name after pending rename: %+v", record)
+	if record.DisplayName != "renamed-node" {
+		t.Fatalf("unexpected persisted display name after rename request: %+v", record)
 	}
-	pending, err := ctrl.findPendingDeviceRename("dev-b", "", "ms.net")
-	if err != nil {
-		t.Fatalf("findPendingDeviceRename failed: %v", err)
-	}
-	if pending.RequestedName != "renamed-node" || pending.SourceVirtualIP != resp2.GetVirtualIp() {
-		t.Fatalf("unexpected pending rename: %+v", pending)
+	if _, err := ctrl.findPendingDeviceRename("dev-b", "", "ms.net"); err == nil {
+		t.Fatalf("pending rename should not exist after client rename request")
 	}
 }
 
@@ -1387,18 +1383,14 @@ func TestApprovePendingDeviceRename(t *testing.T) {
 	resp1 := mustRegister(t, ctrl, newBaseRegisterReq("dev-a", "node-a"), &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1111})
 	resp2 := mustRegister(t, ctrl, newBaseRegisterReq("dev-b", "node-b"), &net.UDPAddr{IP: net.ParseIP("1.1.1.2"), Port: 2222})
 
-	req := &pb.DeviceRenameRequest{RequestId: 7, DeviceId: "dev-b", NewName: "renamed-node"}
-	payload, _ := proto.Marshal(req)
-	_, _, err := ctrl.HandleDeviceRenamePacket(&protocol.Packet{
-		Proto:    protocol.ProtocolService,
-		AppProto: protocol.AppProtoDeviceRenameRequest,
-		SrcIP:    util.Uint32ToIP(resp2.GetVirtualIp()),
-		DstIP:    net.ParseIP("0.0.0.1"),
-		Payload:  payload,
+	ctrl.queuePendingDeviceRename(PendingDeviceRename{
+		RequestID:       7,
+		SourceVirtualIP: resp2.GetVirtualIp(),
+		UserID:          "u-1",
+		Group:           "ms.net",
+		DeviceID:        "dev-b",
+		RequestedName:   "renamed-node",
 	})
-	if err != nil {
-		t.Fatalf("HandleDeviceRenamePacket failed: %v", err)
-	}
 
 	appliedName, changedIP, err := ctrl.ApprovePendingDeviceRename("dev-b", "", "ms.net")
 	if err != nil {
