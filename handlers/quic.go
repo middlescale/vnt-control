@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"sdl-control/control"
@@ -27,8 +28,9 @@ type framedSession interface {
 }
 
 type sessionStream struct {
-	writer io.Writer
-	mu     sync.Mutex
+	remoteAddr string
+	writer     io.Writer
+	mu         sync.Mutex
 }
 
 type streamHub struct {
@@ -37,16 +39,19 @@ type streamHub struct {
 	ipsByAddr map[string]map[uint32]struct{}
 }
 
-func logPunchStartDispatch(prefix string, push *protocol.Packet, dispatched bool) {
+var errStreamUnavailable = errors.New("stream unavailable")
+
+func logPunchStartDispatch(prefix string, push *protocol.Packet, dispatchErr error) {
 	if push == nil || push.DstIP == nil {
 		return
 	}
+	dispatched := dispatchErr == nil
 	var start pb.PunchStart
 	if err := proto.Unmarshal(push.Payload, &start); err != nil {
 		if dispatched {
 			log.Debugf("%s: %s", prefix, push.DstIP)
 		} else {
-			log.Warnf("%s: %s", prefix, push.DstIP)
+			log.Warnf("%s: %s err=%v", prefix, push.DstIP, dispatchErr)
 		}
 		return
 	}
@@ -67,13 +72,14 @@ func logPunchStartDispatch(prefix string, push *protocol.Packet, dispatched bool
 		return
 	}
 	log.Warnf(
-		"%s session_id=%d attempt=%d deliver_to=%s peer=%s peer_endpoint_count=%d",
+		"%s session_id=%d attempt=%d deliver_to=%s peer=%s peer_endpoint_count=%d err=%v",
 		prefix,
 		start.GetSessionId(),
 		start.GetAttempt(),
 		push.DstIP,
 		peer,
 		len(start.GetPeerEndpoints()),
+		dispatchErr,
 	)
 }
 
@@ -91,7 +97,7 @@ func (h *streamHub) register(remoteAddr net.Addr, virtualIP uint32, writer io.Wr
 	addr := remoteAddr.String()
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.byIP[virtualIP] = &sessionStream{writer: writer}
+	h.byIP[virtualIP] = &sessionStream{remoteAddr: addr, writer: writer}
 	ips := h.ipsByAddr[addr]
 	if ips == nil {
 		ips = make(map[uint32]struct{})
@@ -115,20 +121,40 @@ func (h *streamHub) unregisterRemote(remoteAddr net.Addr) {
 	}
 }
 
-func (h *streamHub) writeToIP(virtualIP uint32, payload []byte) bool {
+func (h *streamHub) unregisterStaleIP(virtualIP uint32, target *sessionStream) {
+	if target == nil || target.remoteAddr == "" {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	current, ok := h.byIP[virtualIP]
+	if !ok || current != target {
+		return
+	}
+	delete(h.byIP, virtualIP)
+	if ips, ok := h.ipsByAddr[target.remoteAddr]; ok {
+		delete(ips, virtualIP)
+		if len(ips) == 0 {
+			delete(h.ipsByAddr, target.remoteAddr)
+		}
+	}
+}
+
+func (h *streamHub) writeToIP(virtualIP uint32, payload []byte) error {
 	h.mu.RLock()
 	target, ok := h.byIP[virtualIP]
 	h.mu.RUnlock()
 	if !ok {
-		return false
+		return errStreamUnavailable
 	}
 	target.mu.Lock()
 	defer target.mu.Unlock()
 	err := writeFramedWriter(target.writer, payload)
 	if err != nil {
-		return false
+		h.unregisterStaleIP(virtualIP, target)
+		return fmt.Errorf("write stream %s: %w", target.remoteAddr, err)
 	}
-	return true
+	return nil
 }
 
 var quicStreams = newStreamHub()
@@ -319,10 +345,10 @@ func serveControlSession(ctrl *control.Controller, remoteAddr net.Addr, session 
 							if push == nil || push.DstIP == nil {
 								continue
 							}
-							if !quicStreams.writeToIP(ipToUint32(push.DstIP), push.Marshal()) {
-								logPunchStartDispatch("status-triggered PunchStart dispatch failed", push, false)
+							if err := quicStreams.writeToIP(ipToUint32(push.DstIP), push.Marshal()); err != nil {
+								logPunchStartDispatch("status-triggered PunchStart dispatch failed", push, err)
 							} else {
-								logPunchStartDispatch("status-triggered PunchStart dispatched", push, true)
+								logPunchStartDispatch("status-triggered PunchStart dispatched", push, nil)
 							}
 						}
 					}
@@ -366,10 +392,10 @@ func serveControlSession(ctrl *control.Controller, remoteAddr net.Addr, session 
 						if push == nil || push.DstIP == nil {
 							continue
 						}
-						if !quicStreams.writeToIP(ipToUint32(push.DstIP), push.Marshal()) {
-							logPunchStartDispatch("PunchStart dispatch failed, peer not available", push, false)
+						if err := quicStreams.writeToIP(ipToUint32(push.DstIP), push.Marshal()); err != nil {
+							logPunchStartDispatch("PunchStart dispatch failed", push, err)
 						} else {
-							logPunchStartDispatch("PunchStart dispatched", push, true)
+							logPunchStartDispatch("PunchStart dispatched", push, nil)
 						}
 					}
 				case protocol.AppProtoPunchAck:
@@ -403,8 +429,8 @@ func serveControlSession(ctrl *control.Controller, remoteAddr net.Addr, session 
 					if push == nil || push.DstIP == nil {
 						continue
 					}
-					if !quicStreams.writeToIP(ipToUint32(push.DstIP), push.Marshal()) {
-						log.Warnf("PushDeviceList dispatch failed: %s", push.DstIP)
+					if err := quicStreams.writeToIP(ipToUint32(push.DstIP), push.Marshal()); err != nil {
+						log.Warnf("PushDeviceList dispatch failed: %s err=%v", push.DstIP, err)
 					} else {
 						log.Infof("PushDeviceList dispatched: %s", push.DstIP)
 					}

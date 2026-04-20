@@ -134,8 +134,8 @@ func handleAdminConn(ctrl *control.Controller, conn net.Conn) {
 				if push == nil || push.DstIP == nil {
 					continue
 				}
-				if !quicStreams.writeToIP(util.IpToUint32(push.DstIP), push.Marshal()) {
-					log.Warnf("PushDeviceList dispatch failed: %s", push.DstIP)
+				if err := quicStreams.writeToIP(util.IpToUint32(push.DstIP), push.Marshal()); err != nil {
+					log.Warnf("PushDeviceList dispatch failed: %s err=%v", push.DstIP, err)
 				}
 			}
 		}
@@ -193,15 +193,17 @@ func handleAdminConn(ctrl *control.Controller, conn net.Conn) {
 					if push == nil || push.DstIP == nil {
 						continue
 					}
-					if !quicStreams.writeToIP(util.IpToUint32(push.DstIP), push.Marshal()) {
-						log.Warnf("PushDeviceList dispatch failed: %s", push.DstIP)
+					if err := quicStreams.writeToIP(util.IpToUint32(push.DstIP), push.Marshal()); err != nil {
+						log.Warnf("PushDeviceList dispatch failed: %s err=%v", push.DstIP, err)
 					}
 				}
 			}
 			if notifyPacket, notifyErr := ctrl.BuildDeviceRenameNotifyPacket(changedIP, 0, appliedName); notifyErr != nil {
 				log.Errorf("BuildDeviceRenameNotifyPacket error: %v", notifyErr)
-			} else if notifyPacket != nil && !quicStreams.writeToIP(changedIP, notifyPacket.Marshal()) {
-				log.Warnf("DeviceRenameResponse dispatch failed: %s", util.Uint32ToIP(changedIP))
+			} else if notifyPacket != nil {
+				if err := quicStreams.writeToIP(changedIP, notifyPacket.Marshal()); err != nil {
+					log.Warnf("DeviceRenameResponse dispatch failed: %s err=%v", util.Uint32ToIP(changedIP), err)
+				}
 			}
 		}
 		_ = json.NewEncoder(conn).Encode(adminResponse{OK: true, Name: appliedName})
@@ -224,15 +226,17 @@ func handleAdminConn(ctrl *control.Controller, conn net.Conn) {
 					if push == nil || push.DstIP == nil {
 						continue
 					}
-					if !quicStreams.writeToIP(util.IpToUint32(push.DstIP), push.Marshal()) {
-						log.Warnf("PushDeviceList dispatch failed: %s", push.DstIP)
+					if err := quicStreams.writeToIP(util.IpToUint32(push.DstIP), push.Marshal()); err != nil {
+						log.Warnf("PushDeviceList dispatch failed: %s err=%v", push.DstIP, err)
 					}
 				}
 			}
 			if notifyPacket, notifyErr := ctrl.BuildDeviceRenameNotifyPacket(changedIP, 0, appliedName); notifyErr != nil {
 				log.Errorf("BuildDeviceRenameNotifyPacket error: %v", notifyErr)
-			} else if notifyPacket != nil && !quicStreams.writeToIP(changedIP, notifyPacket.Marshal()) {
-				log.Warnf("DeviceRenameResponse dispatch failed: %s", util.Uint32ToIP(changedIP))
+			} else if notifyPacket != nil {
+				if err := quicStreams.writeToIP(changedIP, notifyPacket.Marshal()); err != nil {
+					log.Warnf("DeviceRenameResponse dispatch failed: %s err=%v", util.Uint32ToIP(changedIP), err)
+				}
 			}
 		}
 		_ = json.NewEncoder(conn).Encode(adminResponse{OK: true, Name: appliedName})
@@ -260,9 +264,9 @@ func handleAdminConn(ctrl *control.Controller, conn net.Conn) {
 			_ = json.NewEncoder(conn).Encode(adminResponse{OK: false, Error: err.Error()})
 			return
 		}
-		if !quicStreams.writeToIP(targetIP, packet.Marshal()) {
+		if err := quicStreams.writeToIP(targetIP, packet.Marshal()); err != nil {
 			ctrl.CancelDebugWatchStart(requestID)
-			_ = json.NewEncoder(conn).Encode(adminResponse{OK: false, Error: "target device is not connected"})
+			_ = json.NewEncoder(conn).Encode(adminResponse{OK: false, Error: err.Error()})
 			return
 		}
 		result, err := ctrl.AwaitDebugCollect(requestID, time.Duration(timeout)*time.Second)
@@ -295,9 +299,9 @@ func handleAdminConn(ctrl *control.Controller, conn net.Conn) {
 			_ = json.NewEncoder(conn).Encode(adminResponse{OK: false, Error: err.Error()})
 			return
 		}
-		if !quicStreams.writeToIP(targetIP, packet.Marshal()) {
+		if err := quicStreams.writeToIP(targetIP, packet.Marshal()); err != nil {
 			ctrl.CancelDebugCollect(requestID)
-			_ = json.NewEncoder(conn).Encode(adminResponse{OK: false, Error: "target device is not connected"})
+			_ = json.NewEncoder(conn).Encode(adminResponse{OK: false, Error: err.Error()})
 			return
 		}
 		result, err := ctrl.AwaitDebugWatchStart(requestID, time.Duration(timeout)*time.Second)
@@ -324,9 +328,9 @@ func handleAdminConn(ctrl *control.Controller, conn net.Conn) {
 			_ = json.NewEncoder(conn).Encode(adminResponse{OK: false, Error: err.Error()})
 			return
 		}
-		if !quicStreams.writeToIP(targetIP, packet.Marshal()) {
+		if err := quicStreams.writeToIP(targetIP, packet.Marshal()); err != nil {
 			ctrl.CancelDebugWatchStop(requestID)
-			_ = json.NewEncoder(conn).Encode(adminResponse{OK: false, Error: "target device is not connected"})
+			_ = json.NewEncoder(conn).Encode(adminResponse{OK: false, Error: err.Error()})
 			return
 		}
 		result, err := ctrl.AwaitDebugWatchStop(requestID, time.Duration(timeout)*time.Second)
