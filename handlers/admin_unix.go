@@ -127,6 +127,18 @@ func handleAdminConn(ctrl *control.Controller, conn net.Conn) {
 			_ = json.NewEncoder(conn).Encode(adminResponse{OK: false, Error: err.Error()})
 			return
 		}
+		if pushPackets, pushErr := ctrl.BuildPushDeviceListPacketsForGatewayChangeIfNeeded(); pushErr != nil {
+			log.Errorf("BuildPushDeviceListPacketsForGatewayChangeIfNeeded error: %v", pushErr)
+		} else {
+			for _, push := range pushPackets {
+				if push == nil || push.DstIP == nil {
+					continue
+				}
+				if !quicStreams.writeToIP(util.IpToUint32(push.DstIP), push.Marshal()) {
+					log.Warnf("PushDeviceList dispatch failed: %s", push.DstIP)
+				}
+			}
+		}
 		_ = json.NewEncoder(conn).Encode(adminResponse{OK: true})
 	case "list_gateway":
 		_ = json.NewEncoder(conn).Encode(adminResponse{OK: true, Gateways: ctrl.ListGateways()})

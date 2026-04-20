@@ -216,6 +216,11 @@ func serveControlSession(ctrl *control.Controller, remoteAddr net.Addr, session 
 				var err error
 				var virtualIP uint32
 				var deferredPushPackets []*protocol.Packet
+				if gatewayPushPackets, pushErr := ctrl.BuildPushDeviceListPacketsForGatewayChangeIfNeeded(); pushErr != nil {
+					log.Errorf("BuildPushDeviceListPacketsForGatewayChangeIfNeeded error: %v", pushErr)
+				} else if len(gatewayPushPackets) > 0 {
+					deferredPushPackets = append(deferredPushPackets, gatewayPushPackets...)
+				}
 
 				switch packet.AppProto {
 				case protocol.AppProtoHandshakeRequest:
@@ -267,6 +272,11 @@ func serveControlSession(ctrl *control.Controller, remoteAddr net.Addr, session 
 					if err != nil {
 						log.Errorf("HandleGatewayReportPacket error: %v", err)
 						continue
+					}
+					if gatewayPushPackets, pushErr := ctrl.BuildPushDeviceListPacketsForGatewayChangeIfNeeded(); pushErr != nil {
+						log.Errorf("BuildPushDeviceListPacketsForGatewayChangeIfNeeded error: %v", pushErr)
+					} else if len(gatewayPushPackets) > 0 {
+						deferredPushPackets = append(deferredPushPackets, gatewayPushPackets...)
 					}
 				case protocol.AppProtoRefreshGatewayGrantRequest:
 					respPacket, err = ctrl.HandleRefreshGatewayGrantPacket(packet)

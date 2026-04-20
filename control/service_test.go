@@ -11,6 +11,7 @@ import (
 	"sdl-control/protocol"
 	"sdl-control/protocol/pb"
 	"sdl-control/util"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -1905,15 +1906,36 @@ func TestRegistrationSkipsExpiredGatewayLease(t *testing.T) {
 		UpdatedAt:    time.Now().Add(-2 * gatewayNodeLease),
 	}
 	regResp := mustRegister(t, ctrl, newBaseRegisterReq("dev-expired-a", "node-expired-a"), &net.UDPAddr{IP: net.ParseIP("1.1.1.3"), Port: 3333})
-	grant := regResp.GetGatewayAccessGrant()
-	if grant == nil {
-		t.Fatalf("expected gateway access grant in registration response")
+	if regResp.GetGatewayAccessGrant() != nil || len(regResp.GetGatewayAccessGrants()) != 0 {
+		t.Fatalf("expected expired gateway lease to produce no gateway grant")
 	}
-	if len(grant.GetGatewayChannels()) == 0 || grant.GetGatewayChannels()[0].GetAddr() != "quic://127.0.0.1:51824" {
-		t.Fatalf("expected expired gateway to be skipped")
+}
+
+func TestRegistrationIncludesAllApprovedAliveGateways(t *testing.T) {
+	ctrl := newTestController(t)
+	defer ctrl.Stop()
+
+	ctrl.RegisterGatewayNode("gw-default", "127.0.0.1:51820", []string{"udp_blind_relay_v1"}, "", nil)
+	ctrl.RegisterGatewayNode("jp-1", "127.0.0.1:51821", []string{"udp_blind_relay_v1"}, "", nil)
+
+	regResp := mustRegister(t, ctrl, newBaseRegisterReq("dev-multi-a", "node-multi-a"), &net.UDPAddr{IP: net.ParseIP("1.1.1.31"), Port: 3131})
+	if regResp.GetGatewayAccessGrant() == nil {
+		t.Fatalf("expected legacy single gateway access grant in registration response")
 	}
-	if grant.GetGatewayChannels()[0].GetServerName() != "127.0.0.1" {
-		t.Fatalf("unexpected gateway server name: %s", grant.GetGatewayChannels()[0].GetServerName())
+	grants := regResp.GetGatewayAccessGrants()
+	if len(grants) != 2 {
+		t.Fatalf("expected two gateway access grants, got %d", len(grants))
+	}
+	ids := make([]string, 0, len(grants))
+	for _, grant := range grants {
+		ids = append(ids, grant.GetGatewayId())
+	}
+	sort.Strings(ids)
+	if strings.Join(ids, ",") != "gw-default,jp-1" {
+		t.Fatalf("unexpected gateway grant ids: %v", ids)
+	}
+	if regResp.GetGatewayAccessGrant().GetGatewayId() != "gw-default" {
+		t.Fatalf("expected default gateway to remain primary legacy grant, got %s", regResp.GetGatewayAccessGrant().GetGatewayId())
 	}
 }
 

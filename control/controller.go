@@ -35,11 +35,12 @@ type Controller struct {
 	authChallenges  map[string]deviceAuthChallengeState
 	handshakeCaps   map[string][]string
 
-	gatewayMu    sync.RWMutex
-	gatewayNodes map[string]GatewayNodeInfo
-	gatewayAllow map[string]string
-	gatewaySeen  map[string]GatewayNodeInfo
-	gatewayNonce map[string]map[string]int64
+	gatewayMu               sync.RWMutex
+	gatewayNodes            map[string]GatewayNodeInfo
+	gatewayAllow            map[string]string
+	gatewaySeen             map[string]GatewayNodeInfo
+	gatewayNonce            map[string]map[string]int64
+	gatewayGrantFingerprint string
 
 	renameMu            sync.Mutex
 	pendingDeviceRename map[string]PendingDeviceRename
@@ -421,7 +422,9 @@ func (c *Controller) HandleRegistrationPacketWithVirtualIP(request *protocol.Pac
 	c.nc.TouchCipherSession(remoteAddr)
 	netInfo.Epoch++
 	registrationResp.VirtualIp = virtualIP
-	registrationResp.GatewayAccessGrant = c.buildGatewayAccessGrant(virtualIP, registration.GetDeviceId())
+	gatewayGrants := c.buildGatewayAccessGrants(virtualIP, registration.GetDeviceId())
+	registrationResp.GatewayAccessGrant = selectPrimaryGatewayGrant(gatewayGrants)
+	registrationResp.GatewayAccessGrants = gatewayGrants
 	registrationResp.Epoch = uint32(netInfo.Epoch)
 	registrationResp.DeviceInfoList = buildDeviceInfoList(netInfo.Clients, virtualIP)
 
@@ -589,6 +592,9 @@ func (c *Controller) HandlePullDeviceListPacket(request *protocol.Packet) (*prot
 	if !ok {
 		return c.buildDisconnectPacket(request), nil
 	}
+	if client, ok := c.nc.FindClientByVirtualIP(selfIP); ok {
+		deviceList.GatewayAccessGrants = c.buildGatewayAccessGrants(selfIP, client.DeviceId)
+	}
 	payload, err := proto.Marshal(deviceList)
 	if err != nil {
 		return nil, fmt.Errorf("DeviceList marshal error: %v", err)
@@ -622,28 +628,84 @@ func (c *Controller) BuildPushDeviceListPacketsForPeerChange(changedIP uint32) (
 			if targetIP == changedIP || !targetClient.ControlOnline {
 				continue
 			}
-			push := &pb.DeviceList{
-				Epoch:          uint32(network.Epoch),
-				DeviceInfoList: buildDeviceInfoList(network.Clients, targetIP),
-			}
-			payload, err := proto.Marshal(push)
+			packet, err := c.buildPushDeviceListPacket(
+				targetIP,
+				uint32(network.Epoch),
+				buildDeviceInfoList(network.Clients, targetIP),
+				c.buildGatewayAccessGrants(targetIP, targetClient.DeviceId),
+			)
 			if err != nil {
-				return nil, fmt.Errorf("DeviceList marshal error: %v", err)
+				return nil, err
 			}
-			packets = append(packets, &protocol.Packet{
-				Ver:       protocol.V3,
-				Proto:     protocol.ProtocolService,
-				AppProto:  protocol.AppProtoPushDeviceList,
-				SourceTTL: protocol.MAX_TTL,
-				TTL:       protocol.MAX_TTL,
-				SrcIP:     net.ParseIP("0.0.0.1"),
-				DstIP:     util.Uint32ToIP(targetIP),
-				Payload:   payload,
-			})
+			packets = append(packets, packet)
 		}
 		return packets, nil
 	}
 	return nil, nil
+}
+
+func (c *Controller) BuildPushDeviceListPacketsForGatewayChange() ([]*protocol.Packet, error) {
+	c.nc.VirtualNetwork.mutex.RLock()
+	defer c.nc.VirtualNetwork.mutex.RUnlock()
+
+	var packets []*protocol.Packet
+	for _, network := range c.nc.VirtualNetwork.data {
+		for targetIP, targetClient := range network.Clients {
+			if !targetClient.ControlOnline {
+				continue
+			}
+			packet, err := c.buildPushDeviceListPacket(
+				targetIP,
+				uint32(network.Epoch),
+				buildDeviceInfoList(network.Clients, targetIP),
+				c.buildGatewayAccessGrants(targetIP, targetClient.DeviceId),
+			)
+			if err != nil {
+				return nil, err
+			}
+			packets = append(packets, packet)
+		}
+	}
+	return packets, nil
+}
+
+func (c *Controller) BuildPushDeviceListPacketsForGatewayChangeIfNeeded() ([]*protocol.Packet, error) {
+	fingerprint := c.gatewayGrantFingerprintSnapshot()
+	c.gatewayMu.Lock()
+	if fingerprint == c.gatewayGrantFingerprint {
+		c.gatewayMu.Unlock()
+		return nil, nil
+	}
+	c.gatewayGrantFingerprint = fingerprint
+	c.gatewayMu.Unlock()
+	return c.BuildPushDeviceListPacketsForGatewayChange()
+}
+
+func (c *Controller) buildPushDeviceListPacket(
+	targetIP uint32,
+	epoch uint32,
+	deviceInfoList []*pb.DeviceInfo,
+	gatewayGrants []*pb.GatewayAccessGrant,
+) (*protocol.Packet, error) {
+	push := &pb.DeviceList{
+		Epoch:               epoch,
+		DeviceInfoList:      deviceInfoList,
+		GatewayAccessGrants: gatewayGrants,
+	}
+	payload, err := proto.Marshal(push)
+	if err != nil {
+		return nil, fmt.Errorf("DeviceList marshal error: %v", err)
+	}
+	return &protocol.Packet{
+		Ver:       protocol.V3,
+		Proto:     protocol.ProtocolService,
+		AppProto:  protocol.AppProtoPushDeviceList,
+		SourceTTL: protocol.MAX_TTL,
+		TTL:       protocol.MAX_TTL,
+		SrcIP:     net.ParseIP("0.0.0.1"),
+		DstIP:     util.Uint32ToIP(targetIP),
+		Payload:   payload,
+	}, nil
 }
 
 func (c *Controller) BuildDeviceRenameNotifyPacket(
@@ -803,8 +865,9 @@ func (c *Controller) HandleRefreshGatewayGrantPacket(request *protocol.Packet) (
 		HasUpdate: true,
 		Reason:    "refreshed",
 	}
-	if grant := c.buildGatewayAccessGrant(req.GetVirtualIp(), req.GetDeviceId()); grant != nil {
-		resp.GatewayAccessGrant = grant
+	if grants := c.buildGatewayAccessGrants(req.GetVirtualIp(), req.GetDeviceId()); len(grants) > 0 {
+		resp.GatewayAccessGrant = selectPrimaryGatewayGrant(grants)
+		resp.GatewayAccessGrants = grants
 	} else {
 		resp.HasUpdate = false
 		resp.Reason = "no gateway available"
@@ -2010,55 +2073,73 @@ func (c *Controller) recordGatewaySeen(info GatewayNodeInfo) {
 }
 
 func (c *Controller) buildGatewayAccessGrant(virtualIP uint32, deviceID string) *pb.GatewayAccessGrant {
+	return selectPrimaryGatewayGrant(c.buildGatewayAccessGrants(virtualIP, deviceID))
+}
+
+func (c *Controller) buildGatewayAccessGrants(virtualIP uint32, deviceID string) []*pb.GatewayAccessGrant {
 	c.gatewayMu.RLock()
 	defer c.gatewayMu.RUnlock()
 	now := time.Now()
-	defaultID := strings.TrimSpace(c.cfg.DefaultGatewayID)
-	if defaultID == "" {
+	nodes := c.approvedAliveGatewayNodesLocked(now)
+	if len(nodes) == 0 {
 		return nil
 	}
-	var picked *GatewayNodeInfo
-	if node, ok := c.gatewayNodes[defaultID]; ok && now.Sub(node.UpdatedAt) <= gatewayNodeLease {
-		n := node
-		picked = &n
-	} else if endpoint, ok := c.gatewayAllow[defaultID]; ok && strings.TrimSpace(endpoint) != "" {
-		picked = &GatewayNodeInfo{
-			GatewayID: defaultID,
-			Endpoint:  endpoint,
-		}
-	}
-	if picked == nil {
-		return nil
-	}
-	expire := time.Now().Add(2 * time.Minute)
-	sessionID := uint64(time.Now().UnixNano())
+	expire := now.Add(2 * time.Minute)
 	leaseSecs := uint32(60)
 	graceSecs := uint32(30)
+	grants := make([]*pb.GatewayAccessGrant, 0, len(nodes))
+	baseSessionID := uint64(now.UnixNano())
+	for index, node := range nodes {
+		grant := c.buildGatewayAccessGrantForNode(
+			virtualIP,
+			deviceID,
+			node,
+			baseSessionID+uint64(index),
+			expire.UnixMilli(),
+			leaseSecs,
+			graceSecs,
+		)
+		if grant != nil {
+			grants = append(grants, grant)
+		}
+	}
+	return grants
+}
+
+func (c *Controller) buildGatewayAccessGrantForNode(
+	virtualIP uint32,
+	deviceID string,
+	node GatewayNodeInfo,
+	sessionID uint64,
+	expireUnixMs int64,
+	leaseSecs uint32,
+	graceSecs uint32,
+) *pb.GatewayAccessGrant {
 	ticket, err := newGatewayTicket(
 		c.cfg.GatewayTicketSecret,
 		deviceID,
 		virtualIP,
 		sessionID,
 		1,
-		[]string{picked.GatewayID},
+		[]string{node.GatewayID},
 		"",
-		expire.UnixMilli(),
+		expireUnixMs,
 		leaseSecs,
 		graceSecs,
 	)
 	if err != nil {
-		log.Warnf("build gateway ticket failed: %v", err)
+		log.Warnf("build gateway ticket failed for %s: %v", node.GatewayID, err)
 		return nil
 	}
-	grantChannels := cloneGatewayChannels(picked.Channels)
-	if len(grantChannels) == 0 && strings.TrimSpace(picked.Endpoint) != "" {
+	grantChannels := cloneGatewayChannels(node.Channels)
+	if len(grantChannels) == 0 && strings.TrimSpace(node.Endpoint) != "" {
 		grantChannels = []*pb.GatewayChannel{{
 			Kind:       pb.GatewayChannelKind_GATEWAY_CHANNEL_QUIC,
-			Addr:       "quic://" + strings.TrimSpace(picked.Endpoint),
-			ServerName: gatewayServerName(picked.Endpoint),
+			Addr:       "quic://" + strings.TrimSpace(node.Endpoint),
+			ServerName: gatewayServerName(node.Endpoint),
 		}}
 	}
-	defaultChannel := normalizeGatewayChannelKind(picked.DefaultChannel)
+	defaultChannel := normalizeGatewayChannelKind(node.DefaultChannel)
 	if defaultChannel == pb.GatewayChannelKind_GATEWAY_CHANNEL_UNKNOWN {
 		if hasGatewayChannelKind(grantChannels, pb.GatewayChannelKind_GATEWAY_CHANNEL_UDP) {
 			defaultChannel = pb.GatewayChannelKind_GATEWAY_CHANNEL_UDP
@@ -2067,18 +2148,80 @@ func (c *Controller) buildGatewayAccessGrant(virtualIP uint32, deviceID string) 
 		}
 	}
 	return &pb.GatewayAccessGrant{
-		Ticket:                []byte(ticket),
-		TicketExpireUnixMs:    expire.UnixMilli(),
+		Ticket:                ticket,
+		TicketExpireUnixMs:    expireUnixMs,
 		SessionId:             sessionID,
 		PolicyRev:             1,
-		GatewayCapabilities:   append([]string{}, picked.Capabilities...),
+		GatewayCapabilities:   append([]string{}, node.Capabilities...),
 		LeaseSecs:             leaseSecs,
 		GraceSecs:             graceSecs,
 		GatewayChannels:       cloneGatewayChannels(grantChannels),
 		DefaultGatewayChannel: defaultChannel,
-		GatewayUdpPublicKey:   append([]byte(nil), picked.UDPPublicKey...),
-		GatewayUdpKeyId:       picked.UDPKeyID,
+		GatewayUdpPublicKey:   append([]byte(nil), node.UDPPublicKey...),
+		GatewayUdpKeyId:       node.UDPKeyID,
+		GatewayId:             node.GatewayID,
 	}
+}
+
+func (c *Controller) approvedAliveGatewayNodesLocked(now time.Time) []GatewayNodeInfo {
+	defaultID := strings.TrimSpace(c.cfg.DefaultGatewayID)
+	nodes := make([]GatewayNodeInfo, 0, len(c.gatewayNodes))
+	for gatewayID, node := range c.gatewayNodes {
+		if now.Sub(node.UpdatedAt) > gatewayNodeLease {
+			continue
+		}
+		approvedEndpoint, approved := c.gatewayAllow[gatewayID]
+		if gatewayID == defaultID {
+			approved = true
+		}
+		if !approved {
+			continue
+		}
+		if strings.TrimSpace(node.Endpoint) == "" {
+			continue
+		}
+		if strings.TrimSpace(approvedEndpoint) != "" && strings.TrimSpace(approvedEndpoint) != strings.TrimSpace(node.Endpoint) {
+			continue
+		}
+		nodes = append(nodes, node)
+	}
+	sort.Slice(nodes, func(i, j int) bool {
+		leftDefault := nodes[i].GatewayID == defaultID
+		rightDefault := nodes[j].GatewayID == defaultID
+		if leftDefault != rightDefault {
+			return leftDefault
+		}
+		if nodes[i].GatewayID != nodes[j].GatewayID {
+			return nodes[i].GatewayID < nodes[j].GatewayID
+		}
+		return nodes[i].Endpoint < nodes[j].Endpoint
+	})
+	return nodes
+}
+
+func (c *Controller) gatewayGrantFingerprintSnapshot() string {
+	c.gatewayMu.RLock()
+	defer c.gatewayMu.RUnlock()
+	nodes := c.approvedAliveGatewayNodesLocked(time.Now())
+	parts := make([]string, 0, len(nodes))
+	for _, node := range nodes {
+		parts = append(parts, fmt.Sprintf(
+			"%s|%s|%d|%s|%x",
+			node.GatewayID,
+			node.Endpoint,
+			node.DefaultChannel,
+			node.UDPKeyID,
+			node.UDPPublicKey,
+		))
+	}
+	return strings.Join(parts, ",")
+}
+
+func selectPrimaryGatewayGrant(grants []*pb.GatewayAccessGrant) *pb.GatewayAccessGrant {
+	if len(grants) == 0 {
+		return nil
+	}
+	return grants[0]
 }
 
 func cloneGatewayChannels(channels []*pb.GatewayChannel) []*pb.GatewayChannel {
