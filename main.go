@@ -157,6 +157,9 @@ func main() {
 		ctrl.Stop()
 	}()
 
+	if err := handlers.StartHTTP2Server(ctx, ctrl, listenAddr, tlsConfig); err != nil {
+		log.Fatalf("HTTP/2 control server failed: %v", err)
+	}
 	handlers.StartHTTP3Server(ctx, ctrl, listenAddr, tlsConfig)
 }
 
