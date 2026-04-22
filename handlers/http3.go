@@ -61,7 +61,7 @@ func StartHTTP3Server(ctx context.Context, ctrl *control.Controller, addr string
 
 	server := &http3.Server{
 		Addr:      addr,
-		TLSConfig: cloneTLSConfigForALPN(tlsConfig, "h3"),
+		TLSConfig: tlsConfig,
 		Handler:   mux,
 	}
 
@@ -87,5 +87,10 @@ func remoteAddrFromRequest(r *http.Request) net.Addr {
 	if udpAddr, err := net.ResolveUDPAddr("udp", r.RemoteAddr); err == nil {
 		return udpAddr
 	}
-	return networkStringAddr{network: "udp", value: r.RemoteAddr}
+	return stringAddr(r.RemoteAddr)
 }
+
+type stringAddr string
+
+func (a stringAddr) Network() string { return "udp" }
+func (a stringAddr) String() string  { return string(a) }
