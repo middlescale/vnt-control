@@ -82,7 +82,7 @@ type ClientInfo struct {
 type ClientStatusInfo struct {
 	P2PList            []net.IP
 	PublicUDPEndpoints []*net.UDPAddr
-	LocalUDPPorts      []uint16
+	LocalUDPEndpoints  []*net.UDPAddr
 	UpStream           uint64
 	DownStream         uint64
 	IsCone             bool

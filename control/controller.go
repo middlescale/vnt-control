@@ -901,7 +901,7 @@ func (c *Controller) HandleClientStatusInfoPacket(request *protocol.Packet) erro
 	clientStatus := &ClientStatusInfo{
 		P2PList:            make([]net.IP, 0, len(status.GetP2PList())),
 		PublicUDPEndpoints: make([]*net.UDPAddr, 0, len(status.GetPublicUdpEndpoints())),
-		LocalUDPPorts:      make([]uint16, 0, len(status.GetLocalUdpPorts())),
+		LocalUDPEndpoints:  make([]*net.UDPAddr, 0, len(status.GetLocalUdpEndpoints())),
 		UpStream:           status.GetUpStream(),
 		DownStream:         status.GetDownStream(),
 		IsCone:             status.GetNatType() == pb.PunchNatType_Cone,
@@ -929,10 +929,23 @@ func (c *Controller) HandleClientStatusInfoPacket(request *protocol.Packet) erro
 			Port: int(endpoint.GetPort()),
 		})
 	}
-	for _, port := range status.GetLocalUdpPorts() {
-		if port <= 65535 {
-			clientStatus.LocalUDPPorts = append(clientStatus.LocalUDPPorts, uint16(port))
+	for _, endpoint := range status.GetLocalUdpEndpoints() {
+		if endpoint.GetPort() == 0 || endpoint.GetPort() > 65535 {
+			continue
 		}
+		var ip net.IP
+		if endpoint.GetIp() != 0 {
+			ip = util.Uint32ToIP(endpoint.GetIp())
+		} else if len(endpoint.GetIpv6()) == net.IPv6len {
+			ip = append(net.IP(nil), endpoint.GetIpv6()...)
+		}
+		if ip == nil {
+			continue
+		}
+		clientStatus.LocalUDPEndpoints = append(clientStatus.LocalUDPEndpoints, &net.UDPAddr{
+			IP:   ip,
+			Port: int(endpoint.GetPort()),
+		})
 	}
 	reachable := len(clientStatus.P2PList) > 0
 	c.nc.VirtualNetwork.mutex.Lock()
@@ -1496,7 +1509,7 @@ func buildPunchEndpoints(client ClientInfo) []*pb.PunchEndpoint {
 	if status == nil {
 		return nil
 	}
-	endpoints := make([]*pb.PunchEndpoint, 0, len(status.PublicUDPEndpoints)+len(status.LocalUDPPorts))
+	endpoints := make([]*pb.PunchEndpoint, 0, len(status.PublicUDPEndpoints)+len(status.LocalUDPEndpoints))
 	seen := make(map[string]struct{})
 	appendEndpoint := func(ip net.IP, port uint16) {
 		if port == 0 {
@@ -1534,10 +1547,11 @@ func buildPunchEndpoints(client ClientInfo) []*pb.PunchEndpoint {
 		}
 		appendEndpoint(endpoint.IP, uint16(endpoint.Port))
 	}
-	if udpAddr, ok := client.Address.(*net.UDPAddr); ok && shouldIncludeLocalUDPCandidates(udpAddr.IP) {
-		for _, port := range status.LocalUDPPorts {
-			appendEndpoint(udpAddr.IP, port)
+	for _, endpoint := range status.LocalUDPEndpoints {
+		if endpoint == nil {
+			continue
 		}
+		appendEndpoint(endpoint.IP, uint16(endpoint.Port))
 	}
 	return endpoints
 }
@@ -1578,14 +1592,6 @@ func formatPunchEndpoint(endpoint *pb.PunchEndpoint) string {
 		return fmt.Sprintf("-:%d/%s", endpoint.GetPort(), protoName)
 	}
 	return fmt.Sprintf("%s:%d/%s", util.Uint32ToIP(endpoint.GetIp()), endpoint.GetPort(), protoName)
-}
-
-func shouldIncludeLocalUDPCandidates(ip net.IP) bool {
-	ipv4 := ip.To4()
-	if ipv4 == nil {
-		return false
-	}
-	return !ipv4.IsGlobalUnicast() || ipv4.IsPrivate()
 }
 
 func (c *Controller) setPendingHandshakeCapabilities(remoteAddr net.Addr, capabilities []string) {

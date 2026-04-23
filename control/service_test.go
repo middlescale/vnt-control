@@ -554,16 +554,14 @@ func TestBuildPunchStartPacketsFromStatus(t *testing.T) {
 	srcStatus := &pb.ClientStatusInfo{
 		Source:             srcReg.GetVirtualIp(),
 		NatType:            pb.PunchNatType_Cone,
-		LocalUdpPorts:      []uint32{1111},
 		PunchTriggerReason: pb.PunchTriggerReason_PunchTriggerRouteTimeout,
 		PublicUdpEndpoints: []*pb.PunchEndpoint{
 			{Ip: util.IpToUint32(net.ParseIP("8.8.8.8")), Port: 30001},
 		},
 	}
 	dstStatus := &pb.ClientStatusInfo{
-		Source:        dstReg.GetVirtualIp(),
-		NatType:       pb.PunchNatType_Cone,
-		LocalUdpPorts: []uint32{2222},
+		Source:  dstReg.GetVirtualIp(),
+		NatType: pb.PunchNatType_Cone,
 		PublicUdpEndpoints: []*pb.PunchEndpoint{
 			{Ip: util.IpToUint32(net.ParseIP("9.9.9.9")), Port: 30002},
 		},
@@ -634,9 +632,8 @@ func TestBuildPunchStartPacketsFromStatusSkipsExistingMutualP2P(t *testing.T) {
 	srcReg := mustRegister(t, ctrl, newBaseRegisterReq("dev-a", "node-a"), &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1111})
 	dstReg := mustRegister(t, ctrl, newBaseRegisterReq("dev-b", "node-b"), &net.UDPAddr{IP: net.ParseIP("1.1.1.2"), Port: 2222})
 	srcStatus := &pb.ClientStatusInfo{
-		Source:        srcReg.GetVirtualIp(),
-		NatType:       pb.PunchNatType_Cone,
-		LocalUdpPorts: []uint32{1111},
+		Source:  srcReg.GetVirtualIp(),
+		NatType: pb.PunchNatType_Cone,
 		P2PList: []*pb.RouteItem{
 			{NextIp: dstReg.GetVirtualIp()},
 		},
@@ -645,9 +642,8 @@ func TestBuildPunchStartPacketsFromStatusSkipsExistingMutualP2P(t *testing.T) {
 		},
 	}
 	dstStatus := &pb.ClientStatusInfo{
-		Source:        dstReg.GetVirtualIp(),
-		NatType:       pb.PunchNatType_Cone,
-		LocalUdpPorts: []uint32{2222},
+		Source:  dstReg.GetVirtualIp(),
+		NatType: pb.PunchNatType_Cone,
 		P2PList: []*pb.RouteItem{
 			{NextIp: srcReg.GetVirtualIp()},
 		},
@@ -688,17 +684,21 @@ func TestBuildPunchStartPacketsFromStatusIncludesLocalEndpointsForPrivateRemoteA
 	srcReg := mustRegister(t, ctrl, newBaseRegisterReq("dev-a", "node-a"), &net.UDPAddr{IP: net.ParseIP("192.168.10.11"), Port: 1111})
 	dstReg := mustRegister(t, ctrl, newBaseRegisterReq("dev-b", "node-b"), &net.UDPAddr{IP: net.ParseIP("192.168.10.12"), Port: 2222})
 	srcStatus := &pb.ClientStatusInfo{
-		Source:        srcReg.GetVirtualIp(),
-		NatType:       pb.PunchNatType_Cone,
-		LocalUdpPorts: []uint32{1111},
+		Source:  srcReg.GetVirtualIp(),
+		NatType: pb.PunchNatType_Cone,
+		LocalUdpEndpoints: []*pb.PunchEndpoint{
+			{Ip: util.IpToUint32(net.ParseIP("192.168.10.11")), Port: 1111},
+		},
 		PublicUdpEndpoints: []*pb.PunchEndpoint{
 			{Ip: util.IpToUint32(net.ParseIP("8.8.8.8")), Port: 30001},
 		},
 	}
 	dstStatus := &pb.ClientStatusInfo{
-		Source:        dstReg.GetVirtualIp(),
-		NatType:       pb.PunchNatType_Cone,
-		LocalUdpPorts: []uint32{2222},
+		Source:  dstReg.GetVirtualIp(),
+		NatType: pb.PunchNatType_Cone,
+		LocalUdpEndpoints: []*pb.PunchEndpoint{
+			{Ip: util.IpToUint32(net.ParseIP("192.168.10.12")), Port: 2222},
+		},
 		PublicUdpEndpoints: []*pb.PunchEndpoint{
 			{Ip: util.IpToUint32(net.ParseIP("9.9.9.9")), Port: 30002},
 		},
@@ -746,23 +746,89 @@ func TestBuildPunchStartPacketsFromStatusIncludesLocalEndpointsForPrivateRemoteA
 	}
 }
 
+func TestBuildPunchStartPacketsFromStatusIncludesReportedLocalEndpointsForPublicRemoteAddr(t *testing.T) {
+	ctrl := newTestController(t)
+	defer ctrl.Stop()
+	srcReg := mustRegister(t, ctrl, newBaseRegisterReq("dev-a", "node-a"), &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1111})
+	dstReg := mustRegister(t, ctrl, newBaseRegisterReq("dev-b", "node-b"), &net.UDPAddr{IP: net.ParseIP("1.1.1.2"), Port: 2222})
+	srcStatus := &pb.ClientStatusInfo{
+		Source:  srcReg.GetVirtualIp(),
+		NatType: pb.PunchNatType_Cone,
+		LocalUdpEndpoints: []*pb.PunchEndpoint{
+			{Ip: util.IpToUint32(net.ParseIP("192.168.10.11")), Port: 1111},
+		},
+		PublicUdpEndpoints: []*pb.PunchEndpoint{
+			{Ip: util.IpToUint32(net.ParseIP("8.8.8.8")), Port: 30001},
+		},
+	}
+	dstStatus := &pb.ClientStatusInfo{
+		Source:  dstReg.GetVirtualIp(),
+		NatType: pb.PunchNatType_Cone,
+		LocalUdpEndpoints: []*pb.PunchEndpoint{
+			{Ip: util.IpToUint32(net.ParseIP("192.168.10.12")), Port: 2222},
+		},
+		PublicUdpEndpoints: []*pb.PunchEndpoint{
+			{Ip: util.IpToUint32(net.ParseIP("9.9.9.9")), Port: 30002},
+		},
+	}
+	srcPayload, err := proto.Marshal(srcStatus)
+	if err != nil {
+		t.Fatalf("marshal src status failed: %v", err)
+	}
+	dstPayload, err := proto.Marshal(dstStatus)
+	if err != nil {
+		t.Fatalf("marshal dst status failed: %v", err)
+	}
+	if err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(srcReg.GetVirtualIp()), Payload: srcPayload}); err != nil {
+		t.Fatalf("update src status failed: %v", err)
+	}
+	if err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(dstReg.GetVirtualIp()), Payload: dstPayload}); err != nil {
+		t.Fatalf("update dst status failed: %v", err)
+	}
+	startPackets, err := ctrl.BuildPunchStartPacketsFromStatus(&protocol.Packet{
+		Proto: protocol.ProtocolService,
+		SrcIP: util.Uint32ToIP(srcReg.GetVirtualIp()),
+		DstIP: util.Uint32ToIP(srcReg.GetVirtualGateway()),
+	})
+	if err != nil {
+		t.Fatalf("BuildPunchStartPacketsFromStatus failed: %v", err)
+	}
+	if len(startPackets) != 2 {
+		t.Fatalf("expected 2 start packets, got %d", len(startPackets))
+	}
+	var start pb.PunchStart
+	if err := proto.Unmarshal(startPackets[0].Payload, &start); err != nil {
+		t.Fatalf("unmarshal punch start failed: %v", err)
+	}
+	var foundPublic, foundLocal bool
+	for _, ep := range start.GetPeerEndpoints() {
+		switch {
+		case ep.GetIp() == util.IpToUint32(net.ParseIP("9.9.9.9")) && ep.GetPort() == 30002:
+			foundPublic = true
+		case ep.GetIp() == util.IpToUint32(net.ParseIP("192.168.10.12")) && ep.GetPort() == 2222:
+			foundLocal = true
+		}
+	}
+	if !foundPublic || !foundLocal {
+		t.Fatalf("expected public and reported local endpoints for public remote addr, got %+v", start.GetPeerEndpoints())
+	}
+}
+
 func TestBuildPunchStartPacketsFromStatusIncludesIPv6Endpoints(t *testing.T) {
 	ctrl := newTestController(t)
 	defer ctrl.Stop()
 	srcReg := mustRegister(t, ctrl, newBaseRegisterReq("dev-a", "node-a"), &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1111})
 	dstReg := mustRegister(t, ctrl, newBaseRegisterReq("dev-b", "node-b"), &net.UDPAddr{IP: net.ParseIP("1.1.1.2"), Port: 2222})
 	srcStatus := &pb.ClientStatusInfo{
-		Source:        srcReg.GetVirtualIp(),
-		NatType:       pb.PunchNatType_Cone,
-		LocalUdpPorts: []uint32{1111},
+		Source:  srcReg.GetVirtualIp(),
+		NatType: pb.PunchNatType_Cone,
 		PublicUdpEndpoints: []*pb.PunchEndpoint{
 			{Ip: util.IpToUint32(net.ParseIP("8.8.8.8")), Port: 30001},
 		},
 	}
 	dstStatus := &pb.ClientStatusInfo{
-		Source:        dstReg.GetVirtualIp(),
-		NatType:       pb.PunchNatType_Cone,
-		LocalUdpPorts: []uint32{2222},
+		Source:  dstReg.GetVirtualIp(),
+		NatType: pb.PunchNatType_Cone,
 		PublicUdpEndpoints: []*pb.PunchEndpoint{
 			{Ip: util.IpToUint32(net.ParseIP("9.9.9.9")), Port: 30002},
 			{Ipv6: net.ParseIP("2606:4700:4700::1111"), Port: 2222},
@@ -812,18 +878,16 @@ func TestBuildPunchStartPacketsFromStatusPrefersExplicitEndpointPairs(t *testing
 	srcReg := mustRegister(t, ctrl, newBaseRegisterReq("dev-a", "node-a"), &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1111})
 	dstReg := mustRegister(t, ctrl, newBaseRegisterReq("dev-b", "node-b"), &net.UDPAddr{IP: net.ParseIP("1.1.1.2"), Port: 2222})
 	srcStatus := &pb.ClientStatusInfo{
-		Source:        srcReg.GetVirtualIp(),
-		NatType:       pb.PunchNatType_Cone,
-		LocalUdpPorts: []uint32{1111},
+		Source:  srcReg.GetVirtualIp(),
+		NatType: pb.PunchNatType_Cone,
 		PublicUdpEndpoints: []*pb.PunchEndpoint{
 			{Ip: util.IpToUint32(net.ParseIP("8.8.8.8")), Port: 30001},
 			{Ip: util.IpToUint32(net.ParseIP("9.9.9.9")), Port: 30002},
 		},
 	}
 	dstStatus := &pb.ClientStatusInfo{
-		Source:        dstReg.GetVirtualIp(),
-		NatType:       pb.PunchNatType_Cone,
-		LocalUdpPorts: []uint32{2222},
+		Source:  dstReg.GetVirtualIp(),
+		NatType: pb.PunchNatType_Cone,
 		PublicUdpEndpoints: []*pb.PunchEndpoint{
 			{Ip: util.IpToUint32(net.ParseIP("3.3.3.3")), Port: 40001},
 			{Ip: util.IpToUint32(net.ParseIP("4.4.4.4")), Port: 40002},
@@ -1049,17 +1113,15 @@ func TestFailedRegistrationClearsStalePunchCandidateState(t *testing.T) {
 	dstReg := mustRegister(t, ctrl, dstReq, dstRemote)
 
 	srcStatus := &pb.ClientStatusInfo{
-		Source:        srcReg.GetVirtualIp(),
-		NatType:       pb.PunchNatType_Cone,
-		LocalUdpPorts: []uint32{1111},
+		Source:  srcReg.GetVirtualIp(),
+		NatType: pb.PunchNatType_Cone,
 		PublicUdpEndpoints: []*pb.PunchEndpoint{
 			{Ip: util.IpToUint32(net.ParseIP("8.8.8.8")), Port: 30001},
 		},
 	}
 	dstStatus := &pb.ClientStatusInfo{
-		Source:        dstReg.GetVirtualIp(),
-		NatType:       pb.PunchNatType_Cone,
-		LocalUdpPorts: []uint32{2222},
+		Source:  dstReg.GetVirtualIp(),
+		NatType: pb.PunchNatType_Cone,
 		PublicUdpEndpoints: []*pb.PunchEndpoint{
 			{Ip: util.IpToUint32(net.ParseIP("9.9.9.9")), Port: 30002},
 		},
@@ -1127,9 +1189,8 @@ func TestListDevicesIncludesOnlineState(t *testing.T) {
 	dstReg := mustRegister(t, ctrl, newBaseRegisterReq("dev-b", "node-b"), &net.UDPAddr{IP: net.ParseIP("1.1.1.2"), Port: 2222})
 
 	srcStatus := &pb.ClientStatusInfo{
-		Source:        srcReg.GetVirtualIp(),
-		NatType:       pb.PunchNatType_Cone,
-		LocalUdpPorts: []uint32{1111},
+		Source:  srcReg.GetVirtualIp(),
+		NatType: pb.PunchNatType_Cone,
 		PublicUdpEndpoints: []*pb.PunchEndpoint{
 			{Ip: util.IpToUint32(net.ParseIP("8.8.8.8")), Port: 30001},
 		},
@@ -1555,11 +1616,13 @@ func TestHandleClientStatusInfoPacket(t *testing.T) {
 	defer ctrl.Stop()
 	resp := mustRegister(t, ctrl, newBaseRegisterReq("dev-a", "node-a"), &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1111})
 	status := &pb.ClientStatusInfo{
-		Source:        resp.GetVirtualIp(),
-		UpStream:      10,
-		DownStream:    20,
-		NatType:       pb.PunchNatType_Cone,
-		LocalUdpPorts: []uint32{12345},
+		Source:     resp.GetVirtualIp(),
+		UpStream:   10,
+		DownStream: 20,
+		NatType:    pb.PunchNatType_Cone,
+		LocalUdpEndpoints: []*pb.PunchEndpoint{
+			{Ip: util.IpToUint32(net.ParseIP("192.168.10.2")), Port: 12345},
+		},
 		PublicUdpEndpoints: []*pb.PunchEndpoint{
 			{Ip: util.IpToUint32(net.ParseIP("8.8.8.8")), Port: 54321},
 			{Ipv6: net.ParseIP("2606:4700:4700::1111"), Port: 12345},
@@ -1588,8 +1651,8 @@ func TestHandleClientStatusInfoPacket(t *testing.T) {
 	if client.ClientStatus == nil || !client.ClientStatus.IsCone || client.ClientStatus.UpStream != 10 || client.ClientStatus.DownStream != 20 {
 		t.Fatalf("unexpected client status: %+v", client.ClientStatus)
 	}
-	if len(client.ClientStatus.LocalUDPPorts) != 1 || client.ClientStatus.LocalUDPPorts[0] != 12345 {
-		t.Fatalf("unexpected local udp ports: %+v", client.ClientStatus.LocalUDPPorts)
+	if len(client.ClientStatus.LocalUDPEndpoints) != 1 || client.ClientStatus.LocalUDPEndpoints[0].String() != "192.168.10.2:12345" {
+		t.Fatalf("unexpected local udp endpoints: %+v", client.ClientStatus.LocalUDPEndpoints)
 	}
 	if len(client.ClientStatus.PublicUDPEndpoints) != 2 {
 		t.Fatalf("unexpected public udp endpoints: %+v", client.ClientStatus.PublicUDPEndpoints)
