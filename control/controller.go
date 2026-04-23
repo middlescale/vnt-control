@@ -973,12 +973,24 @@ func (c *Controller) BuildPunchStartPacketsFromStatus(request *protocol.Packet) 
 			if clientsHaveMutualP2PPath(srcClient, srcIP, targetClient, targetIP) {
 				continue
 			}
+			triggerReason := pb.PunchTriggerReason_PunchTriggerStatusUpdate
+			if srcClient.ClientStatus != nil {
+				if parsed, ok := pb.PunchTriggerReason_value[srcClient.ClientStatus.PunchTriggerReason]; ok {
+					triggerReason = pb.PunchTriggerReason(parsed)
+				}
+			}
+			manualTrigger := triggerReason == pb.PunchTriggerReason_PunchTriggerManualRequest
 			pairKey := punchPairKey(srcIP, targetIP)
-			if _, cooling := c.nc.PunchPairCooldown.Get(pairKey); cooling {
-				continue
+			if !manualTrigger {
+				if _, cooling := c.nc.PunchPairCooldown.Get(pairKey); cooling {
+					continue
+				}
 			}
 			retryState, hasRetry := c.nc.PunchPairRetry.Get(pairKey)
-			if hasRetry {
+			if manualTrigger {
+				hasRetry = false
+				c.nc.PunchPairRetry.Delete(pairKey)
+			} else if hasRetry {
 				if retryState.Attempt >= maxPunchAttemptsPerPair {
 					continue
 				}
@@ -998,12 +1010,6 @@ func (c *Controller) BuildPunchStartPacketsFromStatus(request *protocol.Packet) 
 				attempt = retryState.Attempt + 1
 			}
 			deadline := now.Add(5 * time.Second).UnixMilli()
-			triggerReason := pb.PunchTriggerReason_PunchTriggerStatusUpdate
-			if srcClient.ClientStatus != nil {
-				if parsed, ok := pb.PunchTriggerReason_value[srcClient.ClientStatus.PunchTriggerReason]; ok {
-					triggerReason = pb.PunchTriggerReason(parsed)
-				}
-			}
 			selectionPolicy := pb.PunchEndpointSelectionPolicy_PunchEndpointSelectionAll
 			session := &PunchSession{
 				SessionID:       sessionID,

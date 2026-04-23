@@ -976,6 +976,69 @@ func TestBuildPunchStartPacketsFromStatusHonorsRetryPolicy(t *testing.T) {
 	}
 }
 
+func TestBuildPunchStartPacketsFromStatusManualRequestBypassesRetryPolicy(t *testing.T) {
+	ctrl := newTestController(t)
+	defer ctrl.Stop()
+	srcReg := mustRegister(t, ctrl, newBaseRegisterReq("dev-a", "node-a"), &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1111})
+	dstReg := mustRegister(t, ctrl, newBaseRegisterReq("dev-b", "node-b"), &net.UDPAddr{IP: net.ParseIP("1.1.1.2"), Port: 2222})
+	srcStatus := &pb.ClientStatusInfo{
+		Source:             srcReg.GetVirtualIp(),
+		NatType:            pb.PunchNatType_Cone,
+		PunchTriggerReason: pb.PunchTriggerReason_PunchTriggerManualRequest,
+		PublicUdpEndpoints: []*pb.PunchEndpoint{
+			{Ip: util.IpToUint32(net.ParseIP("8.8.8.8")), Port: 30001},
+		},
+	}
+	dstStatus := &pb.ClientStatusInfo{
+		Source:  dstReg.GetVirtualIp(),
+		NatType: pb.PunchNatType_Cone,
+		PublicUdpEndpoints: []*pb.PunchEndpoint{
+			{Ip: util.IpToUint32(net.ParseIP("9.9.9.9")), Port: 30002},
+		},
+	}
+	srcPayload, err := proto.Marshal(srcStatus)
+	if err != nil {
+		t.Fatalf("marshal src status failed: %v", err)
+	}
+	dstPayload, err := proto.Marshal(dstStatus)
+	if err != nil {
+		t.Fatalf("marshal dst status failed: %v", err)
+	}
+	if err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(srcReg.GetVirtualIp()), Payload: srcPayload}); err != nil {
+		t.Fatalf("update src status failed: %v", err)
+	}
+	if err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(dstReg.GetVirtualIp()), Payload: dstPayload}); err != nil {
+		t.Fatalf("update dst status failed: %v", err)
+	}
+	pairKey := punchPairKey(srcReg.GetVirtualIp(), dstReg.GetVirtualIp())
+	ctrl.nc.PunchPairCooldown.Set(pairKey, struct{}{})
+	ctrl.nc.PunchPairRetry.Set(pairKey, PunchRetryState{
+		Attempt:           maxPunchAttemptsPerPair,
+		NextAllowedUnixMs: time.Now().Add(2 * time.Second).UnixMilli(),
+	})
+	packets, err := ctrl.BuildPunchStartPacketsFromStatus(&protocol.Packet{
+		Proto: protocol.ProtocolService,
+		SrcIP: util.Uint32ToIP(srcReg.GetVirtualIp()),
+		DstIP: util.Uint32ToIP(srcReg.GetVirtualGateway()),
+	})
+	if err != nil {
+		t.Fatalf("BuildPunchStartPacketsFromStatus failed: %v", err)
+	}
+	if len(packets) != 2 {
+		t.Fatalf("expected manual trigger to bypass suppression, got %d packets", len(packets))
+	}
+	var start pb.PunchStart
+	if err := proto.Unmarshal(packets[0].Payload, &start); err != nil {
+		t.Fatalf("unmarshal punch start failed: %v", err)
+	}
+	if start.GetTriggerReason() != pb.PunchTriggerReason_PunchTriggerManualRequest {
+		t.Fatalf("unexpected trigger reason: %+v", start)
+	}
+	if start.GetAttempt() != 1 {
+		t.Fatalf("expected manual trigger to restart attempts, got %d", start.GetAttempt())
+	}
+}
+
 func TestFailedRegistrationClearsStalePunchCandidateState(t *testing.T) {
 	ctrl := newTestController(t)
 	defer ctrl.Stop()
