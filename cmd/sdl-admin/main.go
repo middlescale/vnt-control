@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"strings"
+	"text/tabwriter"
 	"time"
 )
 
@@ -120,65 +122,63 @@ func main() {
 		fmt.Fprintf(os.Stderr, "admin error: %s\n", resp.Error)
 		os.Exit(1)
 	}
-	switch req.Action {
+	if err := writeResponse(os.Stdout, os.Stderr, req.Action, resp); err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(1)
+	}
+}
+
+func writeResponse(stdout, stderr io.Writer, action string, resp adminResponse) error {
+	switch action {
 	case "create_user":
-		fmt.Printf("created user: id=%s name=%s domain=%s\n", resp.UserID, resp.Name, resp.Domain)
+		writeKeyValueBlock(stdout, "Created user", []kv{
+			{Key: "User ID", Value: valueOrDash(resp.UserID)},
+			{Key: "Name", Value: valueOrDash(resp.Name)},
+			{Key: "Domain", Value: valueOrDash(resp.Domain)},
+		})
 	case "issue_device_ticket":
-		expireAt := time.Unix(resp.ExpireAtUnix, 0).Local().Format(time.RFC3339)
-		fmt.Printf("issued ticket: %s expire_at_unix=%d expire_at=%s\n", resp.Ticket, resp.ExpireAtUnix, expireAt)
+		writeKeyValueBlock(stdout, "Issued device ticket", []kv{
+			{Key: "Ticket", Value: valueOrDash(resp.Ticket)},
+			{Key: "Expires At", Value: formatUnix(resp.ExpireAtUnix)},
+			{Key: "Expire Unix", Value: formatInt64(resp.ExpireAtUnix)},
+		})
 	case "register_gateway":
-		fmt.Println("gateway registered")
+		writeKeyValueBlock(stdout, "Gateway registered", nil)
 	case "list_gateway":
-		for _, gw := range resp.Gateways {
-			fmt.Printf("gateway=%s endpoint=%s default=%t approved=%t reported=%t alive=%t updated_at_unix=%d\n", gw.GatewayID, gw.Endpoint, gw.Default, gw.Approved, gw.Reported, gw.Alive, gw.UpdatedAtUnix)
-		}
+		writeGatewayTable(stdout, resp.Gateways)
 	case "list_device":
-		for _, device := range resp.Devices {
-			authExpireAt := ""
-			if device.AuthExpireAtUnix > 0 {
-				authExpireAt = time.Unix(device.AuthExpireAtUnix, 0).Local().Format(time.RFC3339)
-			}
-			fmt.Printf("user_id=%s group=%s device_id=%s name=%s virtual_ip=%s control_online=%t data_plane_reachable=%t auth_expired=%t auth_expire_at_unix=%d auth_expire_at=%s updated_at_unix=%d\n", device.UserID, device.Group, device.DeviceID, device.Name, device.VirtualIP, device.ControlOnline, device.DataPlaneReachable, device.AuthExpired, device.AuthExpireAtUnix, authExpireAt, device.UpdatedAtUnix)
-		}
+		writeDeviceTable(stdout, "Devices", resp.Devices)
 	case "extend_device_expiry":
-		fmt.Printf("extended %d device(s)\n", resp.UpdatedCount)
-		for _, device := range resp.Devices {
-			authExpireAt := ""
-			if device.AuthExpireAtUnix > 0 {
-				authExpireAt = time.Unix(device.AuthExpireAtUnix, 0).Local().Format(time.RFC3339)
-			}
-			fmt.Printf("user_id=%s group=%s device_id=%s name=%s virtual_ip=%s control_online=%t data_plane_reachable=%t auth_expired=%t auth_expire_at_unix=%d auth_expire_at=%s updated_at_unix=%d\n", device.UserID, device.Group, device.DeviceID, device.Name, device.VirtualIP, device.ControlOnline, device.DataPlaneReachable, device.AuthExpired, device.AuthExpireAtUnix, authExpireAt, device.UpdatedAtUnix)
-		}
+		writeDeviceTable(stdout, fmt.Sprintf("Extended %d device(s)", resp.UpdatedCount), resp.Devices)
 	case "approve_device_rename":
-		fmt.Printf("approved device rename: name=%s\n", resp.Name)
+		writeKeyValueBlock(stdout, "Approved device rename", []kv{{Key: "Name", Value: valueOrDash(resp.Name)}})
 	case "rename_device":
-		fmt.Printf("renamed device: name=%s\n", resp.Name)
+		writeKeyValueBlock(stdout, "Renamed device", []kv{{Key: "Name", Value: valueOrDash(resp.Name)}})
 	case "dns_domains":
-		for _, domain := range resp.Domains {
-			fmt.Println(domain)
-		}
+		writeDomains(stdout, resp.Domains)
 	case "dns_snapshot":
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		if err := enc.Encode(resp.DNSSnapshot); err != nil {
-			fmt.Fprintf(os.Stderr, "encode dns snapshot failed: %v\n", err)
-			os.Exit(1)
+		if err := writeJSON(stdout, resp.DNSSnapshot); err != nil {
+			return fmt.Errorf("encode dns snapshot failed: %w", err)
 		}
 	case "collect_debug":
 		if strings.TrimSpace(resp.DebugPath) != "" {
-			fmt.Fprintf(os.Stderr, "saved debug snapshot: %s\n", resp.DebugPath)
+			writeKeyValueBlock(stderr, "Saved debug snapshot", []kv{{Key: "Path", Value: resp.DebugPath}})
 		}
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		if err := enc.Encode(resp.DebugResult); err != nil {
-			fmt.Fprintf(os.Stderr, "encode debug result failed: %v\n", err)
-			os.Exit(1)
+		if err := writeJSON(stdout, resp.DebugResult); err != nil {
+			return fmt.Errorf("encode debug result failed: %w", err)
 		}
 	case "start_debug_watch":
-		fmt.Printf("started debug watch: id=%d path=%s\n", resp.DebugWatchID, resp.DebugPath)
+		writeKeyValueBlock(stdout, "Started debug watch", []kv{
+			{Key: "Watch ID", Value: formatUint64(resp.DebugWatchID)},
+			{Key: "Path", Value: valueOrDash(resp.DebugPath)},
+		})
 	case "stop_debug_watch":
-		fmt.Printf("stopped debug watch: id=%d path=%s\n", resp.DebugWatchID, resp.DebugPath)
+		writeKeyValueBlock(stdout, "Stopped debug watch", []kv{
+			{Key: "Watch ID", Value: formatUint64(resp.DebugWatchID)},
+			{Key: "Path", Value: valueOrDash(resp.DebugPath)},
+		})
 	}
+	return nil
 }
 
 func parseCreateUser(args []string) adminRequest {
@@ -559,4 +559,141 @@ func defaultSocketPath() string {
 		return v
 	}
 	return "/tmp/sdl-control-admin.sock"
+}
+
+type kv struct {
+	Key   string
+	Value string
+}
+
+func writeKeyValueBlock(w io.Writer, title string, pairs []kv) {
+	fmt.Fprintln(w, title)
+	for _, pair := range pairs {
+		fmt.Fprintf(w, "  %-12s %s\n", pair.Key+":", pair.Value)
+	}
+}
+
+func writeGatewayTable(w io.Writer, gateways []gatewayInfo) {
+	fmt.Fprintf(w, "Gateways (%d)\n", len(gateways))
+	if len(gateways) == 0 {
+		fmt.Fprintln(w, "  (none)")
+		return
+	}
+	tw := newTabWriter(w)
+	fmt.Fprintln(tw, "ID\tENDPOINT\tDEFAULT\tAPPROVED\tREPORTED\tALIVE\tCAPABILITIES\tUPDATED AT")
+	for _, gw := range gateways {
+		fmt.Fprintf(
+			tw,
+			"%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			valueOrDash(gw.GatewayID),
+			valueOrDash(gw.Endpoint),
+			formatBool(gw.Default),
+			formatBool(gw.Approved),
+			formatBool(gw.Reported),
+			formatBool(gw.Alive),
+			formatCSV(gw.Capabilities),
+			formatUnix(gw.UpdatedAtUnix),
+		)
+	}
+	_ = tw.Flush()
+}
+
+func writeDeviceTable(w io.Writer, title string, devices []deviceInfo) {
+	fmt.Fprintf(w, "%s\n", title)
+	if len(devices) == 0 {
+		fmt.Fprintln(w, "  (none)")
+		return
+	}
+	tw := newTabWriter(w)
+	fmt.Fprintln(tw, "USER ID\tGROUP\tNAME\tDEVICE ID\tVIRTUAL IP\tCONTROL\tDATA\tAUTH\tAUTH EXPIRES\tUPDATED AT")
+	for _, device := range devices {
+		fmt.Fprintf(
+			tw,
+			"%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			valueOrDash(device.UserID),
+			valueOrDash(device.Group),
+			valueOrDash(device.Name),
+			valueOrDash(device.DeviceID),
+			valueOrDash(device.VirtualIP),
+			formatBool(device.ControlOnline),
+			formatBool(device.DataPlaneReachable),
+			formatAuthState(device),
+			formatUnix(device.AuthExpireAtUnix),
+			formatUnix(device.UpdatedAtUnix),
+		)
+	}
+	_ = tw.Flush()
+}
+
+func writeDomains(w io.Writer, domains []string) {
+	fmt.Fprintf(w, "DNS domains (%d)\n", len(domains))
+	if len(domains) == 0 {
+		fmt.Fprintln(w, "  (none)")
+		return
+	}
+	for _, domain := range domains {
+		fmt.Fprintf(w, "  - %s\n", domain)
+	}
+}
+
+func writeJSON(w io.Writer, v any) error {
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	return enc.Encode(v)
+}
+
+func newTabWriter(w io.Writer) *tabwriter.Writer {
+	return tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+}
+
+func formatBool(v bool) string {
+	if v {
+		return "yes"
+	}
+	return "no"
+}
+
+func formatAuthState(device deviceInfo) string {
+	if device.AuthExpired {
+		return "expired"
+	}
+	if device.AuthExpireAtUnix > 0 {
+		return "valid"
+	}
+	return "-"
+}
+
+func formatCSV(values []string) string {
+	if len(values) == 0 {
+		return "-"
+	}
+	return strings.Join(values, ",")
+}
+
+func formatUnix(v int64) string {
+	if v <= 0 {
+		return "-"
+	}
+	return time.Unix(v, 0).Local().Format(time.RFC3339)
+}
+
+func formatInt64(v int64) string {
+	if v == 0 {
+		return "0"
+	}
+	return fmt.Sprintf("%d", v)
+}
+
+func formatUint64(v uint64) string {
+	if v == 0 {
+		return "0"
+	}
+	return fmt.Sprintf("%d", v)
+}
+
+func valueOrDash(v string) string {
+	if strings.TrimSpace(v) == "" {
+		return "-"
+	}
+	return v
 }
