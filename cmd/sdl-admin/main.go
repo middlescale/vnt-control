@@ -77,6 +77,7 @@ func main() {
 	global := flag.NewFlagSet("sdl-admin", flag.ContinueOnError)
 	global.SetOutput(os.Stderr)
 	socket := global.String("socket", defaultSocketPath(), "admin unix socket path")
+	jsonOutput := global.Bool("json", false, "print raw response as JSON")
 	if err := global.Parse(os.Args[1:]); err != nil {
 		fatalUsage()
 	}
@@ -118,6 +119,16 @@ func main() {
 	}
 
 	resp := call(*socket, req)
+	if *jsonOutput {
+		if err := writeJSON(os.Stdout, resp); err != nil {
+			fmt.Fprintf(os.Stderr, "encode response failed: %v\n", err)
+			os.Exit(1)
+		}
+		if !resp.OK {
+			os.Exit(1)
+		}
+		return
+	}
 	if !resp.OK {
 		fmt.Fprintf(os.Stderr, "admin error: %s\n", resp.Error)
 		os.Exit(1)
@@ -526,19 +537,19 @@ func call(socket string, req adminRequest) adminResponse {
 
 func fatalUsage() {
 	fmt.Fprintln(os.Stderr, "usage:")
-	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] createUser --userId/-u user1 [--group/-g sales.ms.net]")
-	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] issueDeviceTicket --userId/-u u-1 [--group/-g default.ms.net] [--ttlSeconds/-t 300]")
-	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] listGateway")
-	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] listDevice --userId/-u u-1")
-	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] extendDeviceExpiry --userId/-u u-1 (--deviceId/-d dev-1 | --all) [--group/-g sales.ms.net] [--ttlSeconds/-t 2592000]")
-	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] approveDeviceRename --deviceId/-d dev-1 [--group/-g sales.ms.net] [--userId/-u u-1]")
-	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] renameDevice --deviceId/-d dev-1 --name/-n new-name [--group/-g sales.ms.net] [--userId/-u u-1]")
-	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] registerGateway --gateway-id/-g gw-1")
-	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] dnsDomains")
-	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] dnsSnapshot --domain/-d ms.net [--group/-g default]")
-	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] collectDebug --name/-n win10-node [--group/-g default.ms.net] [--userId/-u u-1] [--sections/-s runtime,gateway,peers,routes,nat,traffic] [--timeoutSec/-t 10]")
-	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] startDebugWatch --name/-n win10-node [--group/-g default.ms.net] [--userId/-u u-1] [--sections/-s all,gateway,icmp,punch,route,runtime] [--durationSec/-d 300] [--timeoutSec/-t 10]")
-	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] stopDebugWatch --name/-n win10-node [--group/-g default.ms.net] [--userId/-u u-1] [--timeoutSec/-t 10]")
+	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] createUser --userId/-u user1 [--group/-g sales.ms.net]")
+	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] issueDeviceTicket --userId/-u u-1 [--group/-g default.ms.net] [--ttlSeconds/-t 300]")
+	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] listGateway")
+	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] listDevice --userId/-u u-1")
+	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] extendDeviceExpiry --userId/-u u-1 (--deviceId/-d dev-1 | --all) [--group/-g sales.ms.net] [--ttlSeconds/-t 2592000]")
+	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] approveDeviceRename --deviceId/-d dev-1 [--group/-g sales.ms.net] [--userId/-u u-1]")
+	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] renameDevice --deviceId/-d dev-1 --name/-n new-name [--group/-g sales.ms.net] [--userId/-u u-1]")
+	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] registerGateway --gateway-id/-g gw-1")
+	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] dnsDomains")
+	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] dnsSnapshot --domain/-d ms.net [--group/-g default]")
+	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] collectDebug --name/-n win10-node [--group/-g default.ms.net] [--userId/-u u-1] [--sections/-s runtime,gateway,peers,routes,nat,traffic] [--timeoutSec/-t 10]")
+	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] startDebugWatch --name/-n win10-node [--group/-g default.ms.net] [--userId/-u u-1] [--sections/-s all,gateway,icmp,punch,route,runtime] [--durationSec/-d 300] [--timeoutSec/-t 10]")
+	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] stopDebugWatch --name/-n win10-node [--group/-g default.ms.net] [--userId/-u u-1] [--timeoutSec/-t 10]")
 	os.Exit(2)
 }
 

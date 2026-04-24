@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -88,5 +89,30 @@ func TestWriteResponseExtendDeviceExpiryFormatsSummaryAndTable(t *testing.T) {
 	}
 	if stderr.Len() != 0 {
 		t.Fatalf("expected no stderr output, got: %s", stderr.String())
+	}
+}
+
+func TestWriteJSONOutputsStructuredResponse(t *testing.T) {
+	var stdout bytes.Buffer
+	resp := adminResponse{
+		OK:     true,
+		UserID: "u-1",
+		Name:   "alice",
+		Domain: "sales.ms.net",
+	}
+
+	if err := writeJSON(&stdout, resp); err != nil {
+		t.Fatalf("writeJSON returned error: %v", err)
+	}
+
+	var decoded adminResponse
+	if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil {
+		t.Fatalf("output is not valid json: %v\n%s", err, stdout.String())
+	}
+	if !decoded.OK || decoded.UserID != "u-1" || decoded.Name != "alice" || decoded.Domain != "sales.ms.net" {
+		t.Fatalf("unexpected decoded response: %+v", decoded)
+	}
+	if !strings.Contains(stdout.String(), "\"ok\": true") {
+		t.Fatalf("expected pretty json output, got:\n%s", stdout.String())
 	}
 }
