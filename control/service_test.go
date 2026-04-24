@@ -678,6 +678,106 @@ func TestBuildPunchStartPacketsFromStatusSkipsExistingMutualP2P(t *testing.T) {
 	}
 }
 
+func TestBuildPunchStartPacketsFromStatusSkipsStatusUpdateWhenOneSidedP2PExists(t *testing.T) {
+	ctrl := newTestController(t)
+	defer ctrl.Stop()
+	srcReg := mustRegister(t, ctrl, newBaseRegisterReq("dev-a", "node-a"), &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1111})
+	dstReg := mustRegister(t, ctrl, newBaseRegisterReq("dev-b", "node-b"), &net.UDPAddr{IP: net.ParseIP("1.1.1.2"), Port: 2222})
+	srcStatus := &pb.ClientStatusInfo{
+		Source:  srcReg.GetVirtualIp(),
+		NatType: pb.PunchNatType_Cone,
+		P2PList: []*pb.RouteItem{
+			{NextIp: dstReg.GetVirtualIp()},
+		},
+		PunchTriggerReason: pb.PunchTriggerReason_PunchTriggerStatusUpdate,
+		PublicUdpEndpoints: []*pb.PunchEndpoint{
+			{Ip: util.IpToUint32(net.ParseIP("8.8.8.8")), Port: 30001},
+		},
+	}
+	dstStatus := &pb.ClientStatusInfo{
+		Source:  dstReg.GetVirtualIp(),
+		NatType: pb.PunchNatType_Cone,
+		PublicUdpEndpoints: []*pb.PunchEndpoint{
+			{Ip: util.IpToUint32(net.ParseIP("9.9.9.9")), Port: 30002},
+		},
+	}
+	srcPayload, err := proto.Marshal(srcStatus)
+	if err != nil {
+		t.Fatalf("marshal src status failed: %v", err)
+	}
+	dstPayload, err := proto.Marshal(dstStatus)
+	if err != nil {
+		t.Fatalf("marshal dst status failed: %v", err)
+	}
+	if err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(srcReg.GetVirtualIp()), Payload: srcPayload}); err != nil {
+		t.Fatalf("update src status failed: %v", err)
+	}
+	if err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(dstReg.GetVirtualIp()), Payload: dstPayload}); err != nil {
+		t.Fatalf("update dst status failed: %v", err)
+	}
+	startPackets, err := ctrl.BuildPunchStartPacketsFromStatus(&protocol.Packet{
+		Proto: protocol.ProtocolService,
+		SrcIP: util.Uint32ToIP(srcReg.GetVirtualIp()),
+		DstIP: util.Uint32ToIP(srcReg.GetVirtualGateway()),
+	})
+	if err != nil {
+		t.Fatalf("BuildPunchStartPacketsFromStatus failed: %v", err)
+	}
+	if len(startPackets) != 0 {
+		t.Fatalf("expected one-sided p2p path to suppress status-update punch churn, got %d packets", len(startPackets))
+	}
+}
+
+func TestBuildPunchStartPacketsFromStatusAllowsRouteTimeoutRecoveryWhenOneSidedP2PExists(t *testing.T) {
+	ctrl := newTestController(t)
+	defer ctrl.Stop()
+	srcReg := mustRegister(t, ctrl, newBaseRegisterReq("dev-a", "node-a"), &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1111})
+	dstReg := mustRegister(t, ctrl, newBaseRegisterReq("dev-b", "node-b"), &net.UDPAddr{IP: net.ParseIP("1.1.1.2"), Port: 2222})
+	srcStatus := &pb.ClientStatusInfo{
+		Source:  srcReg.GetVirtualIp(),
+		NatType: pb.PunchNatType_Cone,
+		P2PList: []*pb.RouteItem{
+			{NextIp: dstReg.GetVirtualIp()},
+		},
+		PunchTriggerReason: pb.PunchTriggerReason_PunchTriggerRouteTimeout,
+		PublicUdpEndpoints: []*pb.PunchEndpoint{
+			{Ip: util.IpToUint32(net.ParseIP("8.8.8.8")), Port: 30001},
+		},
+	}
+	dstStatus := &pb.ClientStatusInfo{
+		Source:  dstReg.GetVirtualIp(),
+		NatType: pb.PunchNatType_Cone,
+		PublicUdpEndpoints: []*pb.PunchEndpoint{
+			{Ip: util.IpToUint32(net.ParseIP("9.9.9.9")), Port: 30002},
+		},
+	}
+	srcPayload, err := proto.Marshal(srcStatus)
+	if err != nil {
+		t.Fatalf("marshal src status failed: %v", err)
+	}
+	dstPayload, err := proto.Marshal(dstStatus)
+	if err != nil {
+		t.Fatalf("marshal dst status failed: %v", err)
+	}
+	if err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(srcReg.GetVirtualIp()), Payload: srcPayload}); err != nil {
+		t.Fatalf("update src status failed: %v", err)
+	}
+	if err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(dstReg.GetVirtualIp()), Payload: dstPayload}); err != nil {
+		t.Fatalf("update dst status failed: %v", err)
+	}
+	startPackets, err := ctrl.BuildPunchStartPacketsFromStatus(&protocol.Packet{
+		Proto: protocol.ProtocolService,
+		SrcIP: util.Uint32ToIP(srcReg.GetVirtualIp()),
+		DstIP: util.Uint32ToIP(srcReg.GetVirtualGateway()),
+	})
+	if err != nil {
+		t.Fatalf("BuildPunchStartPacketsFromStatus failed: %v", err)
+	}
+	if len(startPackets) != 2 {
+		t.Fatalf("expected route-timeout recovery to still dispatch punch, got %d packets", len(startPackets))
+	}
+}
+
 func TestBuildPunchStartPacketsFromStatusIncludesLocalEndpointsForPrivateRemoteAddr(t *testing.T) {
 	ctrl := newTestController(t)
 	defer ctrl.Stop()
@@ -2065,7 +2165,50 @@ func TestRegistrationIncludesAllApprovedAliveGateways(t *testing.T) {
 	}
 }
 
-func TestRefreshGatewayGrantPacket(t *testing.T) {
+func TestPushDeviceListReusesGatewayGrantSession(t *testing.T) {
+	ctrl := newTestController(t)
+	defer ctrl.Stop()
+	ctrl.RegisterGatewayNode("gw-default", "127.0.0.1:51820", []string{"udp_blind_relay_v1"}, "", nil)
+
+	resp1 := mustRegister(t, ctrl, newBaseRegisterReq("dev-reuse-a", "node-reuse-a"), &net.UDPAddr{IP: net.ParseIP("1.1.1.41"), Port: 4141})
+	grant1 := resp1.GetGatewayAccessGrant()
+	if grant1 == nil {
+		t.Fatalf("expected gateway access grant in first registration response")
+	}
+	resp2 := mustRegister(t, ctrl, newBaseRegisterReq("dev-reuse-b", "node-reuse-b"), &net.UDPAddr{IP: net.ParseIP("1.1.1.42"), Port: 4242})
+
+	packets, err := ctrl.BuildPushDeviceListPacketsForPeerChange(resp2.GetVirtualIp())
+	if err != nil {
+		t.Fatalf("BuildPushDeviceListPacketsForPeerChange failed: %v", err)
+	}
+	var pushed *pb.DeviceList
+	for _, packet := range packets {
+		if !packet.DstIP.Equal(util.Uint32ToIP(resp1.GetVirtualIp())) {
+			continue
+		}
+		var list pb.DeviceList
+		if err := proto.Unmarshal(packet.Payload, &list); err != nil {
+			t.Fatalf("unmarshal device list failed: %v", err)
+		}
+		pushed = &list
+		break
+	}
+	if pushed == nil {
+		t.Fatalf("expected push device list for first client")
+	}
+	if len(pushed.GetGatewayAccessGrants()) != 1 {
+		t.Fatalf("expected one pushed gateway grant, got %d", len(pushed.GetGatewayAccessGrants()))
+	}
+	pushedGrant := pushed.GetGatewayAccessGrants()[0]
+	if pushedGrant.GetSessionId() != grant1.GetSessionId() {
+		t.Fatalf("expected pushed gateway session to be reused, got %d want %d", pushedGrant.GetSessionId(), grant1.GetSessionId())
+	}
+	if pushedGrant.GetTicketExpireUnixMs() != grant1.GetTicketExpireUnixMs() {
+		t.Fatalf("expected pushed gateway ticket expiry to be reused, got %d want %d", pushedGrant.GetTicketExpireUnixMs(), grant1.GetTicketExpireUnixMs())
+	}
+}
+
+func TestRefreshGatewayGrantPacketReusesSessionWhenMatched(t *testing.T) {
 	ctrl := newTestController(t)
 	defer ctrl.Stop()
 	ctrl.RegisterGatewayNode("gw-default", "127.0.0.1:51820", []string{"udp_blind_relay_v1"}, "", nil)
@@ -2110,6 +2253,86 @@ func TestRefreshGatewayGrantPacket(t *testing.T) {
 	}
 	if resp.GetGatewayAccessGrant() == nil {
 		t.Fatalf("expected gateway access grant in refresh response")
+	}
+	if resp.GetGatewayAccessGrant().GetSessionId() != grant.GetSessionId() {
+		t.Fatalf("expected refresh to reuse session id, got %d want %d", resp.GetGatewayAccessGrant().GetSessionId(), grant.GetSessionId())
+	}
+}
+
+func TestRefreshGatewayGrantPacketForceReissueRotatesSession(t *testing.T) {
+	ctrl := newTestController(t)
+	defer ctrl.Stop()
+	ctrl.RegisterGatewayNode("gw-default", "127.0.0.1:51820", []string{"udp_blind_relay_v1"}, "", nil)
+
+	regReq := newBaseRegisterReq("dev-refresh-force-a", "node-refresh-force-a")
+	regResp := mustRegister(t, ctrl, regReq, &net.UDPAddr{IP: net.ParseIP("1.1.1.32"), Port: 3232})
+	grant := regResp.GetGatewayAccessGrant()
+	if grant == nil {
+		t.Fatalf("expected gateway access grant in registration response")
+	}
+
+	req := &pb.RefreshGatewayGrantRequest{
+		VirtualIp:     regResp.GetVirtualIp(),
+		DeviceId:      regReq.GetDeviceId(),
+		LastSessionId: grant.GetSessionId(),
+		ForceReissue:  true,
+	}
+	payload, err := proto.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal refresh gateway grant request failed: %v", err)
+	}
+	respPacket, err := ctrl.HandleRefreshGatewayGrantPacket(&protocol.Packet{
+		Ver:       protocol.V3,
+		Proto:     protocol.ProtocolService,
+		AppProto:  protocol.AppProtoRefreshGatewayGrantRequest,
+		SourceTTL: protocol.MAX_TTL,
+		TTL:       protocol.MAX_TTL,
+		SrcIP:     util.Uint32ToIP(regResp.GetVirtualIp()),
+		DstIP:     util.Uint32ToIP(regResp.GetVirtualGateway()),
+		Payload:   payload,
+	})
+	if err != nil {
+		t.Fatalf("HandleRefreshGatewayGrantPacket failed: %v", err)
+	}
+
+	var resp pb.RefreshGatewayGrantResponse
+	if err := proto.Unmarshal(respPacket.Payload, &resp); err != nil {
+		t.Fatalf("unmarshal refresh gateway grant response failed: %v", err)
+	}
+	if !resp.GetHasUpdate() {
+		t.Fatalf("expected refreshed grant, got %+v", resp)
+	}
+	if resp.GetGatewayAccessGrant() == nil {
+		t.Fatalf("expected gateway access grant in refresh response")
+	}
+	if resp.GetGatewayAccessGrant().GetSessionId() == grant.GetSessionId() {
+		t.Fatalf("expected force reissue to rotate session id")
+	}
+}
+
+func TestGatewayGrantCachePrunesRemovedGateways(t *testing.T) {
+	ctrl := newTestController(t)
+	defer ctrl.Stop()
+	ctrl.RegisterGatewayNode("gw-default", "127.0.0.1:51820", []string{"udp_blind_relay_v1"}, "", nil)
+
+	regReq := newBaseRegisterReq("dev-prune-a", "node-prune-a")
+	regResp := mustRegister(t, ctrl, regReq, &net.UDPAddr{IP: net.ParseIP("1.1.1.33"), Port: 3333})
+	if regResp.GetGatewayAccessGrant() == nil {
+		t.Fatalf("expected gateway access grant in registration response")
+	}
+	if len(ctrl.gatewayGrantCache) == 0 {
+		t.Fatalf("expected gateway grant cache to be populated")
+	}
+
+	ctrl.gatewayMu.Lock()
+	delete(ctrl.gatewayNodes, "gw-default")
+	ctrl.gatewayMu.Unlock()
+
+	if grants := ctrl.buildGatewayAccessGrants(regResp.GetVirtualIp(), regReq.GetDeviceId()); grants != nil {
+		t.Fatalf("expected no grants after removing active gateway, got %+v", grants)
+	}
+	if len(ctrl.gatewayGrantCache) != 0 {
+		t.Fatalf("expected stale gateway grant cache entries to be pruned, got %d", len(ctrl.gatewayGrantCache))
 	}
 }
 

@@ -41,6 +41,7 @@ type Controller struct {
 	gatewaySeen             map[string]GatewayNodeInfo
 	gatewayNonce            map[string]map[string]int64
 	gatewayGrantFingerprint string
+	gatewayGrantCache       map[string]cachedGatewayGrant
 
 	renameMu            sync.Mutex
 	pendingDeviceRename map[string]PendingDeviceRename
@@ -66,6 +67,19 @@ type GatewayNodeInfo struct {
 	UDPKeyID       string
 	UDPPublicKey   []byte
 	UpdatedAt      time.Time
+}
+
+type cachedGatewayGrant struct {
+	gatewayID       string
+	nodeFingerprint string
+	expireUnixMs    int64
+	grant           *pb.GatewayAccessGrant
+}
+
+type gatewayGrantBuildOptions struct {
+	lastSessionID uint64
+	forceReissue  bool
+	refresh       bool
 }
 
 type deviceAuthChallengeState struct {
@@ -187,6 +201,7 @@ func NewController(cfg *config.Config) (*Controller, error) {
 		gatewayAllow:             gatewayAllow,
 		gatewaySeen:              make(map[string]GatewayNodeInfo),
 		gatewayNonce:             make(map[string]map[string]int64),
+		gatewayGrantCache:        make(map[string]cachedGatewayGrant),
 		pendingDeviceRename:      make(map[string]PendingDeviceRename),
 		pendingDebugCollect:      make(map[uint64]chan DebugCollectResult),
 		pendingDebugWatchStart:   make(map[uint64]chan DebugWatchStartResult),
@@ -865,7 +880,7 @@ func (c *Controller) HandleRefreshGatewayGrantPacket(request *protocol.Packet) (
 		HasUpdate: true,
 		Reason:    "refreshed",
 	}
-	if grants := c.buildGatewayAccessGrants(req.GetVirtualIp(), req.GetDeviceId()); len(grants) > 0 {
+	if grants := c.buildGatewayAccessGrantsForRefresh(req.GetVirtualIp(), req.GetDeviceId(), req.GetLastSessionId(), req.GetForceReissue()); len(grants) > 0 {
 		resp.GatewayAccessGrant = selectPrimaryGatewayGrant(grants)
 		resp.GatewayAccessGrants = grants
 	} else {
@@ -983,14 +998,18 @@ func (c *Controller) BuildPunchStartPacketsFromStatus(request *protocol.Packet) 
 			if targetIP == srcIP || !targetClient.ControlOnline || targetClient.ClientStatus == nil {
 				continue
 			}
-			if clientsHaveMutualP2PPath(srcClient, srcIP, targetClient, targetIP) {
-				continue
-			}
 			triggerReason := pb.PunchTriggerReason_PunchTriggerStatusUpdate
 			if srcClient.ClientStatus != nil {
 				if parsed, ok := pb.PunchTriggerReason_value[srcClient.ClientStatus.PunchTriggerReason]; ok {
 					triggerReason = pb.PunchTriggerReason(parsed)
 				}
+			}
+			if triggerReason == pb.PunchTriggerReason_PunchTriggerStatusUpdate {
+				if shouldSuppressPunchStartForStatusUpdate(srcClient, srcIP, targetClient, targetIP) {
+					continue
+				}
+			} else if shouldSuppressPunchStartForOtherTrigger(srcClient, srcIP, targetClient, targetIP) {
+				continue
 			}
 			manualTrigger := triggerReason == pb.PunchTriggerReason_PunchTriggerManualRequest
 			pairKey := punchPairKey(srcIP, targetIP)
@@ -1112,8 +1131,30 @@ func clientReportsDirectPeer(client ClientInfo, peerIP uint32) bool {
 	return false
 }
 
+func clientsHaveAnyP2PPath(srcClient ClientInfo, srcIP uint32, targetClient ClientInfo, targetIP uint32) bool {
+	return clientReportsDirectPeer(srcClient, targetIP) || clientReportsDirectPeer(targetClient, srcIP)
+}
+
 func clientsHaveMutualP2PPath(srcClient ClientInfo, srcIP uint32, targetClient ClientInfo, targetIP uint32) bool {
 	return clientReportsDirectPeer(srcClient, targetIP) && clientReportsDirectPeer(targetClient, srcIP)
+}
+
+func shouldSuppressPunchStartForStatusUpdate(
+	srcClient ClientInfo,
+	srcIP uint32,
+	targetClient ClientInfo,
+	targetIP uint32,
+) bool {
+	return clientsHaveAnyP2PPath(srcClient, srcIP, targetClient, targetIP)
+}
+
+func shouldSuppressPunchStartForOtherTrigger(
+	srcClient ClientInfo,
+	srcIP uint32,
+	targetClient ClientInfo,
+	targetIP uint32,
+) bool {
+	return clientsHaveMutualP2PPath(srcClient, srcIP, targetClient, targetIP)
 }
 
 func (c *Controller) HandlePunchRequestPacket(request *protocol.Packet) (*protocol.Packet, error) {
@@ -2089,10 +2130,32 @@ func (c *Controller) buildGatewayAccessGrant(virtualIP uint32, deviceID string) 
 }
 
 func (c *Controller) buildGatewayAccessGrants(virtualIP uint32, deviceID string) []*pb.GatewayAccessGrant {
-	c.gatewayMu.RLock()
-	defer c.gatewayMu.RUnlock()
+	return c.buildGatewayAccessGrantsLocked(virtualIP, deviceID, gatewayGrantBuildOptions{})
+}
+
+func (c *Controller) buildGatewayAccessGrantsForRefresh(
+	virtualIP uint32,
+	deviceID string,
+	lastSessionID uint64,
+	forceReissue bool,
+) []*pb.GatewayAccessGrant {
+	return c.buildGatewayAccessGrantsLocked(virtualIP, deviceID, gatewayGrantBuildOptions{
+		lastSessionID: lastSessionID,
+		forceReissue:  forceReissue,
+		refresh:       true,
+	})
+}
+
+func (c *Controller) buildGatewayAccessGrantsLocked(
+	virtualIP uint32,
+	deviceID string,
+	opts gatewayGrantBuildOptions,
+) []*pb.GatewayAccessGrant {
+	c.gatewayMu.Lock()
+	defer c.gatewayMu.Unlock()
 	now := time.Now()
 	nodes := c.approvedAliveGatewayNodesLocked(now)
+	c.pruneGatewayGrantCacheLocked(now, nodes)
 	if len(nodes) == 0 {
 		return nil
 	}
@@ -2100,22 +2163,93 @@ func (c *Controller) buildGatewayAccessGrants(virtualIP uint32, deviceID string)
 	leaseSecs := uint32(60)
 	graceSecs := uint32(30)
 	grants := make([]*pb.GatewayAccessGrant, 0, len(nodes))
-	baseSessionID := uint64(now.UnixNano())
 	for index, node := range nodes {
-		grant := c.buildGatewayAccessGrantForNode(
+		grant := c.gatewayAccessGrantForNodeLocked(
 			virtualIP,
 			deviceID,
 			node,
-			baseSessionID+uint64(index),
+			uint64(index),
 			expire.UnixMilli(),
 			leaseSecs,
 			graceSecs,
+			opts,
+			now,
 		)
 		if grant != nil {
 			grants = append(grants, grant)
 		}
 	}
 	return grants
+}
+
+func (c *Controller) gatewayAccessGrantForNodeLocked(
+	virtualIP uint32,
+	deviceID string,
+	node GatewayNodeInfo,
+	sessionSalt uint64,
+	expireUnixMs int64,
+	leaseSecs uint32,
+	graceSecs uint32,
+	opts gatewayGrantBuildOptions,
+	now time.Time,
+) *pb.GatewayAccessGrant {
+	cacheKey := gatewayGrantCacheKey(virtualIP, deviceID, node.GatewayID)
+	nodeFingerprint := gatewayGrantNodeFingerprint(node)
+	cached, ok := c.gatewayGrantCache[cacheKey]
+	if opts.refresh {
+		if !opts.forceReissue && opts.lastSessionID == 0 && ok &&
+			cached.nodeFingerprint == nodeFingerprint &&
+			cached.grant != nil &&
+			cached.expireUnixMs > now.Add(30*time.Second).UnixMilli() {
+			return cloneGatewayAccessGrant(cached.grant)
+		}
+	} else if ok &&
+		cached.nodeFingerprint == nodeFingerprint &&
+		cached.grant != nil &&
+		cached.expireUnixMs > now.Add(30*time.Second).UnixMilli() {
+		return cloneGatewayAccessGrant(cached.grant)
+	}
+
+	sessionID := uint64(now.UnixNano()) + sessionSalt
+	if opts.refresh && !opts.forceReissue && opts.lastSessionID != 0 && ok &&
+		cached.grant != nil &&
+		cached.grant.GetSessionId() == opts.lastSessionID {
+		sessionID = opts.lastSessionID
+	}
+	grant := c.buildGatewayAccessGrantForNode(
+		virtualIP,
+		deviceID,
+		node,
+		sessionID,
+		expireUnixMs,
+		leaseSecs,
+		graceSecs,
+	)
+	if grant == nil {
+		delete(c.gatewayGrantCache, cacheKey)
+		return nil
+	}
+	c.gatewayGrantCache[cacheKey] = cachedGatewayGrant{
+		gatewayID:       node.GatewayID,
+		nodeFingerprint: nodeFingerprint,
+		expireUnixMs:    grant.GetTicketExpireUnixMs(),
+		grant:           cloneGatewayAccessGrant(grant),
+	}
+	return grant
+}
+
+func (c *Controller) pruneGatewayGrantCacheLocked(now time.Time, nodes []GatewayNodeInfo) {
+	active := make(map[string]string, len(nodes))
+	expireThreshold := now.Add(30 * time.Second).UnixMilli()
+	for _, node := range nodes {
+		active[node.GatewayID] = gatewayGrantNodeFingerprint(node)
+	}
+	for key, cached := range c.gatewayGrantCache {
+		fingerprint, ok := active[cached.gatewayID]
+		if !ok || cached.grant == nil || cached.expireUnixMs <= expireThreshold || cached.nodeFingerprint != fingerprint {
+			delete(c.gatewayGrantCache, key)
+		}
+	}
 }
 
 func (c *Controller) buildGatewayAccessGrantForNode(
@@ -2233,7 +2367,37 @@ func selectPrimaryGatewayGrant(grants []*pb.GatewayAccessGrant) *pb.GatewayAcces
 	if len(grants) == 0 {
 		return nil
 	}
-	return grants[0]
+	return cloneGatewayAccessGrant(grants[0])
+}
+
+func cloneGatewayAccessGrant(grant *pb.GatewayAccessGrant) *pb.GatewayAccessGrant {
+	if grant == nil {
+		return nil
+	}
+	cloned, _ := proto.Clone(grant).(*pb.GatewayAccessGrant)
+	return cloned
+}
+
+func gatewayGrantCacheKey(virtualIP uint32, deviceID, gatewayID string) string {
+	return fmt.Sprintf("%d|%s|%s", virtualIP, deviceID, gatewayID)
+}
+
+func gatewayGrantNodeFingerprint(node GatewayNodeInfo) string {
+	parts := []string{
+		node.GatewayID,
+		node.Endpoint,
+		fmt.Sprintf("%d", node.DefaultChannel),
+		node.UDPKeyID,
+		hex.EncodeToString(node.UDPPublicKey),
+		strings.Join(node.Capabilities, ","),
+	}
+	for _, channel := range node.Channels {
+		if channel == nil {
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%d|%s|%s", channel.GetKind(), channel.GetAddr(), channel.GetServerName()))
+	}
+	return strings.Join(parts, ";")
 }
 
 func cloneGatewayChannels(channels []*pb.GatewayChannel) []*pb.GatewayChannel {

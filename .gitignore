@@ -1,5 +1,6 @@
 # Go build
 sdl-control
+sdl-admin
 *.exe
 *.out
 *.test
