@@ -9,8 +9,19 @@ import (
 	"net"
 	"os"
 	"strings"
-	"text/tabwriter"
 	"time"
+	"unicode/utf8"
+)
+
+const (
+	ansiReset  = "\033[0m"
+	ansiBold   = "\033[1m"
+	ansiRed    = "\033[31m"
+	ansiGreen  = "\033[32m"
+	ansiYellow = "\033[33m"
+	ansiBlue   = "\033[34m"
+	ansiCyan   = "\033[36m"
+	ansiGray   = "\033[90m"
 )
 
 type adminRequest struct {
@@ -578,72 +589,72 @@ type kv struct {
 }
 
 func writeKeyValueBlock(w io.Writer, title string, pairs []kv) {
-	fmt.Fprintln(w, title)
+	style := newOutputStyle(w)
+	fmt.Fprintln(w, style.title(title))
 	for _, pair := range pairs {
-		fmt.Fprintf(w, "  %-12s %s\n", pair.Key+":", pair.Value)
+		fmt.Fprintf(w, "  %-12s %s\n", style.label(pair.Key+":"), pair.Value)
 	}
 }
 
 func writeGatewayTable(w io.Writer, gateways []gatewayInfo) {
-	fmt.Fprintf(w, "Gateways (%d)\n", len(gateways))
+	style := newOutputStyle(w)
+	fmt.Fprintln(w, style.title(fmt.Sprintf("Gateways (%d)", len(gateways))))
 	if len(gateways) == 0 {
-		fmt.Fprintln(w, "  (none)")
+		fmt.Fprintln(w, style.muted("  (none)"))
 		return
 	}
-	tw := newTabWriter(w)
-	fmt.Fprintln(tw, "ID\tENDPOINT\tDEFAULT\tAPPROVED\tREPORTED\tALIVE\tCAPABILITIES\tUPDATED AT")
+	headers := []string{"ID", "ENDPOINT", "DEFAULT", "APPROVED", "REPORTED", "ALIVE", "CAPABILITIES", "UPDATED AT"}
+	rows := make([][]tableCell, 0, len(gateways))
 	for _, gw := range gateways {
-		fmt.Fprintf(
-			tw,
-			"%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			valueOrDash(gw.GatewayID),
-			valueOrDash(gw.Endpoint),
-			formatBool(gw.Default),
-			formatBool(gw.Approved),
-			formatBool(gw.Reported),
-			formatBool(gw.Alive),
-			formatCSV(gw.Capabilities),
-			formatUnix(gw.UpdatedAtUnix),
-		)
+		rows = append(rows, []tableCell{
+			plainCell(valueOrDash(gw.GatewayID)),
+			plainCell(valueOrDash(gw.Endpoint)),
+			style.boolCell(gw.Default),
+			style.boolCell(gw.Approved),
+			style.boolCell(gw.Reported),
+			style.boolCell(gw.Alive),
+			plainCell(formatCSV(gw.Capabilities)),
+			style.timeCell(formatUnix(gw.UpdatedAtUnix)),
+		})
 	}
-	_ = tw.Flush()
+	renderTable(w, style, headers, rows)
 }
 
 func writeDeviceTable(w io.Writer, title string, devices []deviceInfo) {
-	fmt.Fprintf(w, "%s\n", title)
+	style := newOutputStyle(w)
+	fmt.Fprintln(w, style.title(title))
 	if len(devices) == 0 {
-		fmt.Fprintln(w, "  (none)")
+		fmt.Fprintln(w, style.muted("  (none)"))
 		return
 	}
-	tw := newTabWriter(w)
-	fmt.Fprintln(tw, "USER ID\tGROUP\tNAME\tDEVICE ID\tVIRTUAL IP\tCONTROL\tDATA\tAUTH\tAUTH EXPIRES\tUPDATED AT")
+	headers := []string{"USER ID", "GROUP", "NAME", "DEVICE ID", "VIRTUAL IP", "CONTROL", "DATA", "AUTH", "AUTH EXPIRES", "UPDATED AT"}
+	rows := make([][]tableCell, 0, len(devices))
 	for _, device := range devices {
-		fmt.Fprintf(
-			tw,
-			"%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			valueOrDash(device.UserID),
-			valueOrDash(device.Group),
-			valueOrDash(device.Name),
-			valueOrDash(device.DeviceID),
-			valueOrDash(device.VirtualIP),
-			formatBool(device.ControlOnline),
-			formatBool(device.DataPlaneReachable),
-			formatAuthState(device),
-			formatUnix(device.AuthExpireAtUnix),
-			formatUnix(device.UpdatedAtUnix),
-		)
+		rows = append(rows, []tableCell{
+			plainCell(valueOrDash(device.UserID)),
+			plainCell(valueOrDash(device.Group)),
+			plainCell(valueOrDash(device.Name)),
+			plainCell(valueOrDash(device.DeviceID)),
+			plainCell(valueOrDash(device.VirtualIP)),
+			style.boolCell(device.ControlOnline),
+			style.boolCell(device.DataPlaneReachable),
+			style.authCell(formatAuthState(device)),
+			style.timeCell(formatUnix(device.AuthExpireAtUnix)),
+			style.timeCell(formatUnix(device.UpdatedAtUnix)),
+		})
 	}
-	_ = tw.Flush()
+	renderTable(w, style, headers, rows)
 }
 
 func writeDomains(w io.Writer, domains []string) {
-	fmt.Fprintf(w, "DNS domains (%d)\n", len(domains))
+	style := newOutputStyle(w)
+	fmt.Fprintln(w, style.title(fmt.Sprintf("DNS domains (%d)", len(domains))))
 	if len(domains) == 0 {
-		fmt.Fprintln(w, "  (none)")
+		fmt.Fprintln(w, style.muted("  (none)"))
 		return
 	}
 	for _, domain := range domains {
-		fmt.Fprintf(w, "  - %s\n", domain)
+		fmt.Fprintf(w, "  %s %s\n", style.accent("-"), domain)
 	}
 }
 
@@ -651,10 +662,6 @@ func writeJSON(w io.Writer, v any) error {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	return enc.Encode(v)
-}
-
-func newTabWriter(w io.Writer) *tabwriter.Writer {
-	return tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 }
 
 func formatBool(v bool) string {
@@ -707,4 +714,158 @@ func valueOrDash(v string) string {
 		return "-"
 	}
 	return v
+}
+
+type outputStyle struct {
+	enabled bool
+}
+
+type tableCell struct {
+	raw      string
+	rendered string
+}
+
+func newOutputStyle(w io.Writer) outputStyle {
+	return outputStyle{enabled: isColorTerminal(w)}
+}
+
+func (s outputStyle) title(text string) string {
+	return s.wrap(text, ansiBold+ansiCyan)
+}
+
+func (s outputStyle) label(text string) string {
+	return s.wrap(text, ansiBold)
+}
+
+func (s outputStyle) accent(text string) string {
+	return s.wrap(text, ansiCyan)
+}
+
+func (s outputStyle) muted(text string) string {
+	return s.wrap(text, ansiGray)
+}
+
+func (s outputStyle) tableHeader(text string) string {
+	return s.wrap(text, ansiBold+ansiBlue)
+}
+
+func (s outputStyle) boolCell(v bool) tableCell {
+	if v {
+		return styledCell("yes", s.wrap("yes", ansiGreen))
+	}
+	return styledCell("no", s.wrap("no", ansiRed))
+}
+
+func (s outputStyle) authCell(v string) tableCell {
+	switch v {
+	case "valid":
+		return styledCell(v, s.wrap(v, ansiGreen))
+	case "expired":
+		return styledCell(v, s.wrap(v, ansiRed))
+	case "-":
+		return styledCell(v, s.wrap(v, ansiGray))
+	default:
+		return styledCell(v, s.wrap(v, ansiYellow))
+	}
+}
+
+func (s outputStyle) timeCell(v string) tableCell {
+	if v == "-" {
+		return styledCell(v, s.wrap(v, ansiGray))
+	}
+	return styledCell(v, s.wrap(v, ansiBlue))
+}
+
+func (s outputStyle) wrap(text, code string) string {
+	if !s.enabled || text == "" {
+		return text
+	}
+	return code + text + ansiReset
+}
+
+func plainCell(text string) tableCell {
+	return tableCell{raw: text, rendered: text}
+}
+
+func styledCell(raw, rendered string) tableCell {
+	return tableCell{raw: raw, rendered: rendered}
+}
+
+func renderTable(w io.Writer, style outputStyle, headers []string, rows [][]tableCell) {
+	if len(headers) == 0 {
+		return
+	}
+	widths := make([]int, len(headers))
+	for i, header := range headers {
+		widths[i] = utf8.RuneCountInString(header)
+	}
+	for _, row := range rows {
+		for i, cell := range row {
+			if i >= len(widths) {
+				break
+			}
+			if n := utf8.RuneCountInString(cell.raw); n > widths[i] {
+				widths[i] = n
+			}
+		}
+	}
+	for i, header := range headers {
+		text := padCell(header, widths[i], i == len(headers)-1)
+		fmt.Fprint(w, style.tableHeader(text))
+	}
+	fmt.Fprintln(w)
+	for _, row := range rows {
+		for i, cell := range row {
+			if i >= len(widths) {
+				break
+			}
+			fmt.Fprint(w, padRenderedCell(cell, widths[i], i == len(headers)-1))
+		}
+		fmt.Fprintln(w)
+	}
+}
+
+func padRenderedCell(cell tableCell, width int, last bool) string {
+	padding := width - utf8.RuneCountInString(cell.raw)
+	if padding < 0 {
+		padding = 0
+	}
+	suffix := strings.Repeat(" ", padding)
+	if !last {
+		suffix += "  "
+	}
+	return cell.rendered + suffix
+}
+
+func padCell(text string, width int, last bool) string {
+	padding := width - utf8.RuneCountInString(text)
+	if padding < 0 {
+		padding = 0
+	}
+	suffix := strings.Repeat(" ", padding)
+	if !last {
+		suffix += "  "
+	}
+	return text + suffix
+}
+
+func isColorTerminal(w io.Writer) bool {
+	if os.Getenv("NO_COLOR") != "" {
+		return false
+	}
+	if os.Getenv("CLICOLOR_FORCE") != "" && os.Getenv("CLICOLOR_FORCE") != "0" {
+		return true
+	}
+	if os.Getenv("TERM") == "dumb" {
+		return false
+	}
+	file, ok := w.(*os.File)
+	if !ok {
+		return false
+	}
+	info, err := file.Stat()
+	if err != nil {
+		return false
+	}
+	return (info.Mode() & os.ModeCharDevice) != 0
 }

@@ -116,3 +116,31 @@ func TestWriteJSONOutputsStructuredResponse(t *testing.T) {
 		t.Fatalf("expected pretty json output, got:\n%s", stdout.String())
 	}
 }
+
+func TestWriteResponseAddsColorWhenForced(t *testing.T) {
+	t.Setenv("CLICOLOR_FORCE", "1")
+	t.Setenv("NO_COLOR", "")
+	t.Setenv("TERM", "xterm-256color")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := writeResponse(&stdout, &stderr, "list_gateway", adminResponse{
+		Gateways: []gatewayInfo{
+			{GatewayID: "gw-1", Endpoint: "10.0.0.1:443", Default: true, Approved: true, Reported: false, Alive: true},
+		},
+	})
+	if err != nil {
+		t.Fatalf("writeResponse returned error: %v", err)
+	}
+
+	got := stdout.String()
+	if !strings.Contains(got, "\x1b[") {
+		t.Fatalf("expected ANSI color codes in output, got:\n%s", got)
+	}
+	if !strings.Contains(got, ansiGreen+"yes"+ansiReset) {
+		t.Fatalf("expected green yes status in output, got:\n%s", got)
+	}
+	if !strings.Contains(got, ansiRed+"no"+ansiReset) {
+		t.Fatalf("expected red no status in output, got:\n%s", got)
+	}
+}
