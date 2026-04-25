@@ -29,8 +29,24 @@ type framedSession interface {
 
 type sessionStream struct {
 	remoteAddr string
-	writer     io.Writer
+	// rawWriter must stay behind Write/writeFramed so all session output keeps
+	// the same framing and per-session serialization guarantees.
+	rawWriter io.Writer
 	mu         sync.Mutex
+}
+
+func (s *sessionStream) Write(payload []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := writeFramedWriter(s.rawWriter, payload); err != nil {
+		return 0, err
+	}
+	return len(payload), nil
+}
+
+func (s *sessionStream) writeFramed(payload []byte) error {
+	_, err := s.Write(payload)
+	return err
 }
 
 type streamHub struct {
@@ -91,13 +107,20 @@ func newStreamHub() *streamHub {
 }
 
 func (h *streamHub) register(remoteAddr net.Addr, virtualIP uint32, writer io.Writer) {
+	h.registerSession(remoteAddr, virtualIP, &sessionStream{
+		remoteAddr: remoteAddr.String(),
+		rawWriter:  writer,
+	})
+}
+
+func (h *streamHub) registerSession(remoteAddr net.Addr, virtualIP uint32, stream *sessionStream) {
 	if remoteAddr == nil || virtualIP == 0 {
 		return
 	}
 	addr := remoteAddr.String()
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.byIP[virtualIP] = &sessionStream{remoteAddr: addr, writer: writer}
+	h.byIP[virtualIP] = stream
 	ips := h.ipsByAddr[addr]
 	if ips == nil {
 		ips = make(map[uint32]struct{})
@@ -147,9 +170,7 @@ func (h *streamHub) writeToIP(virtualIP uint32, payload []byte) error {
 	if !ok {
 		return errStreamUnavailable
 	}
-	target.mu.Lock()
-	defer target.mu.Unlock()
-	err := writeFramedWriter(target.writer, payload)
+	err := target.writeFramed(payload)
 	if err != nil {
 		h.unregisterStaleIP(virtualIP, target)
 		return fmt.Errorf("write stream %s: %w", target.remoteAddr, err)
@@ -197,6 +218,10 @@ func serveControlSession(ctrl *control.Controller, remoteAddr net.Addr, session 
 	defer quicStreams.unregisterRemote(remoteAddr)
 	defer ctrl.LeaveByRemoteAddr(remoteAddr)
 	defer session.Close()
+	sessionWriter := &sessionStream{
+		remoteAddr: remoteAddr.String(),
+		rawWriter:  session,
+	}
 	buf := make([]byte, 4096)
 	frameBuf := make([]byte, 0, 8192)
 	lastSweepMs := int64(0)
@@ -264,12 +289,12 @@ func serveControlSession(ctrl *control.Controller, remoteAddr net.Addr, session 
 							log.Errorf("BuildRegistrationErrorPacket error: %v", packetErr)
 							continue
 						}
-						if writeErr := writeFramedWriter(session, errPacket.Marshal()); writeErr != nil {
+						if writeErr := sessionWriter.writeFramed(errPacket.Marshal()); writeErr != nil {
 							log.Errorf("send registration error packet failed: %v", writeErr)
 						}
 						continue
 					}
-					quicStreams.register(remoteAddr, virtualIP, session)
+					quicStreams.registerSession(remoteAddr, virtualIP, sessionWriter)
 					deferredPushPackets, err = ctrl.BuildPushDeviceListPacketsForPeerChange(virtualIP)
 					if err != nil {
 						log.Errorf("BuildPushDeviceListPacketsForPeerChange error: %v", err)
@@ -421,7 +446,7 @@ func serveControlSession(ctrl *control.Controller, remoteAddr net.Addr, session 
 				if respPacket == nil {
 					continue
 				}
-				if err := writeFramedWriter(session, respPacket.Marshal()); err != nil {
+				if err := sessionWriter.writeFramed(respPacket.Marshal()); err != nil {
 					log.Errorf("Write ServiceResponse error: %v", err)
 					continue
 				}
@@ -444,7 +469,7 @@ func serveControlSession(ctrl *control.Controller, remoteAddr net.Addr, session 
 				if respPacket == nil {
 					continue
 				}
-				if err := writeFramedWriter(session, respPacket.Marshal()); err != nil {
+				if err := sessionWriter.writeFramed(respPacket.Marshal()); err != nil {
 					log.Errorf("Write ControlResponse error: %v", err)
 				}
 			} else {

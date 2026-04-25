@@ -47,6 +47,8 @@ func StartHTTP3Server(ctx context.Context, ctrl *control.Controller, addr string
 			http.Error(w, "http3 stream takeover not supported", http.StatusInternalServerError)
 			return
 		}
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.WriteHeader(http.StatusOK)
 		stream := streamer.HTTPStream()
 		remoteAddr := remoteAddrFromRequest(r)
 		serveControlSession(ctrl, remoteAddr, &http3ControlSession{
