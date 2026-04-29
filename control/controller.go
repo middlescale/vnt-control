@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"sdl-control/config"
 	"sdl-control/protocol"
@@ -1759,7 +1760,8 @@ func (c *Controller) HandleGatewayReportPacket(packet *protocol.Packet) (*protoc
 	if req.GetReportUnixMs() == 0 {
 		return nil, fmt.Errorf("report_unix_ms is required")
 	}
-	primaryEndpoint := primaryGatewayEndpoint(req.GetGatewayChannels())
+	normalizedChannels := cloneGatewayChannels(req.GetGatewayChannels())
+	primaryEndpoint := primaryGatewayEndpoint(normalizedChannels)
 	if primaryEndpoint == "" {
 		return nil, fmt.Errorf("gateway_channels must include at least one valid addr")
 	}
@@ -1776,7 +1778,7 @@ func (c *Controller) HandleGatewayReportPacket(packet *protocol.Packet) (*protoc
 		GatewayID:      req.GetGatewayId(),
 		Endpoint:       primaryEndpoint,
 		Capabilities:   append([]string{}, req.GetCapabilities()...),
-		Channels:       cloneGatewayChannels(req.GetGatewayChannels()),
+		Channels:       normalizedChannels,
 		DefaultChannel: normalizeGatewayChannelKind(req.GetDefaultGatewayChannel()),
 		UDPKeyID:       strings.TrimSpace(req.GetGatewayUdpKeyId()),
 		UDPPublicKey:   append([]byte(nil), req.GetGatewayUdpPublicKey()...),
@@ -1793,7 +1795,7 @@ func (c *Controller) HandleGatewayReportPacket(packet *protocol.Packet) (*protoc
 	c.RegisterGatewayNodeWithTransport(
 		req.GetGatewayId(),
 		req.GetCapabilities(),
-		req.GetGatewayChannels(),
+		normalizedChannels,
 		req.GetDefaultGatewayChannel(),
 		req.GetGatewayUdpKeyId(),
 		req.GetGatewayUdpPublicKey(),
@@ -2094,16 +2096,14 @@ func (c *Controller) RegisterGatewayNodeWithTransport(
 	udpPublicKey []byte,
 ) {
 	c.gatewayMu.Lock()
-	endpoint := primaryGatewayEndpoint(channels)
-	c.gatewayAllow[gatewayID] = endpoint
 	normalizedChannels := cloneGatewayChannels(channels)
-	if len(normalizedChannels) == 0 && strings.TrimSpace(endpoint) != "" {
-		normalizedChannels = []*pb.GatewayChannel{{
-			Kind:       pb.GatewayChannelKind_GATEWAY_CHANNEL_QUIC,
-			Addr:       "quic://" + strings.TrimSpace(endpoint),
-			ServerName: gatewayServerName(endpoint),
-		}}
+	endpoint := primaryGatewayEndpoint(normalizedChannels)
+	if endpoint == "" || len(normalizedChannels) == 0 {
+		c.gatewayMu.Unlock()
+		log.Warnf("skip gateway registration with no valid channels: gateway_id=%s", strings.TrimSpace(gatewayID))
+		return
 	}
+	c.gatewayAllow[gatewayID] = endpoint
 	c.gatewayNodes[gatewayID] = GatewayNodeInfo{
 		GatewayID:      gatewayID,
 		Endpoint:       endpoint,
@@ -2278,17 +2278,16 @@ func (c *Controller) buildGatewayAccessGrantForNode(
 		return nil
 	}
 	grantChannels := cloneGatewayChannels(node.Channels)
-	if len(grantChannels) == 0 && strings.TrimSpace(node.Endpoint) != "" {
-		grantChannels = []*pb.GatewayChannel{{
-			Kind:       pb.GatewayChannelKind_GATEWAY_CHANNEL_QUIC,
-			Addr:       "quic://" + strings.TrimSpace(node.Endpoint),
-			ServerName: gatewayServerName(node.Endpoint),
-		}}
+	if len(grantChannels) == 0 {
+		log.Warnf("skip gateway grant with no valid channels: gateway_id=%s", node.GatewayID)
+		return nil
 	}
 	defaultChannel := normalizeGatewayChannelKind(node.DefaultChannel)
 	if defaultChannel == pb.GatewayChannelKind_GATEWAY_CHANNEL_UNKNOWN {
 		if hasGatewayChannelKind(grantChannels, pb.GatewayChannelKind_GATEWAY_CHANNEL_UDP) {
 			defaultChannel = pb.GatewayChannelKind_GATEWAY_CHANNEL_UDP
+		} else if hasGatewayChannelKind(grantChannels, pb.GatewayChannelKind_GATEWAY_CHANNEL_HTTPS) {
+			defaultChannel = pb.GatewayChannelKind_GATEWAY_CHANNEL_HTTPS
 		} else {
 			defaultChannel = pb.GatewayChannelKind_GATEWAY_CHANNEL_QUIC
 		}
@@ -2409,12 +2408,13 @@ func cloneGatewayChannels(channels []*pb.GatewayChannel) []*pb.GatewayChannel {
 		if channel == nil {
 			continue
 		}
-		addr := strings.TrimSpace(channel.GetAddr())
+		kind := normalizeGatewayChannelKind(channel.GetKind())
+		addr := normalizeGatewayChannelAddr(kind, channel.GetAddr())
 		if addr == "" {
 			continue
 		}
 		cloned = append(cloned, &pb.GatewayChannel{
-			Kind:       normalizeGatewayChannelKind(channel.GetKind()),
+			Kind:       kind,
 			Addr:       addr,
 			ServerName: strings.TrimSpace(channel.GetServerName()),
 		})
@@ -2422,9 +2422,41 @@ func cloneGatewayChannels(channels []*pb.GatewayChannel) []*pb.GatewayChannel {
 	return cloned
 }
 
+func normalizeGatewayChannelAddr(kind pb.GatewayChannelKind, raw string) string {
+	addr := strings.TrimSpace(raw)
+	if addr == "" {
+		return ""
+	}
+	if kind != pb.GatewayChannelKind_GATEWAY_CHANNEL_HTTPS {
+		return addr
+	}
+	if !strings.HasPrefix(addr, "https://") {
+		return ""
+	}
+	uri, err := url.Parse(addr)
+	if err != nil || strings.TrimSpace(uri.Host) == "" {
+		return ""
+	}
+	switch path := uri.EscapedPath(); path {
+	case "", "/":
+		uri.Path = "/gateway"
+		uri.RawPath = ""
+	case "/gateway":
+		uri.Path = "/gateway"
+		uri.RawPath = ""
+	default:
+		return ""
+	}
+	uri.RawQuery = ""
+	uri.Fragment = ""
+	return uri.String()
+}
+
 func normalizeGatewayChannelKind(kind pb.GatewayChannelKind) pb.GatewayChannelKind {
 	switch kind {
-	case pb.GatewayChannelKind_GATEWAY_CHANNEL_UDP, pb.GatewayChannelKind_GATEWAY_CHANNEL_QUIC:
+	case pb.GatewayChannelKind_GATEWAY_CHANNEL_UDP,
+		pb.GatewayChannelKind_GATEWAY_CHANNEL_QUIC,
+		pb.GatewayChannelKind_GATEWAY_CHANNEL_HTTPS:
 		return kind
 	default:
 		return pb.GatewayChannelKind_GATEWAY_CHANNEL_UNKNOWN
@@ -2445,8 +2477,12 @@ func primaryGatewayEndpoint(channels []*pb.GatewayChannel) string {
 		if channel == nil {
 			continue
 		}
-		addr := strings.TrimSpace(channel.GetAddr())
-		switch normalizeGatewayChannelKind(channel.GetKind()) {
+		kind := normalizeGatewayChannelKind(channel.GetKind())
+		addr := normalizeGatewayChannelAddr(kind, channel.GetAddr())
+		if addr == "" {
+			continue
+		}
+		switch kind {
 		case pb.GatewayChannelKind_GATEWAY_CHANNEL_UDP:
 			if strings.HasPrefix(addr, "udp://") {
 				endpoint := strings.TrimPrefix(addr, "udp://")
@@ -2459,6 +2495,12 @@ func primaryGatewayEndpoint(channels []*pb.GatewayChannel) string {
 				endpoint := strings.TrimPrefix(addr, "quic://")
 				if endpoint != "" {
 					return endpoint
+				}
+			}
+		case pb.GatewayChannelKind_GATEWAY_CHANNEL_HTTPS:
+			if strings.HasPrefix(addr, "https://") {
+				if uri, err := url.Parse(addr); err == nil && uri.Host != "" {
+					return uri.Host
 				}
 			}
 		}

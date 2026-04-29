@@ -32,7 +32,7 @@ type sessionStream struct {
 	// rawWriter must stay behind Write/writeFramed so all session output keeps
 	// the same framing and per-session serialization guarantees.
 	rawWriter io.Writer
-	mu         sync.Mutex
+	mu        sync.Mutex
 }
 
 func (s *sessionStream) Write(payload []byte) (int, error) {
@@ -52,7 +52,7 @@ func (s *sessionStream) writeFramed(payload []byte) error {
 type streamHub struct {
 	mu        sync.RWMutex
 	byIP      map[uint32]*sessionStream
-	ipsByAddr map[string]map[uint32]struct{}
+	ipsByAddr map[string]map[uint32]*sessionStream
 }
 
 var errStreamUnavailable = errors.New("stream unavailable")
@@ -102,7 +102,7 @@ func logPunchStartDispatch(prefix string, push *protocol.Packet, dispatchErr err
 func newStreamHub() *streamHub {
 	return &streamHub{
 		byIP:      make(map[uint32]*sessionStream),
-		ipsByAddr: make(map[string]map[uint32]struct{}),
+		ipsByAddr: make(map[string]map[uint32]*sessionStream),
 	}
 }
 
@@ -120,27 +120,39 @@ func (h *streamHub) registerSession(remoteAddr net.Addr, virtualIP uint32, strea
 	addr := remoteAddr.String()
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if previous, ok := h.byIP[virtualIP]; ok && previous != stream {
+		h.unregisterLocked(virtualIP, previous)
+	}
 	h.byIP[virtualIP] = stream
 	ips := h.ipsByAddr[addr]
 	if ips == nil {
-		ips = make(map[uint32]struct{})
+		ips = make(map[uint32]*sessionStream)
 		h.ipsByAddr[addr] = ips
 	}
-	ips[virtualIP] = struct{}{}
+	ips[virtualIP] = stream
 }
 
-func (h *streamHub) unregisterRemote(remoteAddr net.Addr) {
-	if remoteAddr == nil {
+func (h *streamHub) unregisterSession(target *sessionStream) {
+	if target == nil || target.remoteAddr == "" {
 		return
 	}
-	addr := remoteAddr.String()
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if ips, ok := h.ipsByAddr[addr]; ok {
-		for ip := range ips {
+	ips, ok := h.ipsByAddr[target.remoteAddr]
+	if !ok {
+		return
+	}
+	for ip, current := range ips {
+		if current != target {
+			continue
+		}
+		if mapped, ok := h.byIP[ip]; ok && mapped == target {
 			delete(h.byIP, ip)
 		}
-		delete(h.ipsByAddr, addr)
+		delete(ips, ip)
+	}
+	if len(ips) == 0 {
+		delete(h.ipsByAddr, target.remoteAddr)
 	}
 }
 
@@ -150,13 +162,19 @@ func (h *streamHub) unregisterStaleIP(virtualIP uint32, target *sessionStream) {
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	h.unregisterLocked(virtualIP, target)
+}
+
+func (h *streamHub) unregisterLocked(virtualIP uint32, target *sessionStream) {
 	current, ok := h.byIP[virtualIP]
 	if !ok || current != target {
 		return
 	}
 	delete(h.byIP, virtualIP)
 	if ips, ok := h.ipsByAddr[target.remoteAddr]; ok {
-		delete(ips, virtualIP)
+		if mapped, ok := ips[virtualIP]; ok && mapped == target {
+			delete(ips, virtualIP)
+		}
 		if len(ips) == 0 {
 			delete(h.ipsByAddr, target.remoteAddr)
 		}
@@ -215,13 +233,13 @@ func handleSession(ctrl *control.Controller, conn *quic.Conn) {
 
 func serveControlSession(ctrl *control.Controller, remoteAddr net.Addr, session framedSession) {
 	ctrl.TouchCipherSession(remoteAddr)
-	defer quicStreams.unregisterRemote(remoteAddr)
-	defer ctrl.LeaveByRemoteAddr(remoteAddr)
-	defer session.Close()
 	sessionWriter := &sessionStream{
 		remoteAddr: remoteAddr.String(),
 		rawWriter:  session,
 	}
+	defer quicStreams.unregisterSession(sessionWriter)
+	defer ctrl.LeaveByRemoteAddr(remoteAddr)
+	defer session.Close()
 	buf := make([]byte, 4096)
 	frameBuf := make([]byte, 0, 8192)
 	lastSweepMs := int64(0)

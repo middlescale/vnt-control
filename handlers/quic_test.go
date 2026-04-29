@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"bytes"
 	"errors"
 	"io"
 	"net"
@@ -118,5 +119,52 @@ func TestSessionStreamWriteUsesFramedSerialization(t *testing.T) {
 	}
 	if writer.maxActive.Load() != 1 {
 		t.Fatalf("expected framed write to stay serialized, got %d", writer.maxActive.Load())
+	}
+}
+
+func TestStreamHubUnregisterSessionKeepsReplacementOnSameRemoteAddr(t *testing.T) {
+	hub := newStreamHub()
+	remoteAddr := &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 443}
+	oldWriter := &bytes.Buffer{}
+	newWriter := &bytes.Buffer{}
+	oldStream := &sessionStream{remoteAddr: remoteAddr.String(), rawWriter: oldWriter}
+	newStream := &sessionStream{remoteAddr: remoteAddr.String(), rawWriter: newWriter}
+
+	hub.registerSession(remoteAddr, 123, oldStream)
+	hub.registerSession(remoteAddr, 123, newStream)
+	hub.unregisterSession(oldStream)
+
+	if err := hub.writeToIP(123, []byte("payload")); err != nil {
+		t.Fatalf("expected replacement stream to stay registered, got %v", err)
+	}
+	if oldWriter.Len() != 0 {
+		t.Fatalf("expected old stream to stay unused, wrote %d bytes", oldWriter.Len())
+	}
+	if newWriter.Len() == 0 {
+		t.Fatal("expected replacement stream to receive framed payload")
+	}
+}
+
+func TestStreamHubUnregisterSessionKeepsReplacementAcrossRemoteAddrChange(t *testing.T) {
+	hub := newStreamHub()
+	oldRemoteAddr := &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 443}
+	newRemoteAddr := &net.UDPAddr{IP: net.ParseIP("2.2.2.2"), Port: 443}
+	oldWriter := &bytes.Buffer{}
+	newWriter := &bytes.Buffer{}
+	oldStream := &sessionStream{remoteAddr: oldRemoteAddr.String(), rawWriter: oldWriter}
+	newStream := &sessionStream{remoteAddr: newRemoteAddr.String(), rawWriter: newWriter}
+
+	hub.registerSession(oldRemoteAddr, 123, oldStream)
+	hub.registerSession(newRemoteAddr, 123, newStream)
+	hub.unregisterSession(oldStream)
+
+	if err := hub.writeToIP(123, []byte("payload")); err != nil {
+		t.Fatalf("expected replacement stream to stay registered after addr change, got %v", err)
+	}
+	if oldWriter.Len() != 0 {
+		t.Fatalf("expected old stream to stay unused, wrote %d bytes", oldWriter.Len())
+	}
+	if newWriter.Len() == 0 {
+		t.Fatal("expected replacement stream to receive framed payload")
 	}
 }

@@ -2011,6 +2011,86 @@ func TestGatewayReportAllowsConfiguredDefaultGateway(t *testing.T) {
 	}
 }
 
+func TestGatewayReportNormalizesHTTPSChannelInGrant(t *testing.T) {
+	ctrl := newControllerWithConfig(t, &config.Config{
+		Gateway:             net.ParseIP("10.26.0.1"),
+		Domain:              "ms.net",
+		Netmask:             "255.255.255.0",
+		DefaultGatewayID:    "gw-default",
+		GatewayTicketSecret: testGatewayTicketSecret,
+	})
+	defer ctrl.Stop()
+	report := newSignedGatewayReportWithChannels(
+		t,
+		testGatewayTicketSecret,
+		"gw-default",
+		[]string{"udp_blind_relay_v1"},
+		[]*pb.GatewayChannel{{
+			Kind:       pb.GatewayChannelKind_GATEWAY_CHANNEL_HTTPS,
+			Addr:       "https://gateway.middlescale.net/",
+			ServerName: "gateway.middlescale.net",
+		}},
+		pb.GatewayChannelKind_GATEWAY_CHANNEL_HTTPS,
+		time.Now(),
+		randomGatewayNonce(t),
+	)
+	resp, err := ctrl.HandleGatewayReportPacket(newGatewayReportPacket(t, report))
+	if err != nil {
+		t.Fatalf("HandleGatewayReportPacket failed: %v", err)
+	}
+	var ack pb.GatewayReportAck
+	if err := proto.Unmarshal(resp.Payload, &ack); err != nil {
+		t.Fatalf("unmarshal gateway report ack failed: %v", err)
+	}
+	if !ack.GetOk() {
+		t.Fatalf("expected https gateway report accepted, ack=%+v", ack)
+	}
+
+	regResp := mustRegister(t, ctrl, newBaseRegisterReq("dev-gw-https", "node-gw-https"), &net.UDPAddr{IP: net.ParseIP("1.1.1.40"), Port: 4040})
+	grant := regResp.GetGatewayAccessGrant()
+	if grant == nil {
+		t.Fatalf("expected gateway access grant in registration response")
+	}
+	if len(grant.GetGatewayChannels()) != 1 {
+		t.Fatalf("expected one normalized https channel, got %+v", grant.GetGatewayChannels())
+	}
+	if grant.GetGatewayChannels()[0].GetAddr() != "https://gateway.middlescale.net/gateway" {
+		t.Fatalf("unexpected normalized gateway addr: %+v", grant.GetGatewayChannels())
+	}
+	if grant.GetDefaultGatewayChannel() != pb.GatewayChannelKind_GATEWAY_CHANNEL_HTTPS {
+		t.Fatalf("unexpected default gateway channel: %v", grant.GetDefaultGatewayChannel())
+	}
+}
+
+func TestGatewayReportRejectsHTTPSChannelWithUnexpectedPath(t *testing.T) {
+	ctrl := newControllerWithConfig(t, &config.Config{
+		Gateway:             net.ParseIP("10.26.0.1"),
+		Domain:              "ms.net",
+		Netmask:             "255.255.255.0",
+		DefaultGatewayID:    "gw-default",
+		GatewayTicketSecret: testGatewayTicketSecret,
+	})
+	defer ctrl.Stop()
+	report := newSignedGatewayReportWithChannels(
+		t,
+		testGatewayTicketSecret,
+		"gw-default",
+		[]string{"udp_blind_relay_v1"},
+		[]*pb.GatewayChannel{{
+			Kind:       pb.GatewayChannelKind_GATEWAY_CHANNEL_HTTPS,
+			Addr:       "https://gateway.middlescale.net/legacy",
+			ServerName: "gateway.middlescale.net",
+		}},
+		pb.GatewayChannelKind_GATEWAY_CHANNEL_HTTPS,
+		time.Now(),
+		randomGatewayNonce(t),
+	)
+	_, err := ctrl.HandleGatewayReportPacket(newGatewayReportPacket(t, report))
+	if err == nil || !strings.Contains(err.Error(), "gateway_channels must include at least one valid addr") {
+		t.Fatalf("expected invalid https path rejection, got %v", err)
+	}
+}
+
 func TestGatewayGrantIncludesSingleChannel(t *testing.T) {
 	ctrl := newControllerWithConfig(t, &config.Config{
 		Gateway:             net.ParseIP("10.26.0.1"),
@@ -2029,6 +2109,31 @@ func TestGatewayGrantIncludesSingleChannel(t *testing.T) {
 	}
 	if len(grant.GetGatewayChannels()) != 1 {
 		t.Fatalf("expected exactly one gateway channel: %+v", grant.GetGatewayChannels())
+	}
+}
+
+func TestCloneGatewayChannelsNormalizesHttpsGatewayPath(t *testing.T) {
+	channels := cloneGatewayChannels([]*pb.GatewayChannel{{
+		Kind:       pb.GatewayChannelKind_GATEWAY_CHANNEL_HTTPS,
+		Addr:       "https://gateway.example.com:443",
+		ServerName: "gateway.example.com",
+	}})
+	if len(channels) != 1 {
+		t.Fatalf("expected one normalized channel, got %d", len(channels))
+	}
+	if got := channels[0].GetAddr(); got != "https://gateway.example.com:443/gateway" {
+		t.Fatalf("unexpected normalized addr: %s", got)
+	}
+}
+
+func TestCloneGatewayChannelsDropsUnsupportedHttpsPath(t *testing.T) {
+	channels := cloneGatewayChannels([]*pb.GatewayChannel{{
+		Kind:       pb.GatewayChannelKind_GATEWAY_CHANNEL_HTTPS,
+		Addr:       "https://gateway.example.com:443/custom",
+		ServerName: "gateway.example.com",
+	}})
+	if len(channels) != 0 {
+		t.Fatalf("expected invalid https path to be dropped, got %+v", channels)
 	}
 }
 
@@ -2727,17 +2832,40 @@ func newSignedGatewayReport(
 	nonce []byte,
 ) *pb.GatewayReportRequest {
 	t.Helper()
-	report := &pb.GatewayReportRequest{
-		GatewayId:    gatewayID,
-		Capabilities: append([]string{}, capabilities...),
-		ReportUnixMs: reportTime.UnixMilli(),
-		Nonce:        append([]byte(nil), nonce...),
-		GatewayChannels: []*pb.GatewayChannel{{
+	return newSignedGatewayReportWithChannels(
+		t,
+		secret,
+		gatewayID,
+		capabilities,
+		[]*pb.GatewayChannel{{
 			Kind:       pb.GatewayChannelKind_GATEWAY_CHANNEL_QUIC,
 			Addr:       "quic://" + endpoint,
 			ServerName: "127.0.0.1",
 		}},
-		DefaultGatewayChannel: pb.GatewayChannelKind_GATEWAY_CHANNEL_QUIC,
+		pb.GatewayChannelKind_GATEWAY_CHANNEL_QUIC,
+		reportTime,
+		nonce,
+	)
+}
+
+func newSignedGatewayReportWithChannels(
+	t *testing.T,
+	secret string,
+	gatewayID string,
+	capabilities []string,
+	channels []*pb.GatewayChannel,
+	defaultChannel pb.GatewayChannelKind,
+	reportTime time.Time,
+	nonce []byte,
+) *pb.GatewayReportRequest {
+	t.Helper()
+	report := &pb.GatewayReportRequest{
+		GatewayId:             gatewayID,
+		Capabilities:          append([]string{}, capabilities...),
+		ReportUnixMs:          reportTime.UnixMilli(),
+		Nonce:                 append([]byte(nil), nonce...),
+		GatewayChannels:       channels,
+		DefaultGatewayChannel: defaultChannel,
 	}
 	signGatewayReportForTest(t, secret, report)
 	return report
