@@ -445,16 +445,12 @@ func serveControlSession(ctrl *control.Controller, remoteAddr net.Addr, session 
 					err = ctrl.HandlePunchAckPacket(packet)
 					if err != nil {
 						log.Errorf("HandlePunchAckPacket error: %v", err)
-					} else {
-						log.Infof("PunchAck received from %s", packet.SrcIP)
 					}
 					continue
 				case protocol.AppProtoPunchResult:
 					err = ctrl.HandlePunchResultPacket(packet)
 					if err != nil {
 						log.Errorf("HandlePunchResultPacket error: %v", err)
-					} else {
-						log.Infof("PunchResult received from %s", packet.SrcIP)
 					}
 					continue
 				default:
@@ -474,8 +470,6 @@ func serveControlSession(ctrl *control.Controller, remoteAddr net.Addr, session 
 					}
 					if err := quicStreams.writeToIP(ipToUint32(push.DstIP), push.Marshal()); err != nil {
 						log.Warnf("PushDeviceList dispatch failed: %s err=%v", push.DstIP, err)
-					} else {
-						log.Infof("PushDeviceList dispatched: %s", push.DstIP)
 					}
 				}
 			} else if packet.Proto == protocol.ProtocolControl {

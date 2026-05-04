@@ -1313,29 +1313,16 @@ func (c *Controller) HandlePunchAckPacket(request *protocol.Packet) error {
 		session.Results = make(map[uint32]*pb.PunchResult)
 	}
 	peer := punchPeerIP(session, source)
-	if !ack.GetAccepted() {
-		log.Infof(
-			"PunchAck detail src=%s dst=%s session_id=%d attempt=%d accepted=%v phase=%s reason=%q",
-			request.SrcIP,
-			formatPunchIP(peer),
-			ack.GetSessionId(),
-			ack.GetAttempt(),
-			ack.GetAccepted(),
-			ack.GetPhase().String(),
-			ack.GetReason(),
-		)
-	} else {
-		log.Debugf(
-			"PunchAck detail src=%s dst=%s session_id=%d attempt=%d accepted=%v phase=%s reason=%q",
-			request.SrcIP,
-			formatPunchIP(peer),
-			ack.GetSessionId(),
-			ack.GetAttempt(),
-			ack.GetAccepted(),
-			ack.GetPhase().String(),
-			ack.GetReason(),
-		)
-	}
+	log.Debugf(
+		"PunchAck detail src=%s dst=%s session_id=%d attempt=%d accepted=%v phase=%s reason=%q",
+		request.SrcIP,
+		formatPunchIP(peer),
+		ack.GetSessionId(),
+		ack.GetAttempt(),
+		ack.GetAccepted(),
+		ack.GetPhase().String(),
+		ack.GetReason(),
+	)
 	session.Ack[source] = ack.GetAccepted()
 	pairKey := punchPairKey(session.Source, session.Target)
 	if !ack.GetAccepted() {
