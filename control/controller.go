@@ -379,7 +379,7 @@ func (c *Controller) HandleRegistrationPacketWithVirtualIP(request *protocol.Pac
 		return nil, 0, fmt.Errorf("invalid remote port: %q", portStr)
 	}
 	pubPort := uint32(port)
-	negotiatedCapabilities := c.consumeHandshakeCapabilities(remoteAddr)
+	negotiatedCapabilities := c.pendingHandshakeCapabilities(remoteAddr)
 	if !hasCapability(negotiatedCapabilities, capabilityUDPEndpointReportV1) {
 		return nil, 0, fmt.Errorf("client %v missing required handshake capability %q", remoteAddr, capabilityUDPEndpointReportV1)
 	}
@@ -1643,16 +1643,23 @@ func (c *Controller) setPendingHandshakeCapabilities(remoteAddr net.Addr, capabi
 	c.mu.Unlock()
 }
 
-func (c *Controller) consumeHandshakeCapabilities(remoteAddr net.Addr) []string {
+func (c *Controller) pendingHandshakeCapabilities(remoteAddr net.Addr) []string {
 	if remoteAddr == nil {
 		return nil
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	key := remoteAddr.String()
-	capabilities := append([]string(nil), c.handshakeCaps[key]...)
-	delete(c.handshakeCaps, key)
-	return capabilities
+	return append([]string(nil), c.handshakeCaps[key]...)
+}
+
+func (c *Controller) clearPendingHandshakeCapabilities(remoteAddr net.Addr) {
+	if remoteAddr == nil {
+		return
+	}
+	c.mu.Lock()
+	delete(c.handshakeCaps, remoteAddr.String())
+	c.mu.Unlock()
 }
 
 func hasCapability(capabilities []string, capability string) bool {
@@ -2911,6 +2918,7 @@ func (nc *NetworkControl) TouchCipherSession(remoteAddr net.Addr) {
 }
 
 func (c *Controller) LeaveByRemoteAddr(remoteAddr net.Addr) {
+	c.clearPendingHandshakeCapabilities(remoteAddr)
 	c.nc.LeaveByRemoteAddr(remoteAddr)
 }
 

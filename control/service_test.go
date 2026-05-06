@@ -217,6 +217,26 @@ func TestRegistrationRequiresUDPEndpointReportCapability(t *testing.T) {
 	}
 }
 
+func TestRegistrationRetryReusesHandshakeCapabilitiesForSameRemote(t *testing.T) {
+	ctrl := newTestController(t)
+	defer ctrl.Stop()
+
+	remoteAddr := &net.UDPAddr{IP: net.ParseIP("1.1.1.12"), Port: 1113}
+	handshakeRemote(t, ctrl, remoteAddr)
+
+	regReq1 := newBaseRegisterReq("dev-cap-retry-a", "node-cap-retry-a")
+	ensureAuthed(t, ctrl, regReq1.GetToken(), regReq1.GetDeviceId(), regReq1.GetDevicePubKey())
+	if _, err := ctrl.HandleRegistrationPacket(newRegistrationPacket(t, regReq1), remoteAddr); err != nil {
+		t.Fatalf("first HandleRegistrationPacket failed: %v", err)
+	}
+
+	regReq2 := newBaseRegisterReq("dev-cap-retry-b", "node-cap-retry-b")
+	ensureAuthed(t, ctrl, regReq2.GetToken(), regReq2.GetDeviceId(), regReq2.GetDevicePubKey())
+	if _, err := ctrl.HandleRegistrationPacket(newRegistrationPacket(t, regReq2), remoteAddr); err != nil {
+		t.Fatalf("second HandleRegistrationPacket should reuse handshake capabilities, got %v", err)
+	}
+}
+
 func TestPunchCoordProtoContractRoundTrip(t *testing.T) {
 	req := &pb.PunchRequest{
 		SessionId:     1001,
@@ -1806,6 +1826,20 @@ func TestLeaveByRemoteAddrMarksControlOffline(t *testing.T) {
 	}
 	if client.ControlOnline {
 		t.Fatalf("control should be offline after leave")
+	}
+}
+
+func TestLeaveByRemoteAddrClearsPendingHandshakeCapabilities(t *testing.T) {
+	ctrl := newTestController(t)
+	defer ctrl.Stop()
+
+	remoteAddr := handshakeRemote(t, ctrl, &net.UDPAddr{IP: net.ParseIP("1.1.1.13"), Port: 1114})
+	ctrl.LeaveByRemoteAddr(remoteAddr)
+
+	regReq := newBaseRegisterReq("dev-cap-clear-a", "node-cap-clear-a")
+	ensureAuthed(t, ctrl, regReq.GetToken(), regReq.GetDeviceId(), regReq.GetDevicePubKey())
+	if _, err := ctrl.HandleRegistrationPacket(newRegistrationPacket(t, regReq), remoteAddr); err == nil || !strings.Contains(err.Error(), "udp_endpoint_report_v1") {
+		t.Fatalf("expected missing capability error after leave cleared pending handshake, got %v", err)
 	}
 }
 
