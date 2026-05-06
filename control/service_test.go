@@ -1974,6 +1974,16 @@ func TestGatewayApproveByIDAfterPendingReport(t *testing.T) {
 	if err := ctrl.ApproveGatewayNodeByID("gw-pending"); err != nil {
 		t.Fatalf("ApproveGatewayNodeByID failed: %v", err)
 	}
+	regResp := mustRegister(
+		t,
+		ctrl,
+		newBaseRegisterReq("dev-pending-approve", "node-pending-approve"),
+		&net.UDPAddr{IP: net.ParseIP("1.1.1.52"), Port: 5252},
+	)
+	grants := regResp.GetGatewayAccessGrants()
+	if len(grants) != 1 || grants[0].GetGatewayId() != "gw-pending" {
+		t.Fatalf("expected pending gateway to become grantable immediately after approval, got %+v", grants)
+	}
 	keepalive := newSignedGatewayReport(t, testGatewayTicketSecret, "gw-pending", "127.0.0.1:51821", []string{"udp_blind_relay_v1"}, time.Now(), randomGatewayNonce(t))
 	resp, err = ctrl.HandleGatewayReportPacket(newGatewayReportPacket(t, keepalive))
 	if err != nil {
@@ -2304,12 +2314,65 @@ func TestPushDeviceListReusesGatewayGrantSession(t *testing.T) {
 	if len(pushed.GetGatewayAccessGrants()) != 1 {
 		t.Fatalf("expected one pushed gateway grant, got %d", len(pushed.GetGatewayAccessGrants()))
 	}
+	if pushed.GetGatewayPolicyRev() == 0 {
+		t.Fatalf("expected non-zero gateway policy rev in push")
+	}
 	pushedGrant := pushed.GetGatewayAccessGrants()[0]
+	if pushedGrant.GetPolicyRev() != pushed.GetGatewayPolicyRev() {
+		t.Fatalf("expected pushed grant policy rev %d to match message rev %d", pushedGrant.GetPolicyRev(), pushed.GetGatewayPolicyRev())
+	}
 	if pushedGrant.GetSessionId() != grant1.GetSessionId() {
 		t.Fatalf("expected pushed gateway session to be reused, got %d want %d", pushedGrant.GetSessionId(), grant1.GetSessionId())
 	}
 	if pushedGrant.GetTicketExpireUnixMs() != grant1.GetTicketExpireUnixMs() {
 		t.Fatalf("expected pushed gateway ticket expiry to be reused, got %d want %d", pushedGrant.GetTicketExpireUnixMs(), grant1.GetTicketExpireUnixMs())
+	}
+}
+
+func TestGatewayPolicyRevAdvancesOnGatewayChangePush(t *testing.T) {
+	ctrl := newTestController(t)
+	defer ctrl.Stop()
+	ctrl.RegisterGatewayNode("gw-a", "127.0.0.1:51820", []string{"udp_blind_relay_v1"}, "", nil)
+
+	regResp := mustRegister(t, ctrl, newBaseRegisterReq("dev-policy-a", "node-policy-a"), &net.UDPAddr{
+		IP:   net.ParseIP("1.1.1.51"),
+		Port: 5151,
+	})
+	if regResp.GetGatewayPolicyRev() == 0 {
+		t.Fatalf("expected non-zero registration gateway policy rev")
+	}
+
+	ctrl.RegisterGatewayNode("gw-b", "127.0.0.1:51821", []string{"udp_blind_relay_v1"}, "", nil)
+
+	packets, err := ctrl.BuildPushDeviceListPacketsForGatewayChangeIfNeeded()
+	if err != nil {
+		t.Fatalf("BuildPushDeviceListPacketsForGatewayChangeIfNeeded failed: %v", err)
+	}
+	if len(packets) == 0 {
+		t.Fatalf("expected gateway change push packets")
+	}
+	var pushed *pb.DeviceList
+	for _, packet := range packets {
+		if !packet.DstIP.Equal(util.Uint32ToIP(regResp.GetVirtualIp())) {
+			continue
+		}
+		var list pb.DeviceList
+		if err := proto.Unmarshal(packet.Payload, &list); err != nil {
+			t.Fatalf("unmarshal gateway change push failed: %v", err)
+		}
+		pushed = &list
+		break
+	}
+	if pushed == nil {
+		t.Fatalf("expected gateway change push for registered client")
+	}
+	if pushed.GetGatewayPolicyRev() <= regResp.GetGatewayPolicyRev() {
+		t.Fatalf("expected gateway policy rev to advance, got push=%d registration=%d", pushed.GetGatewayPolicyRev(), regResp.GetGatewayPolicyRev())
+	}
+	for _, grant := range pushed.GetGatewayAccessGrants() {
+		if grant.GetPolicyRev() != pushed.GetGatewayPolicyRev() {
+			t.Fatalf("expected pushed grant policy rev %d to match message rev %d", grant.GetPolicyRev(), pushed.GetGatewayPolicyRev())
+		}
 	}
 }
 
@@ -2412,6 +2475,61 @@ func TestRefreshGatewayGrantPacketForceReissueRotatesSession(t *testing.T) {
 	}
 	if resp.GetGatewayAccessGrant().GetSessionId() == grant.GetSessionId() {
 		t.Fatalf("expected force reissue to rotate session id")
+	}
+}
+
+func TestRefreshGatewayGrantPacketClearsStalePolicy(t *testing.T) {
+	ctrl := newTestController(t)
+	defer ctrl.Stop()
+	ctrl.RegisterGatewayNode("gw-default", "127.0.0.1:51820", []string{"udp_blind_relay_v1"}, "", nil)
+
+	regReq := newBaseRegisterReq("dev-refresh-clear-a", "node-refresh-clear-a")
+	regResp := mustRegister(t, ctrl, regReq, &net.UDPAddr{IP: net.ParseIP("1.1.1.34"), Port: 3434})
+	grant := regResp.GetGatewayAccessGrant()
+	if grant == nil {
+		t.Fatalf("expected gateway access grant in registration response")
+	}
+
+	ctrl.gatewayMu.Lock()
+	delete(ctrl.gatewayNodes, "gw-default")
+	ctrl.gatewayMu.Unlock()
+
+	req := &pb.RefreshGatewayGrantRequest{
+		VirtualIp:     regResp.GetVirtualIp(),
+		DeviceId:      regReq.GetDeviceId(),
+		LastSessionId: grant.GetSessionId(),
+		LastPolicyRev: grant.GetPolicyRev(),
+	}
+	payload, err := proto.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal refresh gateway grant request failed: %v", err)
+	}
+	respPacket, err := ctrl.HandleRefreshGatewayGrantPacket(&protocol.Packet{
+		Ver:       protocol.V3,
+		Proto:     protocol.ProtocolService,
+		AppProto:  protocol.AppProtoRefreshGatewayGrantRequest,
+		SourceTTL: protocol.MAX_TTL,
+		TTL:       protocol.MAX_TTL,
+		SrcIP:     util.Uint32ToIP(regResp.GetVirtualIp()),
+		DstIP:     util.Uint32ToIP(regResp.GetVirtualGateway()),
+		Payload:   payload,
+	})
+	if err != nil {
+		t.Fatalf("HandleRefreshGatewayGrantPacket failed: %v", err)
+	}
+
+	var resp pb.RefreshGatewayGrantResponse
+	if err := proto.Unmarshal(respPacket.Payload, &resp); err != nil {
+		t.Fatalf("unmarshal refresh gateway grant response failed: %v", err)
+	}
+	if !resp.GetHasUpdate() {
+		t.Fatalf("expected cleared gateway policy update, got %+v", resp)
+	}
+	if len(resp.GetGatewayAccessGrants()) != 0 || resp.GetGatewayAccessGrant() != nil {
+		t.Fatalf("expected cleared gateway grants, got %+v", resp)
+	}
+	if resp.GetGatewayPolicyRev() <= grant.GetPolicyRev() {
+		t.Fatalf("expected cleared gateway policy rev to advance, got response=%d last=%d", resp.GetGatewayPolicyRev(), grant.GetPolicyRev())
 	}
 }
 

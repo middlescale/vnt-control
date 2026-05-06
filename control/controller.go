@@ -42,6 +42,7 @@ type Controller struct {
 	gatewaySeen             map[string]GatewayNodeInfo
 	gatewayNonce            map[string]map[string]int64
 	gatewayGrantFingerprint string
+	gatewayGrantPolicyRev   uint64
 	gatewayGrantCache       map[string]cachedGatewayGrant
 
 	renameMu            sync.Mutex
@@ -438,9 +439,10 @@ func (c *Controller) HandleRegistrationPacketWithVirtualIP(request *protocol.Pac
 	c.nc.TouchCipherSession(remoteAddr)
 	netInfo.Epoch++
 	registrationResp.VirtualIp = virtualIP
-	gatewayGrants := c.buildGatewayAccessGrants(virtualIP, registration.GetDeviceId())
+	gatewayGrants, gatewayPolicyRev := c.buildGatewayAccessGrantsWithPolicyRev(virtualIP, registration.GetDeviceId())
 	registrationResp.GatewayAccessGrant = selectPrimaryGatewayGrant(gatewayGrants)
 	registrationResp.GatewayAccessGrants = gatewayGrants
+	registrationResp.GatewayPolicyRev = gatewayPolicyRev
 	registrationResp.Epoch = uint32(netInfo.Epoch)
 	registrationResp.DeviceInfoList = buildDeviceInfoList(netInfo.Clients, virtualIP)
 
@@ -609,7 +611,7 @@ func (c *Controller) HandlePullDeviceListPacket(request *protocol.Packet) (*prot
 		return c.buildDisconnectPacket(request), nil
 	}
 	if client, ok := c.nc.FindClientByVirtualIP(selfIP); ok {
-		deviceList.GatewayAccessGrants = c.buildGatewayAccessGrants(selfIP, client.DeviceId)
+		deviceList.GatewayAccessGrants, deviceList.GatewayPolicyRev = c.buildGatewayAccessGrantsWithPolicyRev(selfIP, client.DeviceId)
 	}
 	payload, err := proto.Marshal(deviceList)
 	if err != nil {
@@ -644,11 +646,13 @@ func (c *Controller) BuildPushDeviceListPacketsForPeerChange(changedIP uint32) (
 			if targetIP == changedIP || !targetClient.ControlOnline {
 				continue
 			}
+			gatewayGrants, gatewayPolicyRev := c.buildGatewayAccessGrantsWithPolicyRev(targetIP, targetClient.DeviceId)
 			packet, err := c.buildPushDeviceListPacket(
 				targetIP,
 				uint32(network.Epoch),
 				buildDeviceInfoList(network.Clients, targetIP),
-				c.buildGatewayAccessGrants(targetIP, targetClient.DeviceId),
+				gatewayGrants,
+				gatewayPolicyRev,
 			)
 			if err != nil {
 				return nil, err
@@ -670,11 +674,13 @@ func (c *Controller) BuildPushDeviceListPacketsForGatewayChange() ([]*protocol.P
 			if !targetClient.ControlOnline {
 				continue
 			}
+			gatewayGrants, gatewayPolicyRev := c.buildGatewayAccessGrantsWithPolicyRev(targetIP, targetClient.DeviceId)
 			packet, err := c.buildPushDeviceListPacket(
 				targetIP,
 				uint32(network.Epoch),
 				buildDeviceInfoList(network.Clients, targetIP),
-				c.buildGatewayAccessGrants(targetIP, targetClient.DeviceId),
+				gatewayGrants,
+				gatewayPolicyRev,
 			)
 			if err != nil {
 				return nil, err
@@ -686,14 +692,12 @@ func (c *Controller) BuildPushDeviceListPacketsForGatewayChange() ([]*protocol.P
 }
 
 func (c *Controller) BuildPushDeviceListPacketsForGatewayChangeIfNeeded() ([]*protocol.Packet, error) {
-	fingerprint := c.gatewayGrantFingerprintSnapshot()
 	c.gatewayMu.Lock()
-	if fingerprint == c.gatewayGrantFingerprint {
-		c.gatewayMu.Unlock()
+	_, changed := c.syncGatewayGrantPolicyLocked(c.approvedAliveGatewayNodesLocked(time.Now()))
+	c.gatewayMu.Unlock()
+	if !changed {
 		return nil, nil
 	}
-	c.gatewayGrantFingerprint = fingerprint
-	c.gatewayMu.Unlock()
 	return c.BuildPushDeviceListPacketsForGatewayChange()
 }
 
@@ -702,11 +706,13 @@ func (c *Controller) buildPushDeviceListPacket(
 	epoch uint32,
 	deviceInfoList []*pb.DeviceInfo,
 	gatewayGrants []*pb.GatewayAccessGrant,
+	gatewayPolicyRev uint64,
 ) (*protocol.Packet, error) {
 	push := &pb.DeviceList{
 		Epoch:               epoch,
 		DeviceInfoList:      deviceInfoList,
 		GatewayAccessGrants: gatewayGrants,
+		GatewayPolicyRev:    gatewayPolicyRev,
 	}
 	payload, err := proto.Marshal(push)
 	if err != nil {
@@ -881,12 +887,17 @@ func (c *Controller) HandleRefreshGatewayGrantPacket(request *protocol.Packet) (
 		HasUpdate: true,
 		Reason:    "refreshed",
 	}
-	if grants := c.buildGatewayAccessGrantsForRefresh(req.GetVirtualIp(), req.GetDeviceId(), req.GetLastSessionId(), req.GetForceReissue()); len(grants) > 0 {
+	if grants, gatewayPolicyRev := c.buildGatewayAccessGrantsForRefresh(req.GetVirtualIp(), req.GetDeviceId(), req.GetLastSessionId(), req.GetForceReissue()); len(grants) > 0 {
 		resp.GatewayAccessGrant = selectPrimaryGatewayGrant(grants)
 		resp.GatewayAccessGrants = grants
+		resp.GatewayPolicyRev = gatewayPolicyRev
+	} else if req.GetLastPolicyRev() < gatewayPolicyRev {
+		resp.Reason = "gateway policy cleared"
+		resp.GatewayPolicyRev = gatewayPolicyRev
 	} else {
 		resp.HasUpdate = false
 		resp.Reason = "no gateway available"
+		resp.GatewayPolicyRev = gatewayPolicyRev
 	}
 	payload, err := proto.Marshal(resp)
 	if err != nil {
@@ -1904,6 +1915,7 @@ func (c *Controller) ApproveGatewayNodeByID(gatewayID string) error {
 		return fmt.Errorf("gateway %s has no pending report", gatewayID)
 	}
 	c.gatewayAllow[gatewayID] = seen.Endpoint
+	c.gatewayNodes[gatewayID] = seen
 	c.persistGatewayApprovalLocked()
 	return nil
 }
@@ -2117,6 +2129,11 @@ func (c *Controller) buildGatewayAccessGrant(virtualIP uint32, deviceID string) 
 }
 
 func (c *Controller) buildGatewayAccessGrants(virtualIP uint32, deviceID string) []*pb.GatewayAccessGrant {
+	grants, _ := c.buildGatewayAccessGrantsWithPolicyRev(virtualIP, deviceID)
+	return grants
+}
+
+func (c *Controller) buildGatewayAccessGrantsWithPolicyRev(virtualIP uint32, deviceID string) ([]*pb.GatewayAccessGrant, uint64) {
 	return c.buildGatewayAccessGrantsLocked(virtualIP, deviceID, gatewayGrantBuildOptions{})
 }
 
@@ -2125,7 +2142,7 @@ func (c *Controller) buildGatewayAccessGrantsForRefresh(
 	deviceID string,
 	lastSessionID uint64,
 	forceReissue bool,
-) []*pb.GatewayAccessGrant {
+) ([]*pb.GatewayAccessGrant, uint64) {
 	return c.buildGatewayAccessGrantsLocked(virtualIP, deviceID, gatewayGrantBuildOptions{
 		lastSessionID: lastSessionID,
 		forceReissue:  forceReissue,
@@ -2137,14 +2154,15 @@ func (c *Controller) buildGatewayAccessGrantsLocked(
 	virtualIP uint32,
 	deviceID string,
 	opts gatewayGrantBuildOptions,
-) []*pb.GatewayAccessGrant {
+) ([]*pb.GatewayAccessGrant, uint64) {
 	c.gatewayMu.Lock()
 	defer c.gatewayMu.Unlock()
 	now := time.Now()
 	nodes := c.approvedAliveGatewayNodesLocked(now)
+	policyRev, _ := c.syncGatewayGrantPolicyLocked(nodes)
 	c.pruneGatewayGrantCacheLocked(now, nodes)
 	if len(nodes) == 0 {
-		return nil
+		return nil, policyRev
 	}
 	expire := now.Add(2 * time.Minute)
 	leaseSecs := uint32(60)
@@ -2159,6 +2177,7 @@ func (c *Controller) buildGatewayAccessGrantsLocked(
 			expire.UnixMilli(),
 			leaseSecs,
 			graceSecs,
+			policyRev,
 			opts,
 			now,
 		)
@@ -2166,7 +2185,7 @@ func (c *Controller) buildGatewayAccessGrantsLocked(
 			grants = append(grants, grant)
 		}
 	}
-	return grants
+	return grants, policyRev
 }
 
 func (c *Controller) gatewayAccessGrantForNodeLocked(
@@ -2177,6 +2196,7 @@ func (c *Controller) gatewayAccessGrantForNodeLocked(
 	expireUnixMs int64,
 	leaseSecs uint32,
 	graceSecs uint32,
+	policyRev uint64,
 	opts gatewayGrantBuildOptions,
 	now time.Time,
 ) *pb.GatewayAccessGrant {
@@ -2188,13 +2208,17 @@ func (c *Controller) gatewayAccessGrantForNodeLocked(
 			cached.nodeFingerprint == nodeFingerprint &&
 			cached.grant != nil &&
 			cached.expireUnixMs > now.Add(30*time.Second).UnixMilli() {
-			return cloneGatewayAccessGrant(cached.grant)
+			grant := cloneGatewayAccessGrant(cached.grant)
+			grant.PolicyRev = policyRev
+			return grant
 		}
 	} else if ok &&
 		cached.nodeFingerprint == nodeFingerprint &&
 		cached.grant != nil &&
 		cached.expireUnixMs > now.Add(30*time.Second).UnixMilli() {
-		return cloneGatewayAccessGrant(cached.grant)
+		grant := cloneGatewayAccessGrant(cached.grant)
+		grant.PolicyRev = policyRev
+		return grant
 	}
 
 	sessionID := uint64(now.UnixNano()) + sessionSalt
@@ -2211,6 +2235,7 @@ func (c *Controller) gatewayAccessGrantForNodeLocked(
 		expireUnixMs,
 		leaseSecs,
 		graceSecs,
+		policyRev,
 	)
 	if grant == nil {
 		delete(c.gatewayGrantCache, cacheKey)
@@ -2247,13 +2272,14 @@ func (c *Controller) buildGatewayAccessGrantForNode(
 	expireUnixMs int64,
 	leaseSecs uint32,
 	graceSecs uint32,
+	policyRev uint64,
 ) *pb.GatewayAccessGrant {
 	ticket, err := newGatewayTicket(
 		c.cfg.GatewayTicketSecret,
 		deviceID,
 		virtualIP,
 		sessionID,
-		1,
+		policyRev,
 		[]string{node.GatewayID},
 		"",
 		expireUnixMs,
@@ -2283,7 +2309,7 @@ func (c *Controller) buildGatewayAccessGrantForNode(
 		Ticket:                ticket,
 		TicketExpireUnixMs:    expireUnixMs,
 		SessionId:             sessionID,
-		PolicyRev:             1,
+		PolicyRev:             policyRev,
 		GatewayCapabilities:   append([]string{}, node.Capabilities...),
 		LeaseSecs:             leaseSecs,
 		GraceSecs:             graceSecs,
@@ -2331,10 +2357,7 @@ func (c *Controller) approvedAliveGatewayNodesLocked(now time.Time) []GatewayNod
 	return nodes
 }
 
-func (c *Controller) gatewayGrantFingerprintSnapshot() string {
-	c.gatewayMu.RLock()
-	defer c.gatewayMu.RUnlock()
-	nodes := c.approvedAliveGatewayNodesLocked(time.Now())
+func gatewayGrantFingerprint(nodes []GatewayNodeInfo) string {
 	parts := make([]string, 0, len(nodes))
 	for _, node := range nodes {
 		parts = append(parts, fmt.Sprintf(
@@ -2347,6 +2370,22 @@ func (c *Controller) gatewayGrantFingerprintSnapshot() string {
 		))
 	}
 	return strings.Join(parts, ",")
+}
+
+func (c *Controller) syncGatewayGrantPolicyLocked(nodes []GatewayNodeInfo) (uint64, bool) {
+	fingerprint := gatewayGrantFingerprint(nodes)
+	if fingerprint == c.gatewayGrantFingerprint {
+		if c.gatewayGrantPolicyRev == 0 {
+			c.gatewayGrantPolicyRev = 1
+		}
+		return c.gatewayGrantPolicyRev, false
+	}
+	c.gatewayGrantFingerprint = fingerprint
+	c.gatewayGrantPolicyRev++
+	if c.gatewayGrantPolicyRev == 0 {
+		c.gatewayGrantPolicyRev = 1
+	}
+	return c.gatewayGrantPolicyRev, true
 }
 
 func selectPrimaryGatewayGrant(grants []*pb.GatewayAccessGrant) *pb.GatewayAccessGrant {
