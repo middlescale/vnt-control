@@ -2031,6 +2031,106 @@ func TestGatewayApproveByIDAfterPendingReport(t *testing.T) {
 	}
 }
 
+func TestGatewayDelistByIDRemovesApprovedGateway(t *testing.T) {
+	ctrl := newTestController(t)
+	defer ctrl.Stop()
+	report := newSignedGatewayReport(t, testGatewayTicketSecret, "gw-delist", "127.0.0.1:51821", []string{"udp_blind_relay_v1"}, time.Now(), randomGatewayNonce(t))
+	resp, err := ctrl.HandleGatewayReportPacket(newGatewayReportPacket(t, report))
+	if err != nil {
+		t.Fatalf("HandleGatewayReportPacket failed: %v", err)
+	}
+	var ack pb.GatewayReportAck
+	if err := proto.Unmarshal(resp.Payload, &ack); err != nil {
+		t.Fatalf("unmarshal gateway report ack failed: %v", err)
+	}
+	if ack.GetOk() {
+		t.Fatalf("expected first report to wait for approval")
+	}
+	if err := ctrl.ApproveGatewayNodeByID("gw-delist"); err != nil {
+		t.Fatalf("ApproveGatewayNodeByID failed: %v", err)
+	}
+	keepalive := newSignedGatewayReport(t, testGatewayTicketSecret, "gw-delist", "127.0.0.1:51821", []string{"udp_blind_relay_v1"}, time.Now(), randomGatewayNonce(t))
+	resp, err = ctrl.HandleGatewayReportPacket(newGatewayReportPacket(t, keepalive))
+	if err != nil {
+		t.Fatalf("HandleGatewayReportPacket after approve failed: %v", err)
+	}
+	if err := proto.Unmarshal(resp.Payload, &ack); err != nil {
+		t.Fatalf("unmarshal gateway report ack failed: %v", err)
+	}
+	if !ack.GetOk() {
+		t.Fatalf("expected gateway report accepted after approval")
+	}
+
+	regResp := mustRegister(
+		t,
+		ctrl,
+		newBaseRegisterReq("dev-delist-a", "node-delist-a"),
+		&net.UDPAddr{IP: net.ParseIP("1.1.1.61"), Port: 6161},
+	)
+	grants := regResp.GetGatewayAccessGrants()
+	if len(grants) != 1 || grants[0].GetGatewayId() != "gw-delist" {
+		t.Fatalf("expected approved gateway grant before delist, got %+v", grants)
+	}
+
+	if err := ctrl.DelistGatewayNodeByID("gw-delist"); err != nil {
+		t.Fatalf("DelistGatewayNodeByID failed: %v", err)
+	}
+
+	regResp = mustRegister(
+		t,
+		ctrl,
+		newBaseRegisterReq("dev-delist-b", "node-delist-b"),
+		&net.UDPAddr{IP: net.ParseIP("1.1.1.62"), Port: 6262},
+	)
+	if grants := regResp.GetGatewayAccessGrants(); len(grants) != 0 {
+		t.Fatalf("expected no gateway grants after delist, got %+v", grants)
+	}
+
+	retry := newSignedGatewayReport(t, testGatewayTicketSecret, "gw-delist", "127.0.0.1:51821", []string{"udp_blind_relay_v1"}, time.Now(), randomGatewayNonce(t))
+	resp, err = ctrl.HandleGatewayReportPacket(newGatewayReportPacket(t, retry))
+	if err != nil {
+		t.Fatalf("HandleGatewayReportPacket after delist failed: %v", err)
+	}
+	if err := proto.Unmarshal(resp.Payload, &ack); err != nil {
+		t.Fatalf("unmarshal gateway report ack after delist failed: %v", err)
+	}
+	if ack.GetOk() || ack.GetReason() != "gateway not approved" {
+		t.Fatalf("expected gateway report reject after delist, ack=%+v", ack)
+	}
+
+	var listed *GatewayAdminView
+	for _, gateway := range ctrl.ListGateways() {
+		if gateway.GatewayID == "gw-delist" {
+			gatewayCopy := gateway
+			listed = &gatewayCopy
+			break
+		}
+	}
+	if listed == nil {
+		t.Fatalf("expected gateway to remain visible in admin list after delist")
+	}
+	if listed.Approved {
+		t.Fatalf("expected gateway to be unapproved after delist: %+v", *listed)
+	}
+	if !listed.Reported {
+		t.Fatalf("expected gateway to remain reported after delist: %+v", *listed)
+	}
+}
+
+func TestGatewayDelistDefaultGatewayRejected(t *testing.T) {
+	ctrl := newControllerWithConfig(t, &config.Config{
+		Gateway:             net.ParseIP("10.26.0.1"),
+		Domain:              "ms.net",
+		Netmask:             "255.255.255.0",
+		DefaultGatewayID:    "gw-default",
+		GatewayTicketSecret: testGatewayTicketSecret,
+	})
+	defer ctrl.Stop()
+	if err := ctrl.DelistGatewayNodeByID("gw-default"); err == nil {
+		t.Fatalf("expected default gateway delist to fail")
+	}
+}
+
 func TestGatewayReportAllowsConfiguredDefaultGateway(t *testing.T) {
 	ctrl := newControllerWithConfig(t, &config.Config{
 		Gateway:             net.ParseIP("10.26.0.1"),

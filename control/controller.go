@@ -1927,6 +1927,31 @@ func (c *Controller) ApproveGatewayNodeByID(gatewayID string) error {
 	return nil
 }
 
+func (c *Controller) DelistGatewayNodeByID(gatewayID string) error {
+	c.gatewayMu.Lock()
+	defer c.gatewayMu.Unlock()
+	gatewayID = strings.TrimSpace(gatewayID)
+	if gatewayID == "" {
+		return fmt.Errorf("gateway_id is required")
+	}
+	if gatewayID == strings.TrimSpace(c.cfg.DefaultGatewayID) {
+		return fmt.Errorf("default gateway %s cannot be delisted", gatewayID)
+	}
+	_, allowed := c.gatewayAllow[gatewayID]
+	node, active := c.gatewayNodes[gatewayID]
+	_, seen := c.gatewaySeen[gatewayID]
+	if !allowed && !active && !seen {
+		return fmt.Errorf("gateway %s not found", gatewayID)
+	}
+	if active {
+		c.gatewaySeen[gatewayID] = node
+	}
+	delete(c.gatewayAllow, gatewayID)
+	delete(c.gatewayNodes, gatewayID)
+	c.persistGatewayApprovalLocked()
+	return nil
+}
+
 func (c *Controller) ListGateways() []GatewayAdminView {
 	c.gatewayMu.RLock()
 	defer c.gatewayMu.RUnlock()

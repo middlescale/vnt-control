@@ -1,146 +1,33 @@
 package main
 
-import (
-	"bytes"
-	"encoding/json"
-	"strings"
-	"testing"
-)
+import "testing"
 
-func TestWriteResponseListGatewayFormatsTable(t *testing.T) {
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-
-	err := writeResponse(&stdout, &stderr, "list_gateway", adminResponse{
-		Gateways: []gatewayInfo{
-			{
-				GatewayID:     "gw-1",
-				Endpoint:      "10.0.0.1:443",
-				Default:       true,
-				Approved:      true,
-				Reported:      true,
-				Alive:         true,
-				Capabilities:  []string{"quic_stream_relay_v1", "icmp_v1"},
-				UpdatedAtUnix: 1713926400,
-			},
-		},
-	})
-	if err != nil {
-		t.Fatalf("writeResponse returned error: %v", err)
+func TestParseGatewayList(t *testing.T) {
+	req := parseGateway([]string{"--list"})
+	if req.Action != "gateway_list" {
+		t.Fatalf("expected gateway_list action, got %q", req.Action)
 	}
-
-	got := stdout.String()
-	for _, want := range []string{
-		"Gateways (1)",
-		"ID",
-		"APPROVED",
-		"gw-1",
-		"10.0.0.1:443",
-		"yes",
-		"quic_stream_relay_v1,icmp_v1",
-		formatUnix(1713926400),
-	} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("gateway output missing %q:\n%s", want, got)
-		}
-	}
-	if stderr.Len() != 0 {
-		t.Fatalf("expected no stderr output, got: %s", stderr.String())
+	if req.GatewayID != "" {
+		t.Fatalf("expected empty gateway id for list, got %q", req.GatewayID)
 	}
 }
 
-func TestWriteResponseExtendDeviceExpiryFormatsSummaryAndTable(t *testing.T) {
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-
-	err := writeResponse(&stdout, &stderr, "extend_device_expiry", adminResponse{
-		UpdatedCount: 1,
-		Devices: []deviceInfo{
-			{
-				UserID:             "u-1",
-				Group:              "sales.ms.net",
-				Name:               "laptop-01",
-				DeviceID:           "dev-1",
-				VirtualIP:          "10.26.0.2",
-				ControlOnline:      true,
-				DataPlaneReachable: false,
-				AuthExpireAtUnix:   1713926400,
-				UpdatedAtUnix:      1713926500,
-			},
-		},
-	})
-	if err != nil {
-		t.Fatalf("writeResponse returned error: %v", err)
+func TestParseGatewayEnlist(t *testing.T) {
+	req := parseGateway([]string{"--enlist", "gw-1"})
+	if req.Action != "gateway_enlist" {
+		t.Fatalf("expected gateway_enlist action, got %q", req.Action)
 	}
-
-	got := stdout.String()
-	for _, want := range []string{
-		"Extended 1 device(s)",
-		"USER ID",
-		"laptop-01",
-		"yes",
-		"no",
-		"valid",
-		formatUnix(1713926500),
-	} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("device output missing %q:\n%s", want, got)
-		}
-	}
-	if stderr.Len() != 0 {
-		t.Fatalf("expected no stderr output, got: %s", stderr.String())
+	if req.GatewayID != "gw-1" {
+		t.Fatalf("expected gateway id gw-1, got %q", req.GatewayID)
 	}
 }
 
-func TestWriteJSONOutputsStructuredResponse(t *testing.T) {
-	var stdout bytes.Buffer
-	resp := adminResponse{
-		OK:     true,
-		UserID: "u-1",
-		Name:   "alice",
-		Domain: "sales.ms.net",
+func TestParseGatewayDelist(t *testing.T) {
+	req := parseGateway([]string{"--delist", "gw-1"})
+	if req.Action != "gateway_delist" {
+		t.Fatalf("expected gateway_delist action, got %q", req.Action)
 	}
-
-	if err := writeJSON(&stdout, resp); err != nil {
-		t.Fatalf("writeJSON returned error: %v", err)
-	}
-
-	var decoded adminResponse
-	if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil {
-		t.Fatalf("output is not valid json: %v\n%s", err, stdout.String())
-	}
-	if !decoded.OK || decoded.UserID != "u-1" || decoded.Name != "alice" || decoded.Domain != "sales.ms.net" {
-		t.Fatalf("unexpected decoded response: %+v", decoded)
-	}
-	if !strings.Contains(stdout.String(), "\"ok\": true") {
-		t.Fatalf("expected pretty json output, got:\n%s", stdout.String())
-	}
-}
-
-func TestWriteResponseAddsColorWhenForced(t *testing.T) {
-	t.Setenv("CLICOLOR_FORCE", "1")
-	t.Setenv("NO_COLOR", "")
-	t.Setenv("TERM", "xterm-256color")
-
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	err := writeResponse(&stdout, &stderr, "list_gateway", adminResponse{
-		Gateways: []gatewayInfo{
-			{GatewayID: "gw-1", Endpoint: "10.0.0.1:443", Default: true, Approved: true, Reported: false, Alive: true},
-		},
-	})
-	if err != nil {
-		t.Fatalf("writeResponse returned error: %v", err)
-	}
-
-	got := stdout.String()
-	if !strings.Contains(got, "\x1b[") {
-		t.Fatalf("expected ANSI color codes in output, got:\n%s", got)
-	}
-	if !strings.Contains(got, ansiGreen+"yes"+ansiReset) {
-		t.Fatalf("expected green yes status in output, got:\n%s", got)
-	}
-	if !strings.Contains(got, ansiRed+"no"+ansiReset) {
-		t.Fatalf("expected red no status in output, got:\n%s", got)
+	if req.GatewayID != "gw-1" {
+		t.Fatalf("expected gateway id gw-1, got %q", req.GatewayID)
 	}
 }

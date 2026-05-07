@@ -87,13 +87,14 @@ The `sdl-admin` tool provides administrative functionality through a Unix Domain
 ./sdl-admin createUser -u user1
 ./sdl-admin issueDeviceTicket --userId <user_id>
 ./sdl-admin issueDeviceTicket -u <user_id> -g sales.ms.net
-./sdl-admin listGateway
-./sdl-admin registerGateway --gateway-id gw-1
+./sdl-admin gateway --list
+./sdl-admin gateway --enlist gw-1
+./sdl-admin gateway --delist gw-1
 ```
 
 Note: The `--group` parameter can accept short names (e.g., `sales`, which gets automatically completed to `sales.<user-domain>`) or FQDN (e.g., `sales.ms.net`, which gets validated to ensure it belongs to the user's domain).
 
-Gateway registration/keepalive uses shared-secret HMAC auth plus separate admin approval: every `GatewayReportRequest` must carry `nonce + signature`, where signature is HMAC-SHA256 over the protobuf proof `(gateway_id, endpoint, capabilities, report_unix_ms, nonce)` using `gateway_ticket_secret`. Admin approval via `registerGateway` remains separate from authentication, and replay/freshness failures must be rejected explicitly.
+Gateway registration/keepalive uses shared-secret HMAC auth plus separate admin approval: every `GatewayReportRequest` must carry `nonce + signature`, where signature is HMAC-SHA256 over the protobuf proof `(gateway_id, endpoint, capabilities, report_unix_ms, nonce)` using `gateway_ticket_secret`. Admin approval via `gateway --enlist` remains separate from authentication, and replay/freshness failures must be rejected explicitly.
 
 ### Configuration Example
 ```json

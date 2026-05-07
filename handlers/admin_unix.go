@@ -117,7 +117,7 @@ func handleAdminConn(ctrl *control.Controller, conn net.Conn) {
 			return
 		}
 		_ = json.NewEncoder(conn).Encode(adminResponse{OK: true, Ticket: t.Ticket, ExpireAtUnix: t.ExpireAt.Unix()})
-	case "register_gateway":
+	case "register_gateway", "gateway_enlist":
 		gatewayID := strings.TrimSpace(req.GatewayID)
 		if gatewayID == "" {
 			_ = json.NewEncoder(conn).Encode(adminResponse{OK: false, Error: "gateway_id required"})
@@ -140,7 +140,30 @@ func handleAdminConn(ctrl *control.Controller, conn net.Conn) {
 			}
 		}
 		_ = json.NewEncoder(conn).Encode(adminResponse{OK: true})
-	case "list_gateway":
+	case "delist_gateway", "gateway_delist":
+		gatewayID := strings.TrimSpace(req.GatewayID)
+		if gatewayID == "" {
+			_ = json.NewEncoder(conn).Encode(adminResponse{OK: false, Error: "gateway_id required"})
+			return
+		}
+		if err := ctrl.DelistGatewayNodeByID(gatewayID); err != nil {
+			_ = json.NewEncoder(conn).Encode(adminResponse{OK: false, Error: err.Error()})
+			return
+		}
+		if pushPackets, pushErr := ctrl.BuildPushDeviceListPacketsForGatewayChangeIfNeeded(); pushErr != nil {
+			log.Errorf("BuildPushDeviceListPacketsForGatewayChangeIfNeeded error: %v", pushErr)
+		} else {
+			for _, push := range pushPackets {
+				if push == nil || push.DstIP == nil {
+					continue
+				}
+				if err := quicStreams.writeToIP(util.IpToUint32(push.DstIP), push.Marshal()); err != nil {
+					log.Warnf("PushDeviceList dispatch failed: %s err=%v", push.DstIP, err)
+				}
+			}
+		}
+		_ = json.NewEncoder(conn).Encode(adminResponse{OK: true})
+	case "list_gateway", "gateway_list":
 		_ = json.NewEncoder(conn).Encode(adminResponse{OK: true, Gateways: ctrl.ListGateways()})
 	case "list_device":
 		userID := strings.TrimSpace(req.UserID)

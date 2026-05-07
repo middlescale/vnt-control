@@ -103,8 +103,8 @@ func main() {
 		req = parseCreateUser(args[1:])
 	case "issueDeviceTicket", "issue_device_ticket":
 		req = parseIssueDeviceTicket(args[1:])
-	case "listGateway", "list_gateway":
-		req = parseListGateway(args[1:])
+	case "gateway":
+		req = parseGateway(args[1:])
 	case "listDevice", "list_device":
 		req = parseListDevice(args[1:])
 	case "extendDeviceExpiry", "extend_device_expiry":
@@ -113,8 +113,6 @@ func main() {
 		req = parseApproveDeviceRename(args[1:])
 	case "renameDevice", "rename_device":
 		req = parseRenameDevice(args[1:])
-	case "registerGateway", "register_gateway":
-		req = parseRegisterGateway(args[1:])
 	case "dnsDomains", "dns_domains":
 		req = parseDNSDomains(args[1:])
 	case "dnsSnapshot", "dns_snapshot":
@@ -164,9 +162,11 @@ func writeResponse(stdout, stderr io.Writer, action string, resp adminResponse) 
 			{Key: "Expires At", Value: formatUnix(resp.ExpireAtUnix)},
 			{Key: "Expire Unix", Value: formatInt64(resp.ExpireAtUnix)},
 		})
-	case "register_gateway":
-		writeKeyValueBlock(stdout, "Gateway registered", nil)
-	case "list_gateway":
+	case "gateway_enlist":
+		writeKeyValueBlock(stdout, "Gateway enlisted", nil)
+	case "gateway_delist":
+		writeKeyValueBlock(stdout, "Gateway delisted", nil)
+	case "gateway_list":
 		writeGatewayTable(stdout, resp.Gateways)
 	case "list_device":
 		writeDeviceTable(stdout, "Devices", resp.Devices)
@@ -251,18 +251,6 @@ func parseIssueDeviceTicket(args []string) adminRequest {
 	}
 }
 
-func parseListGateway(args []string) adminRequest {
-	fs := flag.NewFlagSet("listGateway", flag.ContinueOnError)
-	fs.SetOutput(os.Stderr)
-	if err := fs.Parse(args); err != nil {
-		fatalUsage()
-	}
-	if fs.NArg() != 0 {
-		fatalUsage()
-	}
-	return adminRequest{Action: "list_gateway"}
-}
-
 func parseListDevice(args []string) adminRequest {
 	fs := flag.NewFlagSet("listDevice", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
@@ -314,29 +302,46 @@ func parseExtendDeviceExpiry(args []string) adminRequest {
 	}
 }
 
-func parseRegisterGateway(args []string) adminRequest {
-	fs := flag.NewFlagSet("registerGateway", flag.ContinueOnError)
+func parseGateway(args []string) adminRequest {
+	fs := flag.NewFlagSet("gateway", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
+	var list bool
 	var gatewayID string
-	var endpoint string
-	var caps string
-	fs.StringVar(&gatewayID, "gatewayId", "", "gateway id")
-	fs.StringVar(&gatewayID, "gateway_id", "", "gateway id")
-	fs.StringVar(&gatewayID, "gateway-id", "", "gateway id")
-	fs.StringVar(&gatewayID, "g", "", "gateway id")
-	fs.StringVar(&endpoint, "endpoint", "", "gateway endpoint host:port (deprecated for approval)")
-	fs.StringVar(&caps, "caps", "quic_stream_relay_v1", "comma-separated gateway capabilities")
+	var delistGatewayID string
+	fs.BoolVar(&list, "list", false, "list gateways")
+	fs.StringVar(&gatewayID, "enlist", "", "approve a reported gateway id")
+	fs.StringVar(&delistGatewayID, "delist", "", "remove an approved gateway id")
 	if err := fs.Parse(args); err != nil {
 		fatalUsage()
 	}
-	if strings.TrimSpace(gatewayID) == "" || fs.NArg() != 0 {
+	if fs.NArg() != 0 {
 		fatalUsage()
 	}
+	ops := 0
+	if list {
+		ops++
+	}
+	if strings.TrimSpace(gatewayID) != "" {
+		ops++
+	}
+	if strings.TrimSpace(delistGatewayID) != "" {
+		ops++
+	}
+	if ops != 1 {
+		fatalUsage()
+	}
+	if list {
+		return adminRequest{Action: "gateway_list"}
+	}
+	if strings.TrimSpace(gatewayID) != "" {
+		return adminRequest{
+			Action:    "gateway_enlist",
+			GatewayID: strings.TrimSpace(gatewayID),
+		}
+	}
 	return adminRequest{
-		Action:       "register_gateway",
-		GatewayID:    strings.TrimSpace(gatewayID),
-		Endpoint:     strings.TrimSpace(endpoint),
-		Capabilities: splitCSV(caps),
+		Action:    "gateway_delist",
+		GatewayID: strings.TrimSpace(delistGatewayID),
 	}
 }
 
@@ -550,12 +555,13 @@ func fatalUsage() {
 	fmt.Fprintln(os.Stderr, "usage:")
 	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] createUser --userId/-u user1 [--group/-g sales.ms.net]")
 	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] issueDeviceTicket --userId/-u u-1 [--group/-g default.ms.net] [--ttlSeconds/-t 300]")
-	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] listGateway")
+	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] gateway --list")
 	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] listDevice --userId/-u u-1")
 	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] extendDeviceExpiry --userId/-u u-1 (--deviceId/-d dev-1 | --all) [--group/-g sales.ms.net] [--ttlSeconds/-t 2592000]")
 	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] approveDeviceRename --deviceId/-d dev-1 [--group/-g sales.ms.net] [--userId/-u u-1]")
 	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] renameDevice --deviceId/-d dev-1 --name/-n new-name [--group/-g sales.ms.net] [--userId/-u u-1]")
-	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] registerGateway --gateway-id/-g gw-1")
+	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] gateway --enlist gw-1")
+	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] gateway --delist gw-1")
 	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] dnsDomains")
 	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] dnsSnapshot --domain/-d ms.net [--group/-g default]")
 	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] collectDebug --name/-n win10-node [--group/-g default.ms.net] [--userId/-u u-1] [--sections/-s runtime,gateway,peers,routes,nat,traffic] [--timeoutSec/-t 10]")
