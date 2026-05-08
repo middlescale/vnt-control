@@ -33,21 +33,22 @@ type adminRequest struct {
 }
 
 type adminResponse struct {
-	OK           bool                       `json:"ok"`
-	UserID       string                     `json:"user_id,omitempty"`
-	Name         string                     `json:"name,omitempty"`
-	Domain       string                     `json:"domain,omitempty"`
-	Domains      []string                   `json:"domains,omitempty"`
-	Ticket       string                     `json:"ticket,omitempty"`
-	ExpireAtUnix int64                      `json:"expire_at_unix,omitempty"`
-	Gateways     []control.GatewayAdminView `json:"gateways,omitempty"`
-	Devices      []control.DeviceAdminView  `json:"devices,omitempty"`
-	DNSSnapshot  *control.DNSSnapshotView   `json:"dns_snapshot,omitempty"`
-	DebugResult  json.RawMessage            `json:"debug_result,omitempty"`
-	DebugPath    string                     `json:"debug_path,omitempty"`
-	DebugWatchID uint64                     `json:"debug_watch_id,omitempty"`
-	UpdatedCount int                        `json:"updated_count,omitempty"`
-	Error        string                     `json:"error,omitempty"`
+	OK             bool                       `json:"ok"`
+	UserID         string                     `json:"user_id,omitempty"`
+	Name           string                     `json:"name,omitempty"`
+	Domain         string                     `json:"domain,omitempty"`
+	Domains        []string                   `json:"domains,omitempty"`
+	Ticket         string                     `json:"ticket,omitempty"`
+	ExpireAtUnix   int64                      `json:"expire_at_unix,omitempty"`
+	Gateways       []control.GatewayAdminView `json:"gateways,omitempty"`
+	Devices        []control.DeviceAdminView  `json:"devices,omitempty"`
+	UpdatedDevices []control.DeviceAdminView  `json:"updated_devices,omitempty"`
+	DNSSnapshot    *control.DNSSnapshotView   `json:"dns_snapshot,omitempty"`
+	DebugResult    json.RawMessage            `json:"debug_result,omitempty"`
+	DebugPath      string                     `json:"debug_path,omitempty"`
+	DebugWatchID   uint64                     `json:"debug_watch_id,omitempty"`
+	UpdatedCount   int                        `json:"updated_count,omitempty"`
+	Error          string                     `json:"error,omitempty"`
 }
 
 func StartAdminUnixServer(ctx context.Context, ctrl *control.Controller, socketPath string) error {
@@ -193,10 +194,12 @@ func handleAdminConn(ctrl *control.Controller, conn net.Conn) {
 			_ = json.NewEncoder(conn).Encode(adminResponse{OK: false, Error: err.Error()})
 			return
 		}
+		devices := ctrl.ListDevices(userID)
 		_ = json.NewEncoder(conn).Encode(adminResponse{
-			OK:           true,
-			Devices:      ctrl.ListDevices(userID),
-			UpdatedCount: len(updated),
+			OK:             true,
+			Devices:        devices,
+			UpdatedDevices: selectUpdatedDeviceViews(updated, devices),
+			UpdatedCount:   len(updated),
 		})
 	case "approve_device_rename":
 		appliedName, changedIP, err := ctrl.ApprovePendingDeviceRename(
@@ -369,4 +372,37 @@ func handleAdminConn(ctrl *control.Controller, conn net.Conn) {
 	default:
 		_ = json.NewEncoder(conn).Encode(adminResponse{OK: false, Error: "unsupported action"})
 	}
+}
+
+func selectUpdatedDeviceViews(updated []control.UMAuthDevice, devices []control.DeviceAdminView) []control.DeviceAdminView {
+	if len(updated) == 0 {
+		return nil
+	}
+	deviceByKey := make(map[string]control.DeviceAdminView, len(devices))
+	for _, device := range devices {
+		deviceByKey[device.Group+"\x00"+device.DeviceID] = device
+	}
+	updatedViews := make([]control.DeviceAdminView, 0, len(updated))
+	for _, record := range updated {
+		key := record.GroupName + "\x00" + record.DeviceID
+		if device, ok := deviceByKey[key]; ok {
+			updatedViews = append(updatedViews, device)
+			continue
+		}
+		name := strings.TrimSpace(record.DisplayName)
+		if name == "" {
+			name = record.DeviceID
+		}
+		updatedViews = append(updatedViews, control.DeviceAdminView{
+			UserID:           record.UserID,
+			Group:            record.GroupName,
+			Name:             name,
+			DeviceID:         record.DeviceID,
+			AuthedAtUnix:     record.AuthedAt.Unix(),
+			AuthExpireAtUnix: record.AuthExpireAt.Unix(),
+			AuthExpired:      !record.AuthExpireAt.IsZero() && time.Now().After(record.AuthExpireAt),
+			UpdatedAtUnix:    record.AuthedAt.Unix(),
+		})
+	}
+	return updatedViews
 }

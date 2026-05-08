@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"bytes"
+	"strings"
+	"testing"
+)
 
 func TestParseGatewayList(t *testing.T) {
 	req := parseGateway([]string{"--list"})
@@ -29,5 +33,44 @@ func TestParseGatewayDelist(t *testing.T) {
 	}
 	if req.GatewayID != "gw-1" {
 		t.Fatalf("expected gateway id gw-1, got %q", req.GatewayID)
+	}
+}
+
+func TestWriteResponseExtendDeviceExpiryShowsSummaryAndUpdatedDevices(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	resp := adminResponse{
+		OK:           true,
+		UpdatedCount: 1,
+		UpdatedDevices: []deviceInfo{{
+			UserID:           "u-1",
+			Group:            "default.ms.net",
+			Name:             "node-1",
+			DeviceID:         "dev-1",
+			AuthExpireAtUnix: 1_750_000_000,
+		}},
+		Devices: []deviceInfo{{
+			UserID:           "u-1",
+			Group:            "default.ms.net",
+			Name:             "node-1",
+			DeviceID:         "dev-1",
+			AuthExpireAtUnix: 1_750_000_000,
+		}},
+	}
+	if err := writeResponse(&stdout, &stderr, "extend_device_expiry", resp); err != nil {
+		t.Fatalf("writeResponse failed: %v", err)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"Extended device expiry",
+		"Updated Count",
+		"1",
+		"Updated devices",
+		"Current devices",
+		"dev-1",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected output to contain %q, got:\n%s", want, out)
+		}
 	}
 }

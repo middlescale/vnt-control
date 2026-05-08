@@ -42,21 +42,22 @@ type adminRequest struct {
 }
 
 type adminResponse struct {
-	OK           bool            `json:"ok"`
-	UserID       string          `json:"user_id,omitempty"`
-	Name         string          `json:"name,omitempty"`
-	Domain       string          `json:"domain,omitempty"`
-	Ticket       string          `json:"ticket,omitempty"`
-	ExpireAtUnix int64           `json:"expire_at_unix,omitempty"`
-	Gateways     []gatewayInfo   `json:"gateways,omitempty"`
-	Devices      []deviceInfo    `json:"devices,omitempty"`
-	Domains      []string        `json:"domains,omitempty"`
-	DNSSnapshot  any             `json:"dns_snapshot,omitempty"`
-	DebugResult  json.RawMessage `json:"debug_result,omitempty"`
-	DebugPath    string          `json:"debug_path,omitempty"`
-	DebugWatchID uint64          `json:"debug_watch_id,omitempty"`
-	UpdatedCount int             `json:"updated_count,omitempty"`
-	Error        string          `json:"error,omitempty"`
+	OK             bool            `json:"ok"`
+	UserID         string          `json:"user_id,omitempty"`
+	Name           string          `json:"name,omitempty"`
+	Domain         string          `json:"domain,omitempty"`
+	Ticket         string          `json:"ticket,omitempty"`
+	ExpireAtUnix   int64           `json:"expire_at_unix,omitempty"`
+	Gateways       []gatewayInfo   `json:"gateways,omitempty"`
+	Devices        []deviceInfo    `json:"devices,omitempty"`
+	UpdatedDevices []deviceInfo    `json:"updated_devices,omitempty"`
+	Domains        []string        `json:"domains,omitempty"`
+	DNSSnapshot    any             `json:"dns_snapshot,omitempty"`
+	DebugResult    json.RawMessage `json:"debug_result,omitempty"`
+	DebugPath      string          `json:"debug_path,omitempty"`
+	DebugWatchID   uint64          `json:"debug_watch_id,omitempty"`
+	UpdatedCount   int             `json:"updated_count,omitempty"`
+	Error          string          `json:"error,omitempty"`
 }
 
 type gatewayInfo struct {
@@ -171,7 +172,17 @@ func writeResponse(stdout, stderr io.Writer, action string, resp adminResponse) 
 	case "list_device":
 		writeDeviceTable(stdout, "Devices", resp.Devices)
 	case "extend_device_expiry":
-		writeDeviceTable(stdout, fmt.Sprintf("Extended %d device(s)", resp.UpdatedCount), resp.Devices)
+		writeKeyValueBlock(stdout, "Extended device expiry", []kv{
+			{Key: "Updated Count", Value: fmt.Sprintf("%d", resp.UpdatedCount)},
+		})
+		if len(resp.UpdatedDevices) > 0 {
+			fmt.Fprintln(stdout)
+			writeDeviceTable(stdout, "Updated devices", resp.UpdatedDevices)
+		}
+		if len(resp.Devices) > 0 {
+			fmt.Fprintln(stdout)
+			writeDeviceTable(stdout, "Current devices", resp.Devices)
+		}
 	case "approve_device_rename":
 		writeKeyValueBlock(stdout, "Approved device rename", []kv{{Key: "Name", Value: valueOrDash(resp.Name)}})
 	case "rename_device":
