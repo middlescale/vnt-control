@@ -567,26 +567,11 @@ func (c *Controller) clearStaleClientStateByDeviceID(domain, deviceID string) {
 }
 
 func (c *Controller) BuildRegistrationErrorPacket(request *protocol.Packet, err error) (*protocol.Packet, error) {
-	code := uint32(1)
-	reason := "registration failed"
-	if err != nil {
-		reason = err.Error()
-		switch {
-		case strings.Contains(reason, "expect <group>.<domain>"),
-			strings.Contains(reason, "not configured in domains"):
-			code = 1001
-		case strings.Contains(reason, "not authed"):
-			code = 1002
-		case strings.Contains(reason, "unmarshal"),
-			strings.Contains(reason, "validate"):
-			code = 1003
-		default:
-			code = 1999
-		}
-	}
+	code, errorReason, reason := classifyRegistrationError(err)
 	resp := &pb.RegistrationResponse{
 		ErrorCode:    code,
 		ErrorMessage: reason,
+		ErrorReason:  errorReason,
 	}
 	payload, marshalErr := proto.Marshal(resp)
 	if marshalErr != nil {
@@ -602,6 +587,36 @@ func (c *Controller) BuildRegistrationErrorPacket(request *protocol.Packet, err 
 		DstIP:     request.SrcIP,
 		Payload:   payload,
 	}, nil
+}
+
+func classifyRegistrationError(err error) (uint32, pb.RegistrationErrorReason, string) {
+	code := uint32(1)
+	errorReason := pb.RegistrationErrorReason_REGISTRATION_ERROR_REASON_INTERNAL
+	reason := "registration failed"
+	if err == nil {
+		return code, errorReason, reason
+	}
+	reason = err.Error()
+	switch {
+	case strings.Contains(reason, "expect <group>.<domain>"),
+		strings.Contains(reason, "not configured in domains"):
+		code = 1001
+		errorReason = pb.RegistrationErrorReason_REGISTRATION_ERROR_REASON_INVALID_GROUP_DOMAIN
+	case strings.Contains(reason, "not authed"):
+		code = 1002
+		errorReason = pb.RegistrationErrorReason_REGISTRATION_ERROR_REASON_NOT_AUTHED
+	case strings.Contains(reason, "unmarshal"),
+		strings.Contains(reason, "validate"):
+		code = 1003
+		errorReason = pb.RegistrationErrorReason_REGISTRATION_ERROR_REASON_INVALID_REQUEST
+	case strings.Contains(reason, "missing required handshake capability"):
+		code = 1004
+		errorReason = pb.RegistrationErrorReason_REGISTRATION_ERROR_REASON_MISSING_HANDSHAKE_CAPABILITY
+	default:
+		code = 1999
+		errorReason = pb.RegistrationErrorReason_REGISTRATION_ERROR_REASON_INTERNAL
+	}
+	return code, errorReason, reason
 }
 
 func (c *Controller) HandlePullDeviceListPacket(request *protocol.Packet) (*protocol.Packet, error) {
@@ -818,9 +833,10 @@ func (c *Controller) HandleDeviceAuthProofPacket(request *protocol.Packet) (*pro
 	challenge, ok := c.consumeDeviceAuthChallenge(req.GetChallengeId())
 	if !ok || time.Now().After(challenge.ExpireAt) {
 		ack := &pb.DeviceAuthAck{
-			Ok:       false,
-			Reason:   "challenge_expired",
-			DeviceId: req.GetDeviceId(),
+			Ok:          false,
+			Reason:      "challenge_expired",
+			DeviceId:    req.GetDeviceId(),
+			ErrorReason: pb.DeviceAuthErrorReason_DEVICE_AUTH_ERROR_REASON_CHALLENGE_EXPIRED,
 		}
 		return c.buildServicePacket(request, protocol.AppProtoDeviceAuthAck, ack)
 	}
@@ -830,6 +846,7 @@ func (c *Controller) HandleDeviceAuthProofPacket(request *protocol.Packet) (*pro
 			Reason:         "device_key_mismatch",
 			DeviceId:       req.GetDeviceId(),
 			ReauthRequired: challenge.ReauthRequired,
+			ErrorReason:    pb.DeviceAuthErrorReason_DEVICE_AUTH_ERROR_REASON_DEVICE_KEY_MISMATCH,
 		}
 		return c.buildServicePacket(request, protocol.AppProtoDeviceAuthAck, ack)
 	}
@@ -839,6 +856,7 @@ func (c *Controller) HandleDeviceAuthProofPacket(request *protocol.Packet) (*pro
 			Reason:         "invalid_signature",
 			DeviceId:       req.GetDeviceId(),
 			ReauthRequired: challenge.ReauthRequired,
+			ErrorReason:    pb.DeviceAuthErrorReason_DEVICE_AUTH_ERROR_REASON_INVALID_SIGNATURE,
 		}
 		return c.buildServicePacket(request, protocol.AppProtoDeviceAuthAck, ack)
 	}
@@ -851,6 +869,7 @@ func (c *Controller) HandleDeviceAuthProofPacket(request *protocol.Packet) (*pro
 			Group:          challenge.GroupName,
 			DeviceId:       challenge.DeviceID,
 			ReauthRequired: challenge.ReauthRequired,
+			ErrorReason:    pb.DeviceAuthErrorReason_DEVICE_AUTH_ERROR_REASON_AUTH_CHECK_FAILED,
 		}
 		return c.buildServicePacket(request, protocol.AppProtoDeviceAuthAck, ack)
 	}

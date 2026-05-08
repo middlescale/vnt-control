@@ -1906,6 +1906,72 @@ func TestHandleDeviceAuthPacket(t *testing.T) {
 	}
 }
 
+func TestHandleDeviceAuthProofExpiredChallengeSetsMachineReadableReason(t *testing.T) {
+	ctrl := newTestController(t)
+	defer ctrl.Stop()
+	req := &pb.DeviceAuthProof{
+		ChallengeId:  "missing-challenge",
+		DeviceId:     "dev-x",
+		DevicePubKey: []byte("pk-dev-x"),
+		Signature:    []byte("bad-signature"),
+	}
+	payload, err := proto.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal auth proof failed: %v", err)
+	}
+	packet := &protocol.Packet{
+		Proto:    protocol.ProtocolService,
+		AppProto: protocol.AppProtoDeviceAuthProof,
+		SrcIP:    net.ParseIP("10.0.0.2"),
+		DstIP:    net.ParseIP("0.0.0.1"),
+		Payload:  payload,
+	}
+	resp, err := ctrl.HandleDeviceAuthProofPacket(packet)
+	if err != nil {
+		t.Fatalf("HandleDeviceAuthProofPacket failed: %v", err)
+	}
+	var ack pb.DeviceAuthAck
+	if err := proto.Unmarshal(resp.Payload, &ack); err != nil {
+		t.Fatalf("unmarshal auth ack failed: %v", err)
+	}
+	if ack.GetOk() || ack.GetReason() != "challenge_expired" {
+		t.Fatalf("expected challenge_expired reject, ack=%+v", ack)
+	}
+	if ack.GetErrorReason() != pb.DeviceAuthErrorReason_DEVICE_AUTH_ERROR_REASON_CHALLENGE_EXPIRED {
+		t.Fatalf("expected machine-readable challenge-expired reason, ack=%+v", ack)
+	}
+}
+
+func TestBuildRegistrationErrorPacketSetsMachineReadableReason(t *testing.T) {
+	ctrl := newTestController(t)
+	defer ctrl.Stop()
+	req := &protocol.Packet{
+		Proto: protocol.ProtocolService,
+		SrcIP: net.ParseIP("10.0.0.2"),
+		DstIP: net.ParseIP("0.0.0.1"),
+	}
+	resp, err := ctrl.BuildRegistrationErrorPacket(
+		req,
+		fmt.Errorf("client 203.0.113.10:443 missing required handshake capability %q", capabilityUDPEndpointReportV1),
+	)
+	if err != nil {
+		t.Fatalf("BuildRegistrationErrorPacket failed: %v", err)
+	}
+	var registration pb.RegistrationResponse
+	if err := proto.Unmarshal(resp.Payload, &registration); err != nil {
+		t.Fatalf("unmarshal registration response failed: %v", err)
+	}
+	if registration.GetErrorCode() != 1004 {
+		t.Fatalf("expected error code 1004, got %+v", registration)
+	}
+	if registration.GetErrorReason() != pb.RegistrationErrorReason_REGISTRATION_ERROR_REASON_MISSING_HANDSHAKE_CAPABILITY {
+		t.Fatalf("expected machine-readable missing-handshake-capability reason, got %+v", registration)
+	}
+	if !strings.Contains(registration.GetErrorMessage(), "missing required handshake capability") {
+		t.Fatalf("expected original reason to be preserved, got %+v", registration)
+	}
+}
+
 func TestGatewayReportAndRegistrationGrant(t *testing.T) {
 	ctrl := newTestController(t)
 	defer ctrl.Stop()
