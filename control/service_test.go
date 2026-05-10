@@ -2003,6 +2003,18 @@ func TestGatewayReportAndRegistrationGrant(t *testing.T) {
 	if len(grant.GetTicket()) == 0 || grant.GetTicketExpireUnixMs() <= 0 {
 		t.Fatalf("expected short-lived ticket in grant: %+v", grant)
 	}
+	if grant.GetLeaseSecs() != uint32(gatewayGrantLease/time.Second) {
+		t.Fatalf("unexpected lease secs: %d", grant.GetLeaseSecs())
+	}
+	if grant.GetGraceSecs() != uint32(gatewayGrantGrace/time.Second) {
+		t.Fatalf("unexpected grace secs: %d", grant.GetGraceSecs())
+	}
+	if diff := grant.GetTicketExpireUnixMs() - grant.GetSoftRefreshAfterUnixMs(); diff != int64((gatewayGrantSoftRefreshLead / time.Millisecond)) {
+		t.Fatalf("unexpected soft refresh lead: %dms", diff)
+	}
+	if diff := grant.GetHardExpireUnixMs() - grant.GetTicketExpireUnixMs(); diff != 0 {
+		t.Fatalf("expected hard expire to match ticket expire, diff=%dms", diff)
+	}
 	if grant.GetDefaultGatewayChannel() != pb.GatewayChannelKind_GATEWAY_CHANNEL_QUIC {
 		t.Fatalf("unexpected default gateway channel: %v", grant.GetDefaultGatewayChannel())
 	}
@@ -2616,14 +2628,20 @@ func TestRefreshGatewayGrantPacketReusesSessionWhenMatched(t *testing.T) {
 	if err := proto.Unmarshal(respPacket.Payload, &resp); err != nil {
 		t.Fatalf("unmarshal refresh gateway grant response failed: %v", err)
 	}
-	if !resp.GetHasUpdate() {
-		t.Fatalf("expected refreshed grant, got %+v", resp)
+	if resp.GetHasUpdate() {
+		t.Fatalf("expected no-change refresh response, got %+v", resp)
 	}
-	if resp.GetGatewayAccessGrant() == nil {
-		t.Fatalf("expected gateway access grant in refresh response")
+	if resp.GetResult() != pb.RefreshGatewayGrantResult_REFRESH_GATEWAY_GRANT_RESULT_NO_CHANGE {
+		t.Fatalf("expected no-change refresh result, got %v", resp.GetResult())
 	}
-	if resp.GetGatewayAccessGrant().GetSessionId() != grant.GetSessionId() {
-		t.Fatalf("expected refresh to reuse session id, got %d want %d", resp.GetGatewayAccessGrant().GetSessionId(), grant.GetSessionId())
+	if resp.GetReason() != "gateway grant unchanged" {
+		t.Fatalf("unexpected refresh reason: %s", resp.GetReason())
+	}
+	if resp.GetGatewayAccessGrant() != nil || len(resp.GetGatewayAccessGrants()) != 0 {
+		t.Fatalf("expected no grant payload for no-change refresh response, got %+v", resp)
+	}
+	if resp.GetGatewayPolicyRev() != grant.GetPolicyRev() {
+		t.Fatalf("expected gateway policy rev to stay at %d, got %d", grant.GetPolicyRev(), resp.GetGatewayPolicyRev())
 	}
 }
 
@@ -2669,6 +2687,9 @@ func TestRefreshGatewayGrantPacketForceReissueRotatesSession(t *testing.T) {
 	}
 	if !resp.GetHasUpdate() {
 		t.Fatalf("expected refreshed grant, got %+v", resp)
+	}
+	if resp.GetResult() != pb.RefreshGatewayGrantResult_REFRESH_GATEWAY_GRANT_RESULT_UPDATED {
+		t.Fatalf("expected updated refresh result, got %v", resp.GetResult())
 	}
 	if resp.GetGatewayAccessGrant() == nil {
 		t.Fatalf("expected gateway access grant in refresh response")
@@ -2724,6 +2745,9 @@ func TestRefreshGatewayGrantPacketClearsStalePolicy(t *testing.T) {
 	}
 	if !resp.GetHasUpdate() {
 		t.Fatalf("expected cleared gateway policy update, got %+v", resp)
+	}
+	if resp.GetResult() != pb.RefreshGatewayGrantResult_REFRESH_GATEWAY_GRANT_RESULT_REVOKED {
+		t.Fatalf("expected revoked refresh result, got %v", resp.GetResult())
 	}
 	if len(resp.GetGatewayAccessGrants()) != 0 || resp.GetGatewayAccessGrant() != nil {
 		t.Fatalf("expected cleared gateway grants, got %+v", resp)

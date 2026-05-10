@@ -134,6 +134,10 @@ const maxPunchAttemptsPerPair = 3
 const gatewayNodeLease = 90 * time.Second
 const deviceAuthChallengeTTL = 60 * time.Second
 const gatewayReportFreshnessWindow = 2 * time.Minute
+const gatewayGrantLease = 5 * time.Minute
+const gatewayGrantGrace = 45 * time.Second
+const gatewayGrantHardTTL = 15 * time.Minute
+const gatewayGrantSoftRefreshLead = 2 * time.Minute
 
 type PunchSessionState string
 
@@ -905,18 +909,36 @@ func (c *Controller) HandleRefreshGatewayGrantPacket(request *protocol.Packet) (
 	resp := &pb.RefreshGatewayGrantResponse{
 		HasUpdate: true,
 		Reason:    "refreshed",
+		Result:    pb.RefreshGatewayGrantResult_REFRESH_GATEWAY_GRANT_RESULT_UPDATED,
 	}
-	if grants, gatewayPolicyRev := c.buildGatewayAccessGrantsForRefresh(req.GetVirtualIp(), req.GetDeviceId(), req.GetLastSessionId(), req.GetForceReissue()); len(grants) > 0 {
-		resp.GatewayAccessGrant = selectPrimaryGatewayGrant(grants)
-		resp.GatewayAccessGrants = grants
+	grants, gatewayPolicyRev, changed := c.buildGatewayAccessGrantsForRefresh(
+		req.GetVirtualIp(),
+		req.GetDeviceId(),
+		req.GetLastSessionId(),
+		req.GetForceReissue(),
+	)
+	if len(grants) > 0 {
 		resp.GatewayPolicyRev = gatewayPolicyRev
+		if !req.GetForceReissue() &&
+			req.GetLastSessionId() != 0 &&
+			req.GetLastPolicyRev() == gatewayPolicyRev &&
+			!changed {
+			resp.HasUpdate = false
+			resp.Reason = "gateway grant unchanged"
+			resp.Result = pb.RefreshGatewayGrantResult_REFRESH_GATEWAY_GRANT_RESULT_NO_CHANGE
+		} else {
+			resp.GatewayAccessGrant = selectPrimaryGatewayGrant(grants)
+			resp.GatewayAccessGrants = grants
+		}
 	} else if req.GetLastPolicyRev() < gatewayPolicyRev {
 		resp.Reason = "gateway policy cleared"
 		resp.GatewayPolicyRev = gatewayPolicyRev
+		resp.Result = pb.RefreshGatewayGrantResult_REFRESH_GATEWAY_GRANT_RESULT_REVOKED
 	} else {
 		resp.HasUpdate = false
 		resp.Reason = "no gateway available"
 		resp.GatewayPolicyRev = gatewayPolicyRev
+		resp.Result = pb.RefreshGatewayGrantResult_REFRESH_GATEWAY_GRANT_RESULT_TEMPORARILY_UNAVAILABLE
 	}
 	payload, err := proto.Marshal(resp)
 	if err != nil {
@@ -2185,7 +2207,8 @@ func (c *Controller) buildGatewayAccessGrants(virtualIP uint32, deviceID string)
 }
 
 func (c *Controller) buildGatewayAccessGrantsWithPolicyRev(virtualIP uint32, deviceID string) ([]*pb.GatewayAccessGrant, uint64) {
-	return c.buildGatewayAccessGrantsLocked(virtualIP, deviceID, gatewayGrantBuildOptions{})
+	grants, policyRev, _ := c.buildGatewayAccessGrantsLocked(virtualIP, deviceID, gatewayGrantBuildOptions{})
+	return grants, policyRev
 }
 
 func (c *Controller) buildGatewayAccessGrantsForRefresh(
@@ -2193,7 +2216,7 @@ func (c *Controller) buildGatewayAccessGrantsForRefresh(
 	deviceID string,
 	lastSessionID uint64,
 	forceReissue bool,
-) ([]*pb.GatewayAccessGrant, uint64) {
+) ([]*pb.GatewayAccessGrant, uint64, bool) {
 	return c.buildGatewayAccessGrantsLocked(virtualIP, deviceID, gatewayGrantBuildOptions{
 		lastSessionID: lastSessionID,
 		forceReissue:  forceReissue,
@@ -2205,7 +2228,7 @@ func (c *Controller) buildGatewayAccessGrantsLocked(
 	virtualIP uint32,
 	deviceID string,
 	opts gatewayGrantBuildOptions,
-) ([]*pb.GatewayAccessGrant, uint64) {
+) ([]*pb.GatewayAccessGrant, uint64, bool) {
 	c.gatewayMu.Lock()
 	defer c.gatewayMu.Unlock()
 	now := time.Now()
@@ -2213,19 +2236,22 @@ func (c *Controller) buildGatewayAccessGrantsLocked(
 	policyRev, _ := c.syncGatewayGrantPolicyLocked(nodes)
 	c.pruneGatewayGrantCacheLocked(now, nodes)
 	if len(nodes) == 0 {
-		return nil, policyRev
+		return nil, policyRev, false
 	}
-	expire := now.Add(2 * time.Minute)
-	leaseSecs := uint32(60)
-	graceSecs := uint32(30)
+	hardExpire := now.Add(gatewayGrantHardTTL)
+	softRefreshAfter := hardExpire.Add(-gatewayGrantSoftRefreshLead)
+	leaseSecs := uint32(gatewayGrantLease / time.Second)
+	graceSecs := uint32(gatewayGrantGrace / time.Second)
 	grants := make([]*pb.GatewayAccessGrant, 0, len(nodes))
+	changed := false
 	for index, node := range nodes {
-		grant := c.gatewayAccessGrantForNodeLocked(
+		grant, grantChanged := c.gatewayAccessGrantForNodeLocked(
 			virtualIP,
 			deviceID,
 			node,
 			uint64(index),
-			expire.UnixMilli(),
+			hardExpire.UnixMilli(),
+			softRefreshAfter.UnixMilli(),
 			leaseSecs,
 			graceSecs,
 			policyRev,
@@ -2234,9 +2260,10 @@ func (c *Controller) buildGatewayAccessGrantsLocked(
 		)
 		if grant != nil {
 			grants = append(grants, grant)
+			changed = changed || grantChanged
 		}
 	}
-	return grants, policyRev
+	return grants, policyRev, changed
 }
 
 func (c *Controller) gatewayAccessGrantForNodeLocked(
@@ -2245,23 +2272,33 @@ func (c *Controller) gatewayAccessGrantForNodeLocked(
 	node GatewayNodeInfo,
 	sessionSalt uint64,
 	expireUnixMs int64,
+	refreshAfterUnixMs int64,
 	leaseSecs uint32,
 	graceSecs uint32,
 	policyRev uint64,
 	opts gatewayGrantBuildOptions,
 	now time.Time,
-) *pb.GatewayAccessGrant {
+) (*pb.GatewayAccessGrant, bool) {
 	cacheKey := gatewayGrantCacheKey(virtualIP, deviceID, node.GatewayID)
 	nodeFingerprint := gatewayGrantNodeFingerprint(node)
 	cached, ok := c.gatewayGrantCache[cacheKey]
 	if opts.refresh {
+		if !opts.forceReissue && opts.lastSessionID != 0 && ok &&
+			cached.nodeFingerprint == nodeFingerprint &&
+			cached.grant != nil &&
+			cached.grant.GetSessionId() == opts.lastSessionID &&
+			cached.expireUnixMs > now.Add(30*time.Second).UnixMilli() {
+			grant := cloneGatewayAccessGrant(cached.grant)
+			grant.PolicyRev = policyRev
+			return grant, false
+		}
 		if !opts.forceReissue && opts.lastSessionID == 0 && ok &&
 			cached.nodeFingerprint == nodeFingerprint &&
 			cached.grant != nil &&
 			cached.expireUnixMs > now.Add(30*time.Second).UnixMilli() {
 			grant := cloneGatewayAccessGrant(cached.grant)
 			grant.PolicyRev = policyRev
-			return grant
+			return grant, false
 		}
 	} else if ok &&
 		cached.nodeFingerprint == nodeFingerprint &&
@@ -2269,7 +2306,7 @@ func (c *Controller) gatewayAccessGrantForNodeLocked(
 		cached.expireUnixMs > now.Add(30*time.Second).UnixMilli() {
 		grant := cloneGatewayAccessGrant(cached.grant)
 		grant.PolicyRev = policyRev
-		return grant
+		return grant, false
 	}
 
 	sessionID := uint64(now.UnixNano()) + sessionSalt
@@ -2284,13 +2321,14 @@ func (c *Controller) gatewayAccessGrantForNodeLocked(
 		node,
 		sessionID,
 		expireUnixMs,
+		refreshAfterUnixMs,
 		leaseSecs,
 		graceSecs,
 		policyRev,
 	)
 	if grant == nil {
 		delete(c.gatewayGrantCache, cacheKey)
-		return nil
+		return nil, false
 	}
 	c.gatewayGrantCache[cacheKey] = cachedGatewayGrant{
 		gatewayID:       node.GatewayID,
@@ -2298,7 +2336,7 @@ func (c *Controller) gatewayAccessGrantForNodeLocked(
 		expireUnixMs:    grant.GetTicketExpireUnixMs(),
 		grant:           cloneGatewayAccessGrant(grant),
 	}
-	return grant
+	return grant, true
 }
 
 func (c *Controller) pruneGatewayGrantCacheLocked(now time.Time, nodes []GatewayNodeInfo) {
@@ -2321,6 +2359,7 @@ func (c *Controller) buildGatewayAccessGrantForNode(
 	node GatewayNodeInfo,
 	sessionID uint64,
 	expireUnixMs int64,
+	refreshAfterUnixMs int64,
 	leaseSecs uint32,
 	graceSecs uint32,
 	policyRev uint64,
@@ -2357,18 +2396,20 @@ func (c *Controller) buildGatewayAccessGrantForNode(
 		}
 	}
 	return &pb.GatewayAccessGrant{
-		Ticket:                ticket,
-		TicketExpireUnixMs:    expireUnixMs,
-		SessionId:             sessionID,
-		PolicyRev:             policyRev,
-		GatewayCapabilities:   append([]string{}, node.Capabilities...),
-		LeaseSecs:             leaseSecs,
-		GraceSecs:             graceSecs,
-		GatewayChannels:       cloneGatewayChannels(grantChannels),
-		DefaultGatewayChannel: defaultChannel,
-		GatewayUdpPublicKey:   append([]byte(nil), node.UDPPublicKey...),
-		GatewayUdpKeyId:       node.UDPKeyID,
-		GatewayId:             node.GatewayID,
+		Ticket:                 ticket,
+		TicketExpireUnixMs:     expireUnixMs,
+		SessionId:              sessionID,
+		PolicyRev:              policyRev,
+		GatewayCapabilities:    append([]string{}, node.Capabilities...),
+		LeaseSecs:              leaseSecs,
+		GraceSecs:              graceSecs,
+		GatewayChannels:        cloneGatewayChannels(grantChannels),
+		DefaultGatewayChannel:  defaultChannel,
+		GatewayUdpPublicKey:    append([]byte(nil), node.UDPPublicKey...),
+		GatewayUdpKeyId:        node.UDPKeyID,
+		GatewayId:              node.GatewayID,
+		SoftRefreshAfterUnixMs: refreshAfterUnixMs,
+		HardExpireUnixMs:       expireUnixMs,
 	}
 }
 
