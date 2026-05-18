@@ -2517,7 +2517,13 @@ func TestPushDeviceListReusesGatewayGrantSession(t *testing.T) {
 	if pushed.GetGatewayPolicyRev() == 0 {
 		t.Fatalf("expected non-zero gateway policy rev in push")
 	}
+	if pushed.GetGatewayPolicyEpoch() == 0 {
+		t.Fatalf("expected non-zero gateway policy epoch in push")
+	}
 	pushedGrant := pushed.GetGatewayAccessGrants()[0]
+	if pushedGrant.GetPolicyEpoch() != pushed.GetGatewayPolicyEpoch() {
+		t.Fatalf("expected pushed grant policy epoch %d to match message epoch %d", pushedGrant.GetPolicyEpoch(), pushed.GetGatewayPolicyEpoch())
+	}
 	if pushedGrant.GetPolicyRev() != pushed.GetGatewayPolicyRev() {
 		t.Fatalf("expected pushed grant policy rev %d to match message rev %d", pushedGrant.GetPolicyRev(), pushed.GetGatewayPolicyRev())
 	}
@@ -2538,6 +2544,9 @@ func TestGatewayPolicyRevAdvancesOnGatewayChangePush(t *testing.T) {
 		IP:   net.ParseIP("1.1.1.51"),
 		Port: 5151,
 	})
+	if regResp.GetGatewayPolicyEpoch() == 0 {
+		t.Fatalf("expected non-zero registration gateway policy epoch")
+	}
 	if regResp.GetGatewayPolicyRev() == 0 {
 		t.Fatalf("expected non-zero registration gateway policy rev")
 	}
@@ -2566,10 +2575,16 @@ func TestGatewayPolicyRevAdvancesOnGatewayChangePush(t *testing.T) {
 	if pushed == nil {
 		t.Fatalf("expected gateway change push for registered client")
 	}
+	if pushed.GetGatewayPolicyEpoch() != regResp.GetGatewayPolicyEpoch() {
+		t.Fatalf("expected gateway change push to retain epoch, got push=%d registration=%d", pushed.GetGatewayPolicyEpoch(), regResp.GetGatewayPolicyEpoch())
+	}
 	if pushed.GetGatewayPolicyRev() <= regResp.GetGatewayPolicyRev() {
 		t.Fatalf("expected gateway policy rev to advance, got push=%d registration=%d", pushed.GetGatewayPolicyRev(), regResp.GetGatewayPolicyRev())
 	}
 	for _, grant := range pushed.GetGatewayAccessGrants() {
+		if grant.GetPolicyEpoch() != pushed.GetGatewayPolicyEpoch() {
+			t.Fatalf("expected pushed grant policy epoch %d to match message epoch %d", grant.GetPolicyEpoch(), pushed.GetGatewayPolicyEpoch())
+		}
 		if grant.GetPolicyRev() != pushed.GetGatewayPolicyRev() {
 			t.Fatalf("expected pushed grant policy rev %d to match message rev %d", grant.GetPolicyRev(), pushed.GetGatewayPolicyRev())
 		}
@@ -2589,10 +2604,11 @@ func TestRefreshGatewayGrantPacketReusesSessionWhenMatched(t *testing.T) {
 	}
 
 	req := &pb.RefreshGatewayGrantRequest{
-		VirtualIp:     regResp.GetVirtualIp(),
-		DeviceId:      regReq.GetDeviceId(),
-		LastSessionId: grant.GetSessionId(),
-		LastPolicyRev: grant.GetPolicyRev(),
+		VirtualIp:       regResp.GetVirtualIp(),
+		DeviceId:        regReq.GetDeviceId(),
+		LastSessionId:   grant.GetSessionId(),
+		LastPolicyEpoch: grant.GetPolicyEpoch(),
+		LastPolicyRev:   grant.GetPolicyRev(),
 	}
 	payload, err := proto.Marshal(req)
 	if err != nil {
@@ -2622,6 +2638,9 @@ func TestRefreshGatewayGrantPacketReusesSessionWhenMatched(t *testing.T) {
 	if resp.GetGatewayAccessGrant() == nil {
 		t.Fatalf("expected gateway access grant in refresh response")
 	}
+	if resp.GetGatewayPolicyEpoch() != grant.GetPolicyEpoch() {
+		t.Fatalf("expected refresh response epoch %d to match original epoch %d", resp.GetGatewayPolicyEpoch(), grant.GetPolicyEpoch())
+	}
 	if resp.GetGatewayAccessGrant().GetSessionId() != grant.GetSessionId() {
 		t.Fatalf("expected refresh to reuse session id, got %d want %d", resp.GetGatewayAccessGrant().GetSessionId(), grant.GetSessionId())
 	}
@@ -2640,10 +2659,11 @@ func TestRefreshGatewayGrantPacketForceReissueRotatesSession(t *testing.T) {
 	}
 
 	req := &pb.RefreshGatewayGrantRequest{
-		VirtualIp:     regResp.GetVirtualIp(),
-		DeviceId:      regReq.GetDeviceId(),
-		LastSessionId: grant.GetSessionId(),
-		ForceReissue:  true,
+		VirtualIp:       regResp.GetVirtualIp(),
+		DeviceId:        regReq.GetDeviceId(),
+		LastSessionId:   grant.GetSessionId(),
+		LastPolicyEpoch: grant.GetPolicyEpoch(),
+		ForceReissue:    true,
 	}
 	payload, err := proto.Marshal(req)
 	if err != nil {
@@ -2695,10 +2715,11 @@ func TestRefreshGatewayGrantPacketClearsStalePolicy(t *testing.T) {
 	ctrl.gatewayMu.Unlock()
 
 	req := &pb.RefreshGatewayGrantRequest{
-		VirtualIp:     regResp.GetVirtualIp(),
-		DeviceId:      regReq.GetDeviceId(),
-		LastSessionId: grant.GetSessionId(),
-		LastPolicyRev: grant.GetPolicyRev(),
+		VirtualIp:       regResp.GetVirtualIp(),
+		DeviceId:        regReq.GetDeviceId(),
+		LastSessionId:   grant.GetSessionId(),
+		LastPolicyEpoch: grant.GetPolicyEpoch(),
+		LastPolicyRev:   grant.GetPolicyRev(),
 	}
 	payload, err := proto.Marshal(req)
 	if err != nil {
@@ -2728,8 +2749,46 @@ func TestRefreshGatewayGrantPacketClearsStalePolicy(t *testing.T) {
 	if len(resp.GetGatewayAccessGrants()) != 0 || resp.GetGatewayAccessGrant() != nil {
 		t.Fatalf("expected cleared gateway grants, got %+v", resp)
 	}
-	if resp.GetGatewayPolicyRev() <= grant.GetPolicyRev() {
-		t.Fatalf("expected cleared gateway policy rev to advance, got response=%d last=%d", resp.GetGatewayPolicyRev(), grant.GetPolicyRev())
+	if !isGatewayPolicyVersionNewer(resp.GetGatewayPolicyEpoch(), resp.GetGatewayPolicyRev(), grant.GetPolicyEpoch(), grant.GetPolicyRev()) {
+		t.Fatalf("expected cleared gateway policy version to advance, got response=(%d,%d) last=(%d,%d)", resp.GetGatewayPolicyEpoch(), resp.GetGatewayPolicyRev(), grant.GetPolicyEpoch(), grant.GetPolicyRev())
+	}
+}
+
+func TestGatewayPolicyVersionNewerEpochWinsEvenWithLowerRev(t *testing.T) {
+	if !isGatewayPolicyVersionNewer(9, 4, 8, 14) {
+		t.Fatalf("expected newer epoch to win even with lower rev")
+	}
+	if isGatewayPolicyVersionNewer(7, 20, 8, 1) {
+		t.Fatalf("expected older epoch to lose even with higher rev")
+	}
+}
+
+func TestGatewayPolicyEpochIncrementsAcrossControllerRestart(t *testing.T) {
+	stateDir := t.TempDir()
+	ctrlA := newControllerWithStateDir(t, &config.Config{
+		Gateway:             net.ParseIP("10.26.0.1"),
+		Domain:              "ms.net",
+		Netmask:             "255.255.255.0",
+		DefaultGatewayID:    "gw-default",
+		GatewayTicketSecret: testGatewayTicketSecret,
+	}, stateDir)
+	firstPersistedEpoch := ctrlA.gatewayGrantPolicyEpoch
+	ctrlA.Stop()
+
+	ctrlB := newControllerWithStateDir(t, &config.Config{
+		Gateway:             net.ParseIP("10.26.0.1"),
+		Domain:              "ms.net",
+		Netmask:             "255.255.255.0",
+		DefaultGatewayID:    "gw-default",
+		GatewayTicketSecret: testGatewayTicketSecret,
+	}, stateDir)
+	defer ctrlB.Stop()
+
+	if firstPersistedEpoch == 0 || ctrlB.gatewayGrantPolicyEpoch == 0 {
+		t.Fatalf("expected non-zero epochs, got first=%d second=%d", firstPersistedEpoch, ctrlB.gatewayGrantPolicyEpoch)
+	}
+	if ctrlB.gatewayGrantPolicyEpoch <= firstPersistedEpoch {
+		t.Fatalf("expected gateway policy epoch to increment across restart, got first=%d second=%d", firstPersistedEpoch, ctrlB.gatewayGrantPolicyEpoch)
 	}
 }
 

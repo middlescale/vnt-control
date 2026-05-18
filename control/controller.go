@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path/filepath"
 	"sdl-control/config"
 	"sdl-control/protocol"
 	"sdl-control/protocol/pb"
@@ -42,6 +43,7 @@ type Controller struct {
 	gatewaySeen             map[string]GatewayNodeInfo
 	gatewayNonce            map[string]map[string]int64
 	gatewayGrantFingerprint string
+	gatewayGrantPolicyEpoch uint64
 	gatewayGrantPolicyRev   uint64
 	gatewayGrantCache       map[string]cachedGatewayGrant
 
@@ -185,6 +187,10 @@ func NewController(cfg *config.Config) (*Controller, error) {
 	}
 	um := newUserManagerFromStore()
 	gatewayAllow, gatewayStore := newGatewayApprovalStateFromStore()
+	gatewayPolicyEpoch, err := newGatewayPolicyEpochFromStore()
+	if err != nil {
+		return nil, err
+	}
 	return &Controller{
 		nc: NetworkControl{
 			VirtualNetwork:    *NewExpireMap[string, *NetworkInfo](7 * 24 * time.Hour),
@@ -203,6 +209,7 @@ func NewController(cfg *config.Config) (*Controller, error) {
 		gatewayAllow:             gatewayAllow,
 		gatewaySeen:              make(map[string]GatewayNodeInfo),
 		gatewayNonce:             make(map[string]map[string]int64),
+		gatewayGrantPolicyEpoch:  gatewayPolicyEpoch,
 		gatewayGrantCache:        make(map[string]cachedGatewayGrant),
 		pendingDeviceRename:      make(map[string]PendingDeviceRename),
 		pendingDebugCollect:      make(map[uint64]chan DebugCollectResult),
@@ -249,6 +256,26 @@ func newGatewayApprovalStateFromStore() (map[string]string, *JSONGatewayStore) {
 		approved[gatewayID] = endpoint
 	}
 	return approved, store
+}
+
+func newGatewayPolicyEpochFromStore() (uint64, error) {
+	store := NewJSONGatewayPolicyStore(gatewayPolicyStorePath())
+	epoch, err := store.NextEpoch()
+	if err != nil {
+		return 0, fmt.Errorf("load gateway policy epoch: %w", err)
+	}
+	return epoch, nil
+}
+
+func gatewayPolicyStorePath() string {
+	if path := strings.TrimSpace(os.Getenv("GATEWAY_POLICY_STORE_JSON_PATH")); path != "" {
+		return path
+	}
+	path := os.Getenv("GATEWAY_STORE_JSON_PATH")
+	if path == "" {
+		path = "./data/gateways.json"
+	}
+	return filepath.Join(filepath.Dir(path), "gateway-policy.json")
 }
 
 func newDebugSnapshotStore(cfg *config.Config) *DebugSnapshotStore {
@@ -439,9 +466,10 @@ func (c *Controller) HandleRegistrationPacketWithVirtualIP(request *protocol.Pac
 	c.nc.TouchCipherSession(remoteAddr)
 	netInfo.Epoch++
 	registrationResp.VirtualIp = virtualIP
-	gatewayGrants, gatewayPolicyRev := c.buildGatewayAccessGrantsWithPolicyRev(virtualIP, registration.GetDeviceId())
+	gatewayGrants, gatewayPolicyEpoch, gatewayPolicyRev := c.buildGatewayAccessGrantsWithPolicyRev(virtualIP, registration.GetDeviceId())
 	registrationResp.GatewayAccessGrant = selectPrimaryGatewayGrant(gatewayGrants)
 	registrationResp.GatewayAccessGrants = gatewayGrants
+	registrationResp.GatewayPolicyEpoch = gatewayPolicyEpoch
 	registrationResp.GatewayPolicyRev = gatewayPolicyRev
 	registrationResp.Epoch = uint32(netInfo.Epoch)
 	registrationResp.DeviceInfoList = buildDeviceInfoList(netInfo.Clients, virtualIP)
@@ -626,7 +654,7 @@ func (c *Controller) HandlePullDeviceListPacket(request *protocol.Packet) (*prot
 		return c.buildDisconnectPacket(request), nil
 	}
 	if client, ok := c.nc.FindClientByVirtualIP(selfIP); ok {
-		deviceList.GatewayAccessGrants, deviceList.GatewayPolicyRev = c.buildGatewayAccessGrantsWithPolicyRev(selfIP, client.DeviceId)
+		deviceList.GatewayAccessGrants, deviceList.GatewayPolicyEpoch, deviceList.GatewayPolicyRev = c.buildGatewayAccessGrantsWithPolicyRev(selfIP, client.DeviceId)
 	}
 	payload, err := proto.Marshal(deviceList)
 	if err != nil {
@@ -661,12 +689,13 @@ func (c *Controller) BuildPushDeviceListPacketsForPeerChange(changedIP uint32) (
 			if targetIP == changedIP || !targetClient.ControlOnline {
 				continue
 			}
-			gatewayGrants, gatewayPolicyRev := c.buildGatewayAccessGrantsWithPolicyRev(targetIP, targetClient.DeviceId)
+			gatewayGrants, gatewayPolicyEpoch, gatewayPolicyRev := c.buildGatewayAccessGrantsWithPolicyRev(targetIP, targetClient.DeviceId)
 			packet, err := c.buildPushDeviceListPacket(
 				targetIP,
 				uint32(network.Epoch),
 				buildDeviceInfoList(network.Clients, targetIP),
 				gatewayGrants,
+				gatewayPolicyEpoch,
 				gatewayPolicyRev,
 			)
 			if err != nil {
@@ -689,12 +718,13 @@ func (c *Controller) BuildPushDeviceListPacketsForGatewayChange() ([]*protocol.P
 			if !targetClient.ControlOnline {
 				continue
 			}
-			gatewayGrants, gatewayPolicyRev := c.buildGatewayAccessGrantsWithPolicyRev(targetIP, targetClient.DeviceId)
+			gatewayGrants, gatewayPolicyEpoch, gatewayPolicyRev := c.buildGatewayAccessGrantsWithPolicyRev(targetIP, targetClient.DeviceId)
 			packet, err := c.buildPushDeviceListPacket(
 				targetIP,
 				uint32(network.Epoch),
 				buildDeviceInfoList(network.Clients, targetIP),
 				gatewayGrants,
+				gatewayPolicyEpoch,
 				gatewayPolicyRev,
 			)
 			if err != nil {
@@ -721,12 +751,14 @@ func (c *Controller) buildPushDeviceListPacket(
 	epoch uint32,
 	deviceInfoList []*pb.DeviceInfo,
 	gatewayGrants []*pb.GatewayAccessGrant,
+	gatewayPolicyEpoch uint64,
 	gatewayPolicyRev uint64,
 ) (*protocol.Packet, error) {
 	push := &pb.DeviceList{
 		Epoch:               epoch,
 		DeviceInfoList:      deviceInfoList,
 		GatewayAccessGrants: gatewayGrants,
+		GatewayPolicyEpoch:  gatewayPolicyEpoch,
 		GatewayPolicyRev:    gatewayPolicyRev,
 	}
 	payload, err := proto.Marshal(push)
@@ -906,16 +938,19 @@ func (c *Controller) HandleRefreshGatewayGrantPacket(request *protocol.Packet) (
 		HasUpdate: true,
 		Reason:    "refreshed",
 	}
-	if grants, gatewayPolicyRev := c.buildGatewayAccessGrantsForRefresh(req.GetVirtualIp(), req.GetDeviceId(), req.GetLastSessionId(), req.GetForceReissue()); len(grants) > 0 {
+	if grants, gatewayPolicyEpoch, gatewayPolicyRev := c.buildGatewayAccessGrantsForRefresh(req.GetVirtualIp(), req.GetDeviceId(), req.GetLastSessionId(), req.GetForceReissue()); len(grants) > 0 {
 		resp.GatewayAccessGrant = selectPrimaryGatewayGrant(grants)
 		resp.GatewayAccessGrants = grants
+		resp.GatewayPolicyEpoch = gatewayPolicyEpoch
 		resp.GatewayPolicyRev = gatewayPolicyRev
-	} else if req.GetLastPolicyRev() < gatewayPolicyRev {
+	} else if isGatewayPolicyVersionNewer(gatewayPolicyEpoch, gatewayPolicyRev, req.GetLastPolicyEpoch(), req.GetLastPolicyRev()) {
 		resp.Reason = "gateway policy cleared"
+		resp.GatewayPolicyEpoch = gatewayPolicyEpoch
 		resp.GatewayPolicyRev = gatewayPolicyRev
 	} else {
 		resp.HasUpdate = false
 		resp.Reason = "no gateway available"
+		resp.GatewayPolicyEpoch = gatewayPolicyEpoch
 		resp.GatewayPolicyRev = gatewayPolicyRev
 	}
 	payload, err := proto.Marshal(resp)
@@ -2180,11 +2215,11 @@ func (c *Controller) buildGatewayAccessGrant(virtualIP uint32, deviceID string) 
 }
 
 func (c *Controller) buildGatewayAccessGrants(virtualIP uint32, deviceID string) []*pb.GatewayAccessGrant {
-	grants, _ := c.buildGatewayAccessGrantsWithPolicyRev(virtualIP, deviceID)
+	grants, _, _ := c.buildGatewayAccessGrantsWithPolicyRev(virtualIP, deviceID)
 	return grants
 }
 
-func (c *Controller) buildGatewayAccessGrantsWithPolicyRev(virtualIP uint32, deviceID string) ([]*pb.GatewayAccessGrant, uint64) {
+func (c *Controller) buildGatewayAccessGrantsWithPolicyRev(virtualIP uint32, deviceID string) ([]*pb.GatewayAccessGrant, uint64, uint64) {
 	return c.buildGatewayAccessGrantsLocked(virtualIP, deviceID, gatewayGrantBuildOptions{})
 }
 
@@ -2193,7 +2228,7 @@ func (c *Controller) buildGatewayAccessGrantsForRefresh(
 	deviceID string,
 	lastSessionID uint64,
 	forceReissue bool,
-) ([]*pb.GatewayAccessGrant, uint64) {
+) ([]*pb.GatewayAccessGrant, uint64, uint64) {
 	return c.buildGatewayAccessGrantsLocked(virtualIP, deviceID, gatewayGrantBuildOptions{
 		lastSessionID: lastSessionID,
 		forceReissue:  forceReissue,
@@ -2205,15 +2240,16 @@ func (c *Controller) buildGatewayAccessGrantsLocked(
 	virtualIP uint32,
 	deviceID string,
 	opts gatewayGrantBuildOptions,
-) ([]*pb.GatewayAccessGrant, uint64) {
+) ([]*pb.GatewayAccessGrant, uint64, uint64) {
 	c.gatewayMu.Lock()
 	defer c.gatewayMu.Unlock()
 	now := time.Now()
 	nodes := c.approvedAliveGatewayNodesLocked(now)
 	policyRev, _ := c.syncGatewayGrantPolicyLocked(nodes)
+	policyEpoch := c.gatewayGrantPolicyEpoch
 	c.pruneGatewayGrantCacheLocked(now, nodes)
 	if len(nodes) == 0 {
-		return nil, policyRev
+		return nil, policyEpoch, policyRev
 	}
 	expire := now.Add(2 * time.Minute)
 	leaseSecs := uint32(60)
@@ -2228,6 +2264,7 @@ func (c *Controller) buildGatewayAccessGrantsLocked(
 			expire.UnixMilli(),
 			leaseSecs,
 			graceSecs,
+			policyEpoch,
 			policyRev,
 			opts,
 			now,
@@ -2236,7 +2273,7 @@ func (c *Controller) buildGatewayAccessGrantsLocked(
 			grants = append(grants, grant)
 		}
 	}
-	return grants, policyRev
+	return grants, policyEpoch, policyRev
 }
 
 func (c *Controller) gatewayAccessGrantForNodeLocked(
@@ -2247,6 +2284,7 @@ func (c *Controller) gatewayAccessGrantForNodeLocked(
 	expireUnixMs int64,
 	leaseSecs uint32,
 	graceSecs uint32,
+	policyEpoch uint64,
 	policyRev uint64,
 	opts gatewayGrantBuildOptions,
 	now time.Time,
@@ -2260,6 +2298,7 @@ func (c *Controller) gatewayAccessGrantForNodeLocked(
 			cached.grant != nil &&
 			cached.expireUnixMs > now.Add(30*time.Second).UnixMilli() {
 			grant := cloneGatewayAccessGrant(cached.grant)
+			grant.PolicyEpoch = policyEpoch
 			grant.PolicyRev = policyRev
 			return grant
 		}
@@ -2268,6 +2307,7 @@ func (c *Controller) gatewayAccessGrantForNodeLocked(
 		cached.grant != nil &&
 		cached.expireUnixMs > now.Add(30*time.Second).UnixMilli() {
 		grant := cloneGatewayAccessGrant(cached.grant)
+		grant.PolicyEpoch = policyEpoch
 		grant.PolicyRev = policyRev
 		return grant
 	}
@@ -2286,6 +2326,7 @@ func (c *Controller) gatewayAccessGrantForNodeLocked(
 		expireUnixMs,
 		leaseSecs,
 		graceSecs,
+		policyEpoch,
 		policyRev,
 	)
 	if grant == nil {
@@ -2323,6 +2364,7 @@ func (c *Controller) buildGatewayAccessGrantForNode(
 	expireUnixMs int64,
 	leaseSecs uint32,
 	graceSecs uint32,
+	policyEpoch uint64,
 	policyRev uint64,
 ) *pb.GatewayAccessGrant {
 	ticket, err := newGatewayTicket(
@@ -2330,6 +2372,7 @@ func (c *Controller) buildGatewayAccessGrantForNode(
 		deviceID,
 		virtualIP,
 		sessionID,
+		policyEpoch,
 		policyRev,
 		[]string{node.GatewayID},
 		"",
@@ -2360,6 +2403,7 @@ func (c *Controller) buildGatewayAccessGrantForNode(
 		Ticket:                ticket,
 		TicketExpireUnixMs:    expireUnixMs,
 		SessionId:             sessionID,
+		PolicyEpoch:           policyEpoch,
 		PolicyRev:             policyRev,
 		GatewayCapabilities:   append([]string{}, node.Capabilities...),
 		LeaseSecs:             leaseSecs,
@@ -2437,6 +2481,22 @@ func (c *Controller) syncGatewayGrantPolicyLocked(nodes []GatewayNodeInfo) (uint
 		c.gatewayGrantPolicyRev = 1
 	}
 	return c.gatewayGrantPolicyRev, true
+}
+
+func isGatewayPolicyVersionNewer(currentEpoch, currentRev, previousEpoch, previousRev uint64) bool {
+	if currentEpoch != 0 && previousEpoch != 0 {
+		if currentEpoch != previousEpoch {
+			return currentEpoch > previousEpoch
+		}
+		return currentRev > previousRev
+	}
+	if currentEpoch != 0 && previousEpoch == 0 {
+		return true
+	}
+	if currentEpoch == 0 && previousEpoch != 0 {
+		return false
+	}
+	return currentRev > previousRev
 }
 
 func selectPrimaryGatewayGrant(grants []*pb.GatewayAccessGrant) *pb.GatewayAccessGrant {
@@ -2602,6 +2662,7 @@ func newGatewayTicket(
 	deviceID string,
 	virtualIP uint32,
 	sessionID uint64,
+	policyEpoch uint64,
 	policyRevision uint64,
 	gatewayIDs []string,
 	gatewayGroupID string,
@@ -2619,6 +2680,7 @@ func newGatewayTicket(
 		DeviceId:        deviceID,
 		VirtualIp:       virtualIP,
 		SessionId:       sessionID,
+		PolicyEpoch:     policyEpoch,
 		PolicyRevision:  policyRevision,
 		GatewayIds:      append([]string{}, gatewayIDs...),
 		GatewayGroupId:  gatewayGroupID,
