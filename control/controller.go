@@ -363,12 +363,11 @@ func (c *Controller) HandleHandshakePacket(reqPacket *protocol.Packet, remoteAdd
 	return rspPacket, nil
 }
 
-func (c *Controller) HandleRegistrationPacket(request *protocol.Packet, remoteAddr net.Addr) (*protocol.Packet, error) {
-	respPacket, _, err := c.HandleRegistrationPacketWithVirtualIP(request, remoteAddr)
-	return respPacket, err
-}
-
-func (c *Controller) HandleRegistrationPacketWithVirtualIP(request *protocol.Packet, remoteAddr net.Addr) (*protocol.Packet, uint32, error) {
+func (c *Controller) HandleRegistrationPacketWithVirtualIPAndCapabilities(
+	request *protocol.Packet,
+	remoteAddr net.Addr,
+	negotiatedCapabilities []string,
+) (*protocol.Packet, uint32, error) {
 	log.Debugf("收到客户端 RegistrationRequest Packet: %s", request.DebugString())
 	var registration pb.RegistrationRequest
 	if err := proto.Unmarshal(request.Payload, &registration); err != nil {
@@ -395,6 +394,13 @@ func (c *Controller) HandleRegistrationPacketWithVirtualIP(request *protocol.Pac
 			displayName = persisted
 		}
 	}
+	if !hasCapability(negotiatedCapabilities, capabilityUDPEndpointReportV1) {
+		log.Warnf(
+			"client %s missing handshake capability %q; allowing registration with relay-only compatibility",
+			remoteAddr.String(),
+			capabilityUDPEndpointReportV1,
+		)
+	}
 
 	raddrStr := remoteAddr.String()
 	host, portStr, err := net.SplitHostPort(raddrStr)
@@ -406,10 +412,6 @@ func (c *Controller) HandleRegistrationPacketWithVirtualIP(request *protocol.Pac
 		return nil, 0, fmt.Errorf("invalid remote port: %q", portStr)
 	}
 	pubPort := uint32(port)
-	negotiatedCapabilities := c.pendingHandshakeCapabilities(remoteAddr)
-	if !hasCapability(negotiatedCapabilities, capabilityUDPEndpointReportV1) {
-		return nil, 0, fmt.Errorf("client %v missing required handshake capability %q", remoteAddr, capabilityUDPEndpointReportV1)
-	}
 
 	registrationResp := &pb.RegistrationResponse{
 		PublicPort: pubPort,
@@ -1703,8 +1705,7 @@ func (c *Controller) pendingHandshakeCapabilities(remoteAddr net.Addr) []string 
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	key := remoteAddr.String()
-	return append([]string(nil), c.handshakeCaps[key]...)
+	return append([]string(nil), c.handshakeCaps[remoteAddr.String()]...)
 }
 
 func (c *Controller) clearPendingHandshakeCapabilities(remoteAddr net.Addr) {

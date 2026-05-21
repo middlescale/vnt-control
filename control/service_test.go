@@ -166,7 +166,7 @@ func TestRegistrationPersistsNegotiatedCapabilities(t *testing.T) {
 
 	regReq := newBaseRegisterReq("dev-cap-a", "node-cap-a")
 	ensureAuthed(t, ctrl, regReq.GetToken(), regReq.GetDeviceId(), regReq.GetDevicePubKey())
-	respPacket, err := ctrl.HandleRegistrationPacket(newRegistrationPacket(t, regReq), remoteAddr)
+	respPacket, err := registerWithPendingHandshakeCapabilities(ctrl, newRegistrationPacket(t, regReq), remoteAddr)
 	if err != nil {
 		t.Fatalf("HandleRegistrationPacket failed: %v", err)
 	}
@@ -187,7 +187,7 @@ func TestRegistrationPersistsNegotiatedCapabilities(t *testing.T) {
 	}
 }
 
-func TestRegistrationRequiresUDPEndpointReportCapability(t *testing.T) {
+func TestRegistrationAllowsMissingUDPEndpointReportCapability(t *testing.T) {
 	ctrl := newTestController(t)
 	defer ctrl.Stop()
 
@@ -212,8 +212,24 @@ func TestRegistrationRequiresUDPEndpointReportCapability(t *testing.T) {
 
 	regReq := newBaseRegisterReq("dev-cap-bad", "node-cap-bad")
 	ensureAuthed(t, ctrl, regReq.GetToken(), regReq.GetDeviceId(), regReq.GetDevicePubKey())
-	if _, err := ctrl.HandleRegistrationPacket(newRegistrationPacket(t, regReq), remoteAddr); err == nil || !strings.Contains(err.Error(), "udp_endpoint_report_v1") {
-		t.Fatalf("expected missing capability error, got %v", err)
+	respPacket, err := registerWithPendingHandshakeCapabilities(ctrl, newRegistrationPacket(t, regReq), remoteAddr)
+	if err != nil {
+		t.Fatalf("expected registration to proceed without udp_endpoint_report_v1, got %v", err)
+	}
+	var regResp pb.RegistrationResponse
+	if err := proto.Unmarshal(respPacket.Payload, &regResp); err != nil {
+		t.Fatalf("unmarshal registration response failed: %v", err)
+	}
+	netInfo, ok := ctrl.nc.VirtualNetwork.Get(regReq.GetToken())
+	if !ok {
+		t.Fatalf("expected network info for %s", regReq.GetToken())
+	}
+	clientInfo, ok := netInfo.Clients[regResp.GetVirtualIp()]
+	if !ok {
+		t.Fatalf("expected client info for virtual ip %v", util.Uint32ToIP(regResp.GetVirtualIp()))
+	}
+	if len(clientInfo.Capabilities) != 1 || clientInfo.Capabilities[0] != "punch_coord_v1" {
+		t.Fatalf("expected negotiated capabilities to be preserved, got %+v", clientInfo.Capabilities)
 	}
 }
 
@@ -226,14 +242,30 @@ func TestRegistrationRetryReusesHandshakeCapabilitiesForSameRemote(t *testing.T)
 
 	regReq1 := newBaseRegisterReq("dev-cap-retry-a", "node-cap-retry-a")
 	ensureAuthed(t, ctrl, regReq1.GetToken(), regReq1.GetDeviceId(), regReq1.GetDevicePubKey())
-	if _, err := ctrl.HandleRegistrationPacket(newRegistrationPacket(t, regReq1), remoteAddr); err != nil {
+	if _, err := registerWithPendingHandshakeCapabilities(ctrl, newRegistrationPacket(t, regReq1), remoteAddr); err != nil {
 		t.Fatalf("first HandleRegistrationPacket failed: %v", err)
 	}
 
 	regReq2 := newBaseRegisterReq("dev-cap-retry-b", "node-cap-retry-b")
 	ensureAuthed(t, ctrl, regReq2.GetToken(), regReq2.GetDeviceId(), regReq2.GetDevicePubKey())
-	if _, err := ctrl.HandleRegistrationPacket(newRegistrationPacket(t, regReq2), remoteAddr); err != nil {
+	if _, err := registerWithPendingHandshakeCapabilities(ctrl, newRegistrationPacket(t, regReq2), remoteAddr); err != nil {
 		t.Fatalf("second HandleRegistrationPacket should reuse handshake capabilities, got %v", err)
+	}
+}
+
+func TestRegistrationWithExplicitCapabilitiesAllowsSessionScopedHandshakeState(t *testing.T) {
+	ctrl := newTestController(t)
+	defer ctrl.Stop()
+
+	regReq := newBaseRegisterReq("dev-cap-host-fallback", "node-cap-host-fallback")
+	ensureAuthed(t, ctrl, regReq.GetToken(), regReq.GetDeviceId(), regReq.GetDevicePubKey())
+	registrationRemote := &net.UDPAddr{IP: net.ParseIP("1.1.1.12"), Port: 1113}
+	if _, _, err := ctrl.HandleRegistrationPacketWithVirtualIPAndCapabilities(
+		newRegistrationPacket(t, regReq),
+		registrationRemote,
+		[]string{capabilityUDPEndpointReportV1, "punch_coord_v1"},
+	); err != nil {
+		t.Fatalf("HandleRegistrationPacketWithVirtualIPAndCapabilities should accept explicit session capabilities, got %v", err)
 	}
 }
 
@@ -1262,7 +1294,7 @@ func TestFailedRegistrationClearsStalePunchCandidateState(t *testing.T) {
 	}
 
 	delete(ctrl.um.authedDevices, "ms.net|dev-b")
-	if _, _, err := ctrl.HandleRegistrationPacketWithVirtualIP(newRegistrationPacket(t, dstReq), dstRemote); err == nil {
+	if _, _, err := registerWithPendingHandshakeCapabilitiesAndVirtualIP(ctrl, newRegistrationPacket(t, dstReq), dstRemote); err == nil {
 		t.Fatalf("expected registration auth failure")
 	}
 
@@ -1404,7 +1436,7 @@ func TestHandleRegistrationPacketConflictAndAllowIpChange(t *testing.T) {
 		t.Fatalf("unexpected public port: %d", resp1.GetPublicPort())
 	}
 
-	_, err := ctrl.HandleRegistrationPacket(newRegistrationPacket(t, &pb.RegistrationRequest{
+	_, err := registerWithPendingHandshakeCapabilities(ctrl, newRegistrationPacket(t, &pb.RegistrationRequest{
 		Token:         "ms.net",
 		DeviceId:      "dev-b",
 		Name:          "node-b",
@@ -1468,7 +1500,7 @@ func TestHandleRegistrationPacketInvalidRequestedIP(t *testing.T) {
 	ctrl := newTestController(t)
 	defer ctrl.Stop()
 
-	_, err := ctrl.HandleRegistrationPacket(newRegistrationPacket(t, &pb.RegistrationRequest{
+	_, err := registerWithPendingHandshakeCapabilities(ctrl, newRegistrationPacket(t, &pb.RegistrationRequest{
 		Token:        "ms.net",
 		DeviceId:     "dev-a",
 		Name:         "node-a",
@@ -1838,8 +1870,24 @@ func TestLeaveByRemoteAddrClearsPendingHandshakeCapabilities(t *testing.T) {
 
 	regReq := newBaseRegisterReq("dev-cap-clear-a", "node-cap-clear-a")
 	ensureAuthed(t, ctrl, regReq.GetToken(), regReq.GetDeviceId(), regReq.GetDevicePubKey())
-	if _, err := ctrl.HandleRegistrationPacket(newRegistrationPacket(t, regReq), remoteAddr); err == nil || !strings.Contains(err.Error(), "udp_endpoint_report_v1") {
-		t.Fatalf("expected missing capability error after leave cleared pending handshake, got %v", err)
+	respPacket, err := registerWithPendingHandshakeCapabilities(ctrl, newRegistrationPacket(t, regReq), remoteAddr)
+	if err != nil {
+		t.Fatalf("expected registration to proceed after leave cleared pending handshake, got %v", err)
+	}
+	var regResp pb.RegistrationResponse
+	if err := proto.Unmarshal(respPacket.Payload, &regResp); err != nil {
+		t.Fatalf("unmarshal registration response failed: %v", err)
+	}
+	netInfo, ok := ctrl.nc.VirtualNetwork.Get(regReq.GetToken())
+	if !ok {
+		t.Fatalf("expected network info for %s", regReq.GetToken())
+	}
+	clientInfo, ok := netInfo.Clients[regResp.GetVirtualIp()]
+	if !ok {
+		t.Fatalf("expected client info for virtual ip %v", util.Uint32ToIP(regResp.GetVirtualIp()))
+	}
+	if len(clientInfo.Capabilities) != 0 {
+		t.Fatalf("expected cleared pending handshake capabilities to stay empty, got %+v", clientInfo.Capabilities)
 	}
 }
 
@@ -1869,7 +1917,7 @@ func TestRegistrationRequiresAuthedDeviceWhenTicketIssued(t *testing.T) {
 		t.Fatalf("UMIssueDeviceTicket failed: %v", err)
 	}
 	req := newBaseRegisterReq(deviceID, "node-a")
-	_, err = ctrl.HandleRegistrationPacket(newRegistrationPacket(t, req), handshakeRemote(t, ctrl, &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1111}))
+	_, err = registerWithPendingHandshakeCapabilities(ctrl, newRegistrationPacket(t, req), handshakeRemote(t, ctrl, &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1111}))
 	if err == nil {
 		t.Fatalf("expected registration rejected before certification")
 	}
@@ -3137,7 +3185,7 @@ func mustRegister(t *testing.T, ctrl *Controller, req *pb.RegistrationRequest, r
 	}
 	ensureAuthed(t, ctrl, req.GetToken(), req.GetDeviceId(), req.GetDevicePubKey())
 	remoteAddr = handshakeRemote(t, ctrl, remoteAddr)
-	respPacket, err := ctrl.HandleRegistrationPacket(newRegistrationPacket(t, req), remoteAddr)
+	respPacket, err := registerWithPendingHandshakeCapabilities(ctrl, newRegistrationPacket(t, req), remoteAddr)
 	if err != nil {
 		t.Fatalf("HandleRegistrationPacket failed: %v", err)
 	}
@@ -3166,6 +3214,19 @@ func mustRegister(t *testing.T, ctrl *Controller, req *pb.RegistrationRequest, r
 		t.Fatalf("virtual ip should not be gateway/broadcast: %s", util.Uint32ToIP(virtualIP))
 	}
 	return &resp
+}
+
+func registerWithPendingHandshakeCapabilities(ctrl *Controller, request *protocol.Packet, remoteAddr net.Addr) (*protocol.Packet, error) {
+	respPacket, _, err := registerWithPendingHandshakeCapabilitiesAndVirtualIP(ctrl, request, remoteAddr)
+	return respPacket, err
+}
+
+func registerWithPendingHandshakeCapabilitiesAndVirtualIP(ctrl *Controller, request *protocol.Packet, remoteAddr net.Addr) (*protocol.Packet, uint32, error) {
+	return ctrl.HandleRegistrationPacketWithVirtualIPAndCapabilities(
+		request,
+		remoteAddr,
+		ctrl.pendingHandshakeCapabilities(remoteAddr),
+	)
 }
 
 func handshakeRemote(t *testing.T, ctrl *Controller, remoteAddr net.Addr) net.Addr {

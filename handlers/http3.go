@@ -37,33 +37,36 @@ func (s *http3ControlSession) Close() error {
 
 func StartHTTP3Server(ctx context.Context, ctrl *control.Controller, addr string, tlsConfig *tls.Config) {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/control", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		streamer, ok := w.(http3.HTTPStreamer)
-		if !ok {
-			http.Error(w, "http3 stream takeover not supported", http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "application/octet-stream")
-		w.WriteHeader(http.StatusOK)
-		stream := streamer.HTTPStream()
-		remoteAddr := remoteAddrFromRequest(r)
-		serveControlSession(ctrl, remoteAddr, &http3ControlSession{
-			reader: r.Body,
-			stream: stream,
+	if ctrl != nil {
+		mux.HandleFunc("/control", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			streamer, ok := w.(http3.HTTPStreamer)
+			if !ok {
+				http.Error(w, "http3 stream takeover not supported", http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/octet-stream")
+			w.WriteHeader(http.StatusOK)
+			stream := streamer.HTTPStream()
+			remoteAddr := remoteAddrFromRequest(r)
+			serveControlSession(ctrl, remoteAddr, &http3ControlSession{
+				reader: r.Body,
+				stream: stream,
+			})
 		})
-	})
+	}
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("content-type", "text/plain; charset=utf-8")
 		_, _ = w.Write([]byte("ok"))
 	})
 
+	serverTLSConfig := tlsConfig.Clone()
 	server := &http3.Server{
 		Addr:      addr,
-		TLSConfig: tlsConfig,
+		TLSConfig: serverTLSConfig,
 		Handler:   mux,
 	}
 
@@ -76,7 +79,11 @@ func StartHTTP3Server(ctx context.Context, ctrl *control.Controller, addr string
 		}
 	}()
 
-	log.Printf("HTTP/3 control server listening on %s", addr)
+	if ctrl != nil {
+		log.Printf("HTTP/3 control server listening on %s", addr)
+	} else {
+		log.Printf("HTTP/3 API server listening on %s", addr)
+	}
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("HTTP/3 listen error: %v", err)
 	}

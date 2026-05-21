@@ -32,7 +32,10 @@ type sessionStream struct {
 	// rawWriter must stay behind Write/writeFramed so all session output keeps
 	// the same framing and per-session serialization guarantees.
 	rawWriter io.Writer
+	rawCloser io.Closer
 	mu        sync.Mutex
+	closeOnce sync.Once
+	closeErr  error
 }
 
 func (s *sessionStream) Write(payload []byte) (int, error) {
@@ -47,6 +50,16 @@ func (s *sessionStream) Write(payload []byte) (int, error) {
 func (s *sessionStream) writeFramed(payload []byte) error {
 	_, err := s.Write(payload)
 	return err
+}
+
+func (s *sessionStream) close() error {
+	if s == nil || s.rawCloser == nil {
+		return nil
+	}
+	s.closeOnce.Do(func() {
+		s.closeErr = s.rawCloser.Close()
+	})
+	return s.closeErr
 }
 
 type streamHub struct {
@@ -106,22 +119,16 @@ func newStreamHub() *streamHub {
 	}
 }
 
-func (h *streamHub) register(remoteAddr net.Addr, virtualIP uint32, writer io.Writer) {
-	h.registerSession(remoteAddr, virtualIP, &sessionStream{
-		remoteAddr: remoteAddr.String(),
-		rawWriter:  writer,
-	})
-}
-
 func (h *streamHub) registerSession(remoteAddr net.Addr, virtualIP uint32, stream *sessionStream) {
 	if remoteAddr == nil || virtualIP == 0 {
 		return
 	}
 	addr := remoteAddr.String()
+	var replaced *sessionStream
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	if previous, ok := h.byIP[virtualIP]; ok && previous != stream {
 		h.unregisterLocked(virtualIP, previous)
+		replaced = previous
 	}
 	h.byIP[virtualIP] = stream
 	ips := h.ipsByAddr[addr]
@@ -130,6 +137,12 @@ func (h *streamHub) registerSession(remoteAddr net.Addr, virtualIP uint32, strea
 		h.ipsByAddr[addr] = ips
 	}
 	ips[virtualIP] = stream
+	h.mu.Unlock()
+	if replaced != nil {
+		if closeErr := replaced.close(); closeErr != nil && !isExpectedSessionReadClose(closeErr) {
+			log.Debugf("close replaced session %s failed: %v", replaced.remoteAddr, closeErr)
+		}
+	}
 }
 
 func (h *streamHub) unregisterSession(target *sessionStream) {
@@ -190,7 +203,10 @@ func (h *streamHub) writeToIP(virtualIP uint32, payload []byte) error {
 	}
 	err := target.writeFramed(payload)
 	if err != nil {
-		h.unregisterStaleIP(virtualIP, target)
+		h.unregisterSession(target)
+		if closeErr := target.close(); closeErr != nil && !isExpectedSessionReadClose(closeErr) {
+			log.Debugf("close broken session %s failed: %v", target.remoteAddr, closeErr)
+		}
 		return fmt.Errorf("write stream %s: %w", target.remoteAddr, err)
 	}
 	return nil
@@ -199,11 +215,13 @@ func (h *streamHub) writeToIP(virtualIP uint32, payload []byte) error {
 var quicStreams = newStreamHub()
 
 func StartQuicServer(ctx context.Context, ctrl *control.Controller, addr string, tlsConfig *tls.Config) {
-	listener, err := quic.ListenAddr(addr, tlsConfig, nil)
+	serverTLSConfig := tlsConfig.Clone()
+	serverTLSConfig.NextProtos = []string{"sdl-control"}
+	listener, err := quic.ListenAddr(addr, serverTLSConfig, nil)
 	if err != nil {
 		log.Fatalf("QUIC listen error: %v", err)
 	}
-	log.Printf("QUIC server listening on %s", addr)
+	log.Printf("QUIC control server listening on %s", addr)
 	for {
 		select {
 		case <-ctx.Done():
@@ -233,13 +251,15 @@ func handleSession(ctrl *control.Controller, conn *quic.Conn) {
 
 func serveControlSession(ctrl *control.Controller, remoteAddr net.Addr, session framedSession) {
 	ctrl.TouchCipherSession(remoteAddr)
+	var sessionCapabilities []string
 	sessionWriter := &sessionStream{
 		remoteAddr: remoteAddr.String(),
 		rawWriter:  session,
+		rawCloser:  session,
 	}
 	defer quicStreams.unregisterSession(sessionWriter)
 	defer ctrl.LeaveByRemoteAddr(remoteAddr)
-	defer session.Close()
+	defer sessionWriter.close()
 	buf := make([]byte, 4096)
 	frameBuf := make([]byte, 0, 8192)
 	lastSweepMs := int64(0)
@@ -298,8 +318,15 @@ func serveControlSession(ctrl *control.Controller, remoteAddr net.Addr, session 
 						log.Errorf("HandleHandshakePacket error: %v", err)
 						continue
 					}
+					var handshakeResp pb.HandshakeResponse
+					if err := proto.Unmarshal(respPacket.Payload, &handshakeResp); err != nil {
+						log.Errorf("HandshakeResponse unmarshal error after handle: %v", err)
+						sessionCapabilities = nil
+					} else {
+						sessionCapabilities = append(sessionCapabilities[:0], handshakeResp.GetCapabilities()...)
+					}
 				case protocol.AppProtoRegistrationRequest:
-					respPacket, virtualIP, err = ctrl.HandleRegistrationPacketWithVirtualIP(packet, remoteAddr)
+					respPacket, virtualIP, err = ctrl.HandleRegistrationPacketWithVirtualIPAndCapabilities(packet, remoteAddr, sessionCapabilities)
 					if err != nil {
 						log.Errorf("HandleRegistrationPacket error: %v", err)
 						errPacket, packetErr := ctrl.BuildRegistrationErrorPacket(packet, err)
@@ -309,6 +336,7 @@ func serveControlSession(ctrl *control.Controller, remoteAddr net.Addr, session 
 						}
 						if writeErr := sessionWriter.writeFramed(errPacket.Marshal()); writeErr != nil {
 							log.Errorf("send registration error packet failed: %v", writeErr)
+							return
 						}
 						continue
 					}
@@ -462,7 +490,7 @@ func serveControlSession(ctrl *control.Controller, remoteAddr net.Addr, session 
 				}
 				if err := sessionWriter.writeFramed(respPacket.Marshal()); err != nil {
 					log.Errorf("Write ServiceResponse error: %v", err)
-					continue
+					return
 				}
 				for _, push := range deferredPushPackets {
 					if push == nil || push.DstIP == nil {
@@ -483,6 +511,7 @@ func serveControlSession(ctrl *control.Controller, remoteAddr net.Addr, session 
 				}
 				if err := sessionWriter.writeFramed(respPacket.Marshal()); err != nil {
 					log.Errorf("Write ControlResponse error: %v", err)
+					return
 				}
 			} else {
 				log.Infof("忽略非 Service/Control Packet: %s", packet.DebugString())

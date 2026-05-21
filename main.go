@@ -54,7 +54,7 @@ func main() {
 
 	listenAddr := firstNonEmpty(os.Getenv("LISTEN_ADDR"), cfg.ListenAddr)
 	if listenAddr == "" {
-		listenAddr = ":4433"
+		listenAddr = ":443"
 	}
 
 	// 支持测试模式：如果环境变量 TLS_CERT 和 TLS_KEY 存在，则直接加载本地证书（用于 docker-compose / CI）

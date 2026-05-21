@@ -17,6 +17,29 @@ func (f failingWriter) Write(_ []byte) (int, error) {
 	return 0, io.ErrClosedPipe
 }
 
+type failingWriteCloser struct {
+	closeCount atomic.Int32
+}
+
+func (f *failingWriteCloser) Write(_ []byte) (int, error) {
+	return 0, io.ErrClosedPipe
+}
+
+func (f *failingWriteCloser) Close() error {
+	f.closeCount.Add(1)
+	return nil
+}
+
+type trackingWriteCloser struct {
+	bytes.Buffer
+	closeCount atomic.Int32
+}
+
+func (w *trackingWriteCloser) Close() error {
+	w.closeCount.Add(1)
+	return nil
+}
+
 type concurrentDetectWriter struct {
 	active        atomic.Int32
 	maxActive     atomic.Int32
@@ -54,7 +77,12 @@ func TestStreamHubWriteToIPReturnsUnavailableWithoutRegisteredStream(t *testing.
 func TestStreamHubWriteToIPRemovesStaleStreamOnWriteFailure(t *testing.T) {
 	hub := newStreamHub()
 	remoteAddr := &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 443}
-	hub.register(remoteAddr, 123, failingWriter{})
+	writer := &failingWriteCloser{}
+	hub.registerSession(remoteAddr, 123, &sessionStream{
+		remoteAddr: remoteAddr.String(),
+		rawWriter:  writer,
+		rawCloser:  writer,
+	})
 
 	err := hub.writeToIP(123, []byte("payload"))
 	if err == nil {
@@ -67,6 +95,34 @@ func TestStreamHubWriteToIPRemovesStaleStreamOnWriteFailure(t *testing.T) {
 	err = hub.writeToIP(123, []byte("payload"))
 	if !errors.Is(err, errStreamUnavailable) {
 		t.Fatalf("expected stale stream removal after write failure, got %v", err)
+	}
+	if writer.closeCount.Load() != 1 {
+		t.Fatalf("expected broken session to be closed once, got %d", writer.closeCount.Load())
+	}
+}
+
+func TestStreamHubRegisterSessionPreservesClosableWriter(t *testing.T) {
+	hub := newStreamHub()
+	remoteAddr := &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 443}
+	oldWriter := &trackingWriteCloser{}
+	newWriter := &trackingWriteCloser{}
+
+	hub.registerSession(remoteAddr, 123, &sessionStream{
+		remoteAddr: remoteAddr.String(),
+		rawWriter:  oldWriter,
+		rawCloser:  oldWriter,
+	})
+	hub.registerSession(remoteAddr, 123, &sessionStream{
+		remoteAddr: remoteAddr.String(),
+		rawWriter:  newWriter,
+		rawCloser:  newWriter,
+	})
+
+	if oldWriter.closeCount.Load() != 1 {
+		t.Fatalf("expected replaced closable writer to be closed once, got %d", oldWriter.closeCount.Load())
+	}
+	if newWriter.closeCount.Load() != 0 {
+		t.Fatalf("expected replacement writer to remain open, got %d closes", newWriter.closeCount.Load())
 	}
 }
 
@@ -125,14 +181,13 @@ func TestSessionStreamWriteUsesFramedSerialization(t *testing.T) {
 func TestStreamHubUnregisterSessionKeepsReplacementOnSameRemoteAddr(t *testing.T) {
 	hub := newStreamHub()
 	remoteAddr := &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 443}
-	oldWriter := &bytes.Buffer{}
-	newWriter := &bytes.Buffer{}
-	oldStream := &sessionStream{remoteAddr: remoteAddr.String(), rawWriter: oldWriter}
-	newStream := &sessionStream{remoteAddr: remoteAddr.String(), rawWriter: newWriter}
+	oldWriter := &trackingWriteCloser{}
+	newWriter := &trackingWriteCloser{}
+	oldStream := &sessionStream{remoteAddr: remoteAddr.String(), rawWriter: oldWriter, rawCloser: oldWriter}
+	newStream := &sessionStream{remoteAddr: remoteAddr.String(), rawWriter: newWriter, rawCloser: newWriter}
 
 	hub.registerSession(remoteAddr, 123, oldStream)
 	hub.registerSession(remoteAddr, 123, newStream)
-	hub.unregisterSession(oldStream)
 
 	if err := hub.writeToIP(123, []byte("payload")); err != nil {
 		t.Fatalf("expected replacement stream to stay registered, got %v", err)
@@ -143,20 +198,25 @@ func TestStreamHubUnregisterSessionKeepsReplacementOnSameRemoteAddr(t *testing.T
 	if newWriter.Len() == 0 {
 		t.Fatal("expected replacement stream to receive framed payload")
 	}
+	if oldWriter.closeCount.Load() != 1 {
+		t.Fatalf("expected replaced stream to be closed once, got %d", oldWriter.closeCount.Load())
+	}
+	if newWriter.closeCount.Load() != 0 {
+		t.Fatalf("expected replacement stream to stay open, got %d closes", newWriter.closeCount.Load())
+	}
 }
 
 func TestStreamHubUnregisterSessionKeepsReplacementAcrossRemoteAddrChange(t *testing.T) {
 	hub := newStreamHub()
 	oldRemoteAddr := &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 443}
 	newRemoteAddr := &net.UDPAddr{IP: net.ParseIP("2.2.2.2"), Port: 443}
-	oldWriter := &bytes.Buffer{}
-	newWriter := &bytes.Buffer{}
-	oldStream := &sessionStream{remoteAddr: oldRemoteAddr.String(), rawWriter: oldWriter}
-	newStream := &sessionStream{remoteAddr: newRemoteAddr.String(), rawWriter: newWriter}
+	oldWriter := &trackingWriteCloser{}
+	newWriter := &trackingWriteCloser{}
+	oldStream := &sessionStream{remoteAddr: oldRemoteAddr.String(), rawWriter: oldWriter, rawCloser: oldWriter}
+	newStream := &sessionStream{remoteAddr: newRemoteAddr.String(), rawWriter: newWriter, rawCloser: newWriter}
 
 	hub.registerSession(oldRemoteAddr, 123, oldStream)
 	hub.registerSession(newRemoteAddr, 123, newStream)
-	hub.unregisterSession(oldStream)
 
 	if err := hub.writeToIP(123, []byte("payload")); err != nil {
 		t.Fatalf("expected replacement stream to stay registered after addr change, got %v", err)
@@ -166,5 +226,11 @@ func TestStreamHubUnregisterSessionKeepsReplacementAcrossRemoteAddrChange(t *tes
 	}
 	if newWriter.Len() == 0 {
 		t.Fatal("expected replacement stream to receive framed payload")
+	}
+	if oldWriter.closeCount.Load() != 1 {
+		t.Fatalf("expected replaced stream to be closed once, got %d", oldWriter.closeCount.Load())
+	}
+	if newWriter.closeCount.Load() != 0 {
+		t.Fatalf("expected replacement stream to stay open, got %d closes", newWriter.closeCount.Load())
 	}
 }

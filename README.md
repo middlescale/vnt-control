@@ -1,6 +1,6 @@
 # sdl-control
 
-`sdl-control` 是 `vnts` 的 Go 重写控制面项目，目标是将控制面与网关转发面解耦：客户端和 gateway 通过 HTTP/3 `/control` 与控制服务通信完成认证与状态同步，数据转发由独立 gateway 集群负责。
+`sdl-control` 是 `sdl` 的 控制面项目，目标是将控制面与网关转发面解耦：客户端和 gateway 通过 **QUIC bi-stream control session** 与控制服务通信完成认证与状态同步，普通 HTTP API 直接复用同一个 HTTP/3 监听口。
 
 从产品语义上看，这个项目更贴近 **SDL (Software Defined LAN)**：通过控制平面把分散在 WAN / Internet 上的节点组织成一个 overlay LAN，而不是传统 SD-WAN 的选路优化产品。
 
@@ -14,7 +14,7 @@
   - 数据包转发与中继
   - 横向扩展与高可用
 - `sdl` 客户端：
-  - 通过 HTTP/3 `/control` 与控制面交互
+  - 通过 QUIC bi-stream 与控制面交互
   - 按控制面下发信息选择/切换数据路径
 
 > 过渡说明：仓库、二进制与主要运行时命名已经切到 `sdl*`；仍有少量内部实现/历史术语保留旧命名，后续会继续收口。
@@ -29,9 +29,9 @@
 
 ## 目录结构
 
-- `main.go`：服务启动入口，加载配置、初始化 TLS、启动 HTTP/3 服务。
+- `main.go`：服务启动入口，加载配置、初始化 TLS，并在同一个 HTTP/3 监听上同时提供 `/control` 与普通 API。
 - `config/`：配置定义与默认配置文件。
-- `handlers/`：HTTP/3 / WebSocket / 状态接口处理。
+- `handlers/`：QUIC control、HTTP/3 API、WebSocket / 状态接口处理。
 - `control/`：握手、注册、虚拟 IP 分配等核心控制逻辑。
 - `protocol/`、`proto/`：协议定义与 protobuf 生成代码。
 
@@ -58,7 +58,7 @@
       }
     }
   },
-  "listen_addr": ":4433",
+  "listen_addr": ":443",
   "autocert_http_addr": ":80",
   "autocert_email": "admin@example.com",
   "cert_cache_dir": "./cert-cache"
@@ -68,6 +68,7 @@
 可选字段：
 
 - `autocert_domain`：启用 `autocert` 时用于签发证书的域名。
+- `listen_addr`：HTTP/3 监听地址，`/control` 与普通 API 共用同一端口。
 - `autocert_http_addr`：内置 ACME `HTTP-01` challenge server 监听地址，默认 `:80`。
 - `autocert_email`：ACME 账户联系邮箱，可选但推荐配置。
 - `default_domain`：创建用户时未指定域名时使用，默认建议 `ms.net`。
@@ -118,7 +119,7 @@ make build
 
 当未提供 `TLS_CERT` / `TLS_KEY` 或 `tls_cert_path` / `tls_key_path` 时，`sdl-control` 会自动进入内置 ACME 模式：
 
-- HTTP/3 控制面继续监听 `listen_addr`
+- control 与 HTTP/3 API 共用 `listen_addr`
 - 同时额外启动一个 `HTTP-01` challenge server 在 `autocert_http_addr`（默认 `:80`）
 - 证书与 ACME 账户缓存保存在 `cert_cache_dir`
 
@@ -126,7 +127,7 @@ make build
 
 - `autocert_domain` 指向当前 control 公网域名
 - 该域名的 80 端口能到达 `sdl-control`
-- `listen_addr` 对应的 HTTP/3 UDP 端口能被客户端访问
+- `listen_addr` 对应的 QUIC UDP 端口能被客户端访问
 
 示例：
 
@@ -134,7 +135,7 @@ make build
 AUTOCERT_DOMAIN=control.example.com \
 AUTOCERT_HTTP_ADDR=:80 \
 AUTOCERT_EMAIL=admin@example.com \
-LISTEN_ADDR=:4433 \
+LISTEN_ADDR=:443 \
 ./sdl-control
 ```
 
@@ -221,5 +222,5 @@ go test ./...
 ## 迁移方向（简要）
 
 1. 继续补齐与 `vnts` 对齐的控制面协议行为（认证、注册、状态同步）。
-2. 以 HTTP/3 `/control` + 证书校验作为控制面主链路。
+2. 保持 control 与普通 HTTP API 共享同一个 HTTP/3 监听入口。
 3. 将数据转发能力下沉到可集群化的 gateway 服务，实现控制面与转发面独立扩缩容。
