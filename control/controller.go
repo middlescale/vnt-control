@@ -437,6 +437,7 @@ func (c *Controller) HandleRegistrationPacketWithVirtualIPAndCapabilities(
 	clientInfo.ControlLastSeen = now
 	clientInfo.DataPlaneReachable = false
 	clientInfo.DataPlaneLastSeen = 0
+	clientInfo.PreferredChannelMode = pb.ChannelMode_CHANNEL_MODE_AUTO
 	clientInfo.VirtualIp = virtualIP
 	clientInfo.Address = remoteAddr
 	clientInfo.DevicePubKey = append(clientInfo.DevicePubKey[:0], registration.GetDevicePubKey()...)
@@ -565,6 +566,7 @@ func (c *Controller) clearStaleClientStateByDeviceID(domain, deviceID string) {
 		clientInfo.DataPlaneReachable = false
 		clientInfo.DataPlaneLastSeen = 0
 		clientInfo.ClientStatus = nil
+		clientInfo.PreferredChannelMode = pb.ChannelMode_CHANNEL_MODE_AUTO
 		netInfo.UpsertClient(virtualIP, clientInfo)
 		c.nc.IPSessions.Set(NewIpSessionKey(domain, util.Uint32ToIP(virtualIP)), clientInfo.Address)
 		changed = true
@@ -1034,6 +1036,7 @@ func (c *Controller) HandleClientStatusInfoPacket(request *protocol.Packet) erro
 			client.DataPlaneLastSeen = now
 		}
 		client.ClientStatus = clientStatus
+		client.PreferredChannelMode = status.GetPreferredChannelMode()
 		network.UpsertClient(srcIP, client)
 		return nil
 	}
@@ -2885,11 +2888,12 @@ func buildDeviceInfoList(clients map[uint32]ClientInfo, selfIP uint32) []*pb.Dev
 			continue
 		}
 		item := &pb.DeviceInfo{
-			Name:         info.Name,
-			VirtualIp:    ip,
-			DeviceId:     info.DeviceId,
-			DevicePubKey: append([]byte(nil), info.DevicePubKey...),
-			OnlineKxPub:  append([]byte(nil), info.OnlineKxPub...),
+			Name:                 info.Name,
+			VirtualIp:            ip,
+			DeviceId:             info.DeviceId,
+			DevicePubKey:         append([]byte(nil), info.DevicePubKey...),
+			OnlineKxPub:          append([]byte(nil), info.OnlineKxPub...),
+			PreferredChannelMode: info.PreferredChannelMode,
 		}
 		if info.ControlOnline {
 			item.DeviceStatus = 0
@@ -3028,6 +3032,10 @@ func (nc *NetworkControl) LeaveByRemoteAddr(remoteAddr net.Addr) {
 			}
 			client.ControlOnline = false
 			client.ControlLastSeen = now
+			client.DataPlaneReachable = false
+			client.DataPlaneLastSeen = 0
+			client.ClientStatus = nil
+			client.PreferredChannelMode = pb.ChannelMode_CHANNEL_MODE_AUTO
 			network.UpsertClient(ip, client)
 			nc.IPSessions.Set(NewIpSessionKey(network.Group, util.Uint32ToIP(ip)), remoteAddr)
 			changed = true

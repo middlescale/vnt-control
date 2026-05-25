@@ -1,6 +1,9 @@
 package control
 
-import "net"
+import (
+	"net"
+	"sdl-control/protocol/pb"
+)
 
 type NetworkInfo struct {
 	Group               string
@@ -77,6 +80,7 @@ type ClientInfo struct {
 	LastJoin int64 // Unix时间戳 (timestamp)
 
 	ClientStatus *ClientStatusInfo // 只有 DataPlaneReachable 时才有值
+	PreferredChannelMode pb.ChannelMode
 }
 
 type ClientStatusInfo struct {

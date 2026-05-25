@@ -6,6 +6,8 @@ import (
 	"sdl-control/protocol/pb"
 	"sdl-control/util"
 	"testing"
+
+	"google.golang.org/protobuf/proto"
 )
 
 func TestHandleControlPacketPingPong(t *testing.T) {
@@ -184,4 +186,77 @@ func testOnlineKxPub(label string) []byte {
 	buf := make([]byte, 32)
 	copy(buf, []byte("online-"+label))
 	return buf
+}
+
+func TestPreferredChannelModePropagation(t *testing.T) {
+	ctrl := newTestController(t)
+	defer ctrl.Stop()
+
+	// Register dev-a and dev-b
+	reqA := newBaseRegisterReq("dev-a", "node-a")
+	respA := mustRegister(t, ctrl, reqA, &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1111})
+
+	reqB := newBaseRegisterReq("dev-b", "node-b")
+	_ = mustRegister(t, ctrl, reqB, &net.UDPAddr{IP: net.ParseIP("1.1.1.2"), Port: 1112})
+
+	// 1. Client A sends status report with preferred_channel_mode = RELAY
+	statusInfo := &pb.ClientStatusInfo{
+		Source:               respA.GetVirtualIp(),
+		PreferredChannelMode: pb.ChannelMode_CHANNEL_MODE_RELAY,
+	}
+	payload, err := proto.Marshal(statusInfo)
+	if err != nil {
+		t.Fatalf("marshal status info failed: %v", err)
+	}
+
+	packet := &protocol.Packet{
+		Ver:      protocol.V2,
+		Proto:    protocol.ProtocolService,
+		AppProto: protocol.AppProtoClientStatusInfo,
+		SrcIP:    util.Uint32ToIP(respA.GetVirtualIp()),
+		Payload:  payload,
+	}
+
+	err = ctrl.HandleClientStatusInfoPacket(packet)
+	if err != nil {
+		t.Fatalf("HandleClientStatusInfoPacket failed: %v", err)
+	}
+
+	// 2. Verify that dev-a's preferred channel mode is updated in-memory
+	clientA, ok := ctrl.nc.FindClientByVirtualIP(respA.GetVirtualIp())
+	if !ok {
+		t.Fatalf("client A not found")
+	}
+	if clientA.PreferredChannelMode != pb.ChannelMode_CHANNEL_MODE_RELAY {
+		t.Fatalf("unexpected preferred channel mode for A: %v", clientA.PreferredChannelMode)
+	}
+
+	// 3. Verify that building device list for B includes A's preferred channel mode
+	devListPackets, err := ctrl.BuildPushDeviceListPacketsForPeerChange(respA.GetVirtualIp())
+	if err != nil {
+		t.Fatalf("BuildPushDeviceListPacketsForPeerChange failed: %v", err)
+	}
+
+	// We expect B to get a push packet
+	foundAInPushList := false
+	for _, pk := range devListPackets {
+		if util.IpToUint32(pk.DstIP) == clientA.VirtualIp {
+			continue // skip self-pushes
+		}
+		var devList pb.DeviceList
+		if err := proto.Unmarshal(pk.Payload, &devList); err != nil {
+			t.Fatalf("unmarshal pushed device list failed: %v", err)
+		}
+		for _, dev := range devList.GetDeviceInfoList() {
+			if dev.GetVirtualIp() == respA.GetVirtualIp() {
+				foundAInPushList = true
+				if dev.GetPreferredChannelMode() != pb.ChannelMode_CHANNEL_MODE_RELAY {
+					t.Fatalf("expected A's preferred channel mode to be RELAY in push, got %v", dev.GetPreferredChannelMode())
+				}
+			}
+		}
+	}
+	if !foundAInPushList {
+		t.Fatalf("dev-a was not found in peer pushed device lists")
+	}
 }
