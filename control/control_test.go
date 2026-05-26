@@ -217,9 +217,12 @@ func TestPreferredChannelModePropagation(t *testing.T) {
 		Payload:  payload,
 	}
 
-	err = ctrl.HandleClientStatusInfoPacket(packet)
+	changed, err := ctrl.HandleClientStatusInfoPacket(packet)
 	if err != nil {
 		t.Fatalf("HandleClientStatusInfoPacket failed: %v", err)
+	}
+	if !changed {
+		t.Fatalf("expected HandleClientStatusInfoPacket to return changed=true when PreferredChannelMode switches from default to RELAY")
 	}
 
 	// 2. Verify that dev-a's preferred channel mode is updated in-memory

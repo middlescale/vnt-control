@@ -401,9 +401,24 @@ func serveControlSession(ctrl *control.Controller, remoteAddr net.Addr, session 
 						}
 					}
 				case protocol.AppProtoClientStatusInfo:
-					err = ctrl.HandleClientStatusInfoPacket(packet)
+					changed, err := ctrl.HandleClientStatusInfoPacket(packet)
 					if err != nil {
 						log.Errorf("HandleClientStatusInfoPacket error: %v", err)
+					}
+					if changed {
+						virtualIP = ipToUint32(packet.SrcIP)
+						if pushPackets, pushErr := ctrl.BuildPushDeviceListPacketsForPeerChange(virtualIP); pushErr != nil {
+							log.Errorf("BuildPushDeviceListPacketsForPeerChange error: %v", pushErr)
+						} else {
+							for _, push := range pushPackets {
+								if push == nil || push.DstIP == nil {
+									continue
+								}
+								if err := quicStreams.writeToIP(ipToUint32(push.DstIP), push.Marshal()); err != nil {
+									log.Warnf("PushDeviceList dispatch failed: %s err=%v", push.DstIP, err)
+								}
+							}
+						}
 					}
 					startPackets, err := ctrl.BuildPunchStartPacketsFromStatus(packet)
 					if err != nil {

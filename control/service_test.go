@@ -626,10 +626,10 @@ func TestBuildPunchStartPacketsFromStatus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal dst status failed: %v", err)
 	}
-	if err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(srcReg.GetVirtualIp()), Payload: srcPayload}); err != nil {
+	if _, err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(srcReg.GetVirtualIp()), Payload: srcPayload}); err != nil {
 		t.Fatalf("update src status failed: %v", err)
 	}
-	if err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(dstReg.GetVirtualIp()), Payload: dstPayload}); err != nil {
+	if _, err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(dstReg.GetVirtualIp()), Payload: dstPayload}); err != nil {
 		t.Fatalf("update dst status failed: %v", err)
 	}
 	startPackets, err := ctrl.BuildPunchStartPacketsFromStatus(&protocol.Packet{
@@ -711,10 +711,10 @@ func TestBuildPunchStartPacketsFromStatusSkipsExistingMutualP2P(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal dst status failed: %v", err)
 	}
-	if err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(srcReg.GetVirtualIp()), Payload: srcPayload}); err != nil {
+	if _, err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(srcReg.GetVirtualIp()), Payload: srcPayload}); err != nil {
 		t.Fatalf("update src status failed: %v", err)
 	}
-	if err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(dstReg.GetVirtualIp()), Payload: dstPayload}); err != nil {
+	if _, err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(dstReg.GetVirtualIp()), Payload: dstPayload}); err != nil {
 		t.Fatalf("update dst status failed: %v", err)
 	}
 	startPackets, err := ctrl.BuildPunchStartPacketsFromStatus(&protocol.Packet{
@@ -761,10 +761,10 @@ func TestBuildPunchStartPacketsFromStatusSkipsStatusUpdateWhenOneSidedP2PExists(
 	if err != nil {
 		t.Fatalf("marshal dst status failed: %v", err)
 	}
-	if err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(srcReg.GetVirtualIp()), Payload: srcPayload}); err != nil {
+	if _, err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(srcReg.GetVirtualIp()), Payload: srcPayload}); err != nil {
 		t.Fatalf("update src status failed: %v", err)
 	}
-	if err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(dstReg.GetVirtualIp()), Payload: dstPayload}); err != nil {
+	if _, err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(dstReg.GetVirtualIp()), Payload: dstPayload}); err != nil {
 		t.Fatalf("update dst status failed: %v", err)
 	}
 	startPackets, err := ctrl.BuildPunchStartPacketsFromStatus(&protocol.Packet{
@@ -811,10 +811,10 @@ func TestBuildPunchStartPacketsFromStatusAllowsRouteTimeoutRecoveryWhenOneSidedP
 	if err != nil {
 		t.Fatalf("marshal dst status failed: %v", err)
 	}
-	if err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(srcReg.GetVirtualIp()), Payload: srcPayload}); err != nil {
+	if _, err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(srcReg.GetVirtualIp()), Payload: srcPayload}); err != nil {
 		t.Fatalf("update src status failed: %v", err)
 	}
-	if err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(dstReg.GetVirtualIp()), Payload: dstPayload}); err != nil {
+	if _, err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(dstReg.GetVirtualIp()), Payload: dstPayload}); err != nil {
 		t.Fatalf("update dst status failed: %v", err)
 	}
 	startPackets, err := ctrl.BuildPunchStartPacketsFromStatus(&protocol.Packet{
@@ -863,10 +863,10 @@ func TestBuildPunchStartPacketsFromStatusIncludesLocalEndpointsForPrivateRemoteA
 	if err != nil {
 		t.Fatalf("marshal dst status failed: %v", err)
 	}
-	if err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(srcReg.GetVirtualIp()), Payload: srcPayload}); err != nil {
+	if _, err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(srcReg.GetVirtualIp()), Payload: srcPayload}); err != nil {
 		t.Fatalf("update src status failed: %v", err)
 	}
-	if err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(dstReg.GetVirtualIp()), Payload: dstPayload}); err != nil {
+	if _, err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(dstReg.GetVirtualIp()), Payload: dstPayload}); err != nil {
 		t.Fatalf("update dst status failed: %v", err)
 	}
 	startPackets, err := ctrl.BuildPunchStartPacketsFromStatus(&protocol.Packet{
@@ -931,10 +931,10 @@ func TestBuildPunchStartPacketsFromStatusIncludesReportedLocalEndpointsForPublic
 	if err != nil {
 		t.Fatalf("marshal dst status failed: %v", err)
 	}
-	if err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(srcReg.GetVirtualIp()), Payload: srcPayload}); err != nil {
+	if _, err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(srcReg.GetVirtualIp()), Payload: srcPayload}); err != nil {
 		t.Fatalf("update src status failed: %v", err)
 	}
-	if err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(dstReg.GetVirtualIp()), Payload: dstPayload}); err != nil {
+	if _, err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(dstReg.GetVirtualIp()), Payload: dstPayload}); err != nil {
 		t.Fatalf("update dst status failed: %v", err)
 	}
 	startPackets, err := ctrl.BuildPunchStartPacketsFromStatus(&protocol.Packet{
@@ -994,10 +994,10 @@ func TestBuildPunchStartPacketsFromStatusIncludesIPv6Endpoints(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal dst status failed: %v", err)
 	}
-	if err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(srcReg.GetVirtualIp()), Payload: srcPayload}); err != nil {
+	if _, err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(srcReg.GetVirtualIp()), Payload: srcPayload}); err != nil {
 		t.Fatalf("update src status failed: %v", err)
 	}
-	if err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(dstReg.GetVirtualIp()), Payload: dstPayload}); err != nil {
+	if _, err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(dstReg.GetVirtualIp()), Payload: dstPayload}); err != nil {
 		t.Fatalf("update dst status failed: %v", err)
 	}
 	startPackets, err := ctrl.BuildPunchStartPacketsFromStatus(&protocol.Packet{
@@ -1053,10 +1053,10 @@ func TestBuildPunchStartPacketsFromStatusPrefersExplicitEndpointPairs(t *testing
 	if err != nil {
 		t.Fatalf("marshal dst status failed: %v", err)
 	}
-	if err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(srcReg.GetVirtualIp()), Payload: srcPayload}); err != nil {
+	if _, err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(srcReg.GetVirtualIp()), Payload: srcPayload}); err != nil {
 		t.Fatalf("update src status failed: %v", err)
 	}
-	if err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(dstReg.GetVirtualIp()), Payload: dstPayload}); err != nil {
+	if _, err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(dstReg.GetVirtualIp()), Payload: dstPayload}); err != nil {
 		t.Fatalf("update dst status failed: %v", err)
 	}
 	startPackets, err := ctrl.BuildPunchStartPacketsFromStatus(&protocol.Packet{
@@ -1153,10 +1153,10 @@ func TestBuildPunchStartPacketsFromStatusHonorsRetryPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal dst status failed: %v", err)
 	}
-	if err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(srcReg.GetVirtualIp()), Payload: srcPayload}); err != nil {
+	if _, err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(srcReg.GetVirtualIp()), Payload: srcPayload}); err != nil {
 		t.Fatalf("update src status failed: %v", err)
 	}
-	if err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(dstReg.GetVirtualIp()), Payload: dstPayload}); err != nil {
+	if _, err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(dstReg.GetVirtualIp()), Payload: dstPayload}); err != nil {
 		t.Fatalf("update dst status failed: %v", err)
 	}
 	pairKey := punchPairKey(srcReg.GetVirtualIp(), dstReg.GetVirtualIp())
@@ -1220,10 +1220,10 @@ func TestBuildPunchStartPacketsFromStatusManualRequestBypassesRetryPolicy(t *tes
 	if err != nil {
 		t.Fatalf("marshal dst status failed: %v", err)
 	}
-	if err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(srcReg.GetVirtualIp()), Payload: srcPayload}); err != nil {
+	if _, err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(srcReg.GetVirtualIp()), Payload: srcPayload}); err != nil {
 		t.Fatalf("update src status failed: %v", err)
 	}
-	if err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(dstReg.GetVirtualIp()), Payload: dstPayload}); err != nil {
+	if _, err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(dstReg.GetVirtualIp()), Payload: dstPayload}); err != nil {
 		t.Fatalf("update dst status failed: %v", err)
 	}
 	pairKey := punchPairKey(srcReg.GetVirtualIp(), dstReg.GetVirtualIp())
@@ -1286,10 +1286,10 @@ func TestFailedRegistrationClearsStalePunchCandidateState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal dst status failed: %v", err)
 	}
-	if err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(srcReg.GetVirtualIp()), Payload: srcPayload}); err != nil {
+	if _, err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(srcReg.GetVirtualIp()), Payload: srcPayload}); err != nil {
 		t.Fatalf("update src status failed: %v", err)
 	}
-	if err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(dstReg.GetVirtualIp()), Payload: dstPayload}); err != nil {
+	if _, err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(dstReg.GetVirtualIp()), Payload: dstPayload}); err != nil {
 		t.Fatalf("update dst status failed: %v", err)
 	}
 
@@ -1351,7 +1351,7 @@ func TestListDevicesIncludesOnlineState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal src status failed: %v", err)
 	}
-	if err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(srcReg.GetVirtualIp()), Payload: srcPayload}); err != nil {
+	if _, err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(srcReg.GetVirtualIp()), Payload: srcPayload}); err != nil {
 		t.Fatalf("update src status failed: %v", err)
 	}
 
@@ -1787,7 +1787,7 @@ func TestHandleClientStatusInfoPacket(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal client status failed: %v", err)
 	}
-	err = ctrl.HandleClientStatusInfoPacket(&protocol.Packet{
+	_, err = ctrl.HandleClientStatusInfoPacket(&protocol.Packet{
 		Proto:    protocol.ProtocolService,
 		AppProto: protocol.AppProtoClientStatusInfo,
 		SrcIP:    util.Uint32ToIP(resp.GetVirtualIp()),
@@ -1828,7 +1828,7 @@ func TestHandleClientStatusInfoPacketNoP2PRoute(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal client status failed: %v", err)
 	}
-	err = ctrl.HandleClientStatusInfoPacket(&protocol.Packet{
+	_, err = ctrl.HandleClientStatusInfoPacket(&protocol.Packet{
 		Proto:    protocol.ProtocolService,
 		AppProto: protocol.AppProtoClientStatusInfo,
 		SrcIP:    util.Uint32ToIP(resp.GetVirtualIp()),

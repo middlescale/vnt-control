@@ -962,14 +962,14 @@ func (c *Controller) HandleRefreshGatewayGrantPacket(request *protocol.Packet) (
 	}, nil
 }
 
-func (c *Controller) HandleClientStatusInfoPacket(request *protocol.Packet) error {
+func (c *Controller) HandleClientStatusInfoPacket(request *protocol.Packet) (bool, error) {
 	var status pb.ClientStatusInfo
 	if err := proto.Unmarshal(request.Payload, &status); err != nil {
-		return fmt.Errorf("ClientStatusInfo unmarshal error: %v", err)
+		return false, fmt.Errorf("ClientStatusInfo unmarshal error: %v", err)
 	}
 	srcIP := util.IpToUint32(request.SrcIP)
 	if status.GetSource() != 0 && status.GetSource() != srcIP {
-		return fmt.Errorf("client status source mismatch: %d != %d", status.GetSource(), srcIP)
+		return false, fmt.Errorf("client status source mismatch: %d != %d", status.GetSource(), srcIP)
 	}
 	now := time.Now().Unix()
 	clientStatus := &ClientStatusInfo{
@@ -1035,12 +1035,13 @@ func (c *Controller) HandleClientStatusInfoPacket(request *protocol.Packet) erro
 		if reachable {
 			client.DataPlaneLastSeen = now
 		}
+		changed := client.PreferredChannelMode != status.GetPreferredChannelMode()
 		client.ClientStatus = clientStatus
 		client.PreferredChannelMode = status.GetPreferredChannelMode()
 		network.UpsertClient(srcIP, client)
-		return nil
+		return changed, nil
 	}
-	return fmt.Errorf("client %s not registered", request.SrcIP)
+	return false, fmt.Errorf("client %s not registered", request.SrcIP)
 }
 
 func (c *Controller) BuildPunchStartPacketsFromStatus(request *protocol.Packet) ([]*protocol.Packet, error) {
