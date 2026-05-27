@@ -52,11 +52,18 @@ func (s *sessionStream) writeFramed(payload []byte) error {
 	return err
 }
 
+type cancelReader interface {
+	CancelRead(quic.StreamErrorCode)
+}
+
 func (s *sessionStream) close() error {
 	if s == nil || s.rawCloser == nil {
 		return nil
 	}
 	s.closeOnce.Do(func() {
+		if cr, ok := s.rawCloser.(cancelReader); ok {
+			cr.CancelRead(0)
+		}
 		s.closeErr = s.rawCloser.Close()
 	})
 	return s.closeErr

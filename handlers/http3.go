@@ -27,6 +27,10 @@ func (s *http3ControlSession) Write(p []byte) (int, error) {
 }
 
 func (s *http3ControlSession) Close() error {
+	var temp interface{} = s.stream
+	if cr, ok := temp.(cancelReader); ok {
+		cr.CancelRead(0)
+	}
 	readerErr := s.reader.Close()
 	streamErr := s.stream.Close()
 	if readerErr != nil {
