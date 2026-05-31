@@ -287,6 +287,7 @@ func (c *Controller) BuildClientDNSProfile(token string) *pb.DnsProfile {
 		if len(matchDomains) == 0 {
 			matchDomains = []string{domainName}
 		}
+		matchDomains = ensureGroupQualifiedMatchDomains(matchDomains, groupName, domainName)
 	case len(c.cfg.Groups) > 0:
 		gc, ok := c.cfg.Groups[token]
 		if !ok {
@@ -332,6 +333,22 @@ func (c *Controller) BuildClientDNSProfile(token string) *pb.DnsProfile {
 		Servers:      servers,
 		MatchDomains: matchDomains,
 	}
+}
+
+func ensureGroupQualifiedMatchDomains(domains []string, groupName, domainName string) []string {
+	groupName = strings.ToLower(strings.TrimSpace(groupName))
+	domainName = strings.ToLower(strings.TrimSpace(domainName))
+	if groupName == "" || domainName == "" {
+		return cloneStrings(domains)
+	}
+	qualified := groupName + "." + domainName
+	out := cloneStrings(domains)
+	for _, domain := range out {
+		if strings.EqualFold(strings.TrimSpace(domain), qualified) {
+			return out
+		}
+	}
+	return append(out, qualified)
 }
 
 func firstNonEmptyStrings(primary, fallback []string) []string {
