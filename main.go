@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"database/sql"
+	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
@@ -54,6 +55,37 @@ func main() {
 		len(cfg.Domains),
 		cfg.RequireClientCert,
 	)
+
+	databaseURL := firstNonEmpty(os.Getenv("DATABASE_URL"), cfg.DatabaseURL)
+	var db *sql.DB
+	var pgStore *store.Store
+	requiredControlVersion, err := store.LatestMigrationVersion("control")
+	if err != nil {
+		log.Fatalf("resolve required control schema version failed: %v", err)
+	}
+	if strings.TrimSpace(databaseURL) != "" {
+		pgStore, err = openPostgresStore(databaseURL)
+		if err != nil {
+			log.Fatalf("database initialization failed: %v", err)
+		}
+		defer pgStore.Close()
+		db = pgStore.DB()
+	}
+	if len(os.Args) > 1 && os.Args[1] == "migrate" {
+		if pgStore == nil {
+			log.Fatal("DATABASE_URL/database_url is required for `sdl-control migrate`")
+		}
+		if err := pgStore.ApplyMigrations(); err != nil {
+			log.Fatalf("apply database schema migrations failed: %v", err)
+		}
+		log.Infof("database schema migrations applied through %s", requiredControlVersion)
+		return
+	}
+	if pgStore != nil {
+		if err := pgStore.RequireMigration(requiredControlVersion); err != nil {
+			log.Fatalf("database schema check failed: %v", err)
+		}
+	}
 
 	listenAddr := firstNonEmpty(os.Getenv("LISTEN_ADDR"), cfg.ListenAddr)
 	if listenAddr == "" {
@@ -140,30 +172,6 @@ func main() {
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 	ctx, cancel := context.WithCancel(context.Background())
 
-	databaseURL := firstNonEmpty(os.Getenv("DATABASE_URL"), cfg.DatabaseURL)
-	var db *sql.DB
-	if strings.TrimSpace(databaseURL) != "" {
-		var pgStore *store.Store
-		var err error
-		for i := 0; i < 20; i++ {
-			pgStore, err = store.Open(databaseURL)
-			if err == nil {
-				err = pgStore.EnsureSchema()
-				if err == nil {
-					break
-				}
-				_ = pgStore.Close()
-			}
-			log.Warnf("Waiting for database to be ready... (%d/20): %v", i+1, err)
-			time.Sleep(1 * time.Second)
-		}
-		if err != nil {
-			log.Fatalf("database initialization failed: %v", err)
-		}
-		defer pgStore.Close()
-		db = pgStore.DB()
-	}
-
 	ctrl, err := control.NewController(cfg, db)
 	if err != nil {
 		log.Fatalf("create controller failed: %v", err)
@@ -225,4 +233,23 @@ func buildVersion() string {
 		}
 	}
 	return "dev"
+}
+
+func openPostgresStore(databaseURL string) (*store.Store, error) {
+	var pgStore *store.Store
+	var err error
+	for i := 0; i < 20; i++ {
+		pgStore, err = store.Open(databaseURL)
+		if err == nil {
+			if pingErr := pgStore.DB().Ping(); pingErr == nil {
+				return pgStore, nil
+			} else {
+				err = fmt.Errorf("ping database: %w", pingErr)
+			}
+			_ = pgStore.Close()
+		}
+		log.Warnf("Waiting for database to be ready... (%d/20): %v", i+1, err)
+		time.Sleep(1 * time.Second)
+	}
+	return nil, err
 }

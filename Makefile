@@ -5,7 +5,7 @@ PROTO_DIR=proto
 PROTO_FILES=$(wildcard $(PROTO_DIR)/*.proto)
 GEN_GO_DIR=protocol/pb
 
-.PHONY: all build run clean cert proto
+.PHONY: all build run clean cert proto migrate-schema
 
 all: build
 
@@ -15,6 +15,9 @@ build:
 
 run:
 	./$(APP_NAME)
+
+migrate-schema: build
+	DATABASE_URL="$(DATABASE_URL)" ./$(APP_NAME) migrate
 
 clean:
 	rm -f $(APP_NAME)

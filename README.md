@@ -95,7 +95,7 @@
 - `CONFIG_PATH`
 - `LISTEN_ADDR`
 - `TLS_CERT` / `TLS_KEY`
-- `DATABASE_URL`（可选；中心 PostgreSQL 连接串，`sdl-www` 与 `sdl-control` 共用同一实例，但各自维护不同表边界；`sdl-control` 只管理 `um_*` 控制面表）
+- `DATABASE_URL`（可选；中心 PostgreSQL 连接串，`sdl-www` 与 `sdl-control` 共用同一实例，但各自维护不同表边界；数据库 schema 迁移统一由 `sdl-control migrate` 管理）
 - `AUTOCERT_DOMAIN`
 - `AUTOCERT_HTTP_ADDR`
 - `AUTOCERT_EMAIL`
@@ -119,6 +119,15 @@ make build
 ```
 
 编译产物为当前目录下的 `./sdl-control`。
+
+如果启用了 `DATABASE_URL`，请先执行一次数据库迁移，再启动服务：
+
+```bash
+cd sdl-control
+DATABASE_URL=postgres://... make migrate-schema
+```
+
+运行中的 `sdl-control` 不再自动建表；它只会校验数据库里已经包含 `schema_migrations` 记录和自己所需的最小 schema 版本。
 
 ### 内置 ACME / 自动续期
 
@@ -150,6 +159,7 @@ LISTEN_ADDR=:443 \
 
 ```bash
 make run     # 运行已编译二进制
+make migrate-schema  # 执行统一的 PostgreSQL schema 迁移
 make clean   # 删除二进制
 make proto   # 重新生成 proto Go 代码（需安装 protoc 与插件）
 ```
