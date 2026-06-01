@@ -72,7 +72,7 @@
 - `autocert_http_addr`：内置 ACME `HTTP-01` challenge server 监听地址，默认 `:80`。
 - `autocert_email`：ACME 账户联系邮箱，可选但推荐配置。
 - `default_domain`：创建用户时未指定域名时使用，默认建议 `ms.net`。
-- `default_gateway_id`：默认下发给客户端的 gateway 身份标识。control 只按这个 `gateway_id` 选择默认网关，实际地址来自 gateway 上报并持久化保存的 `gateway_id -> endpoint` 记录。
+- `default_gateway_id`：默认下发给客户端的 gateway 身份标识。control 只按这个 `gateway_id` 选择默认网关，实际地址来自 gateway 上报并落到本地 `gateway` 状态文件的 `gateway_id -> endpoint` 记录。
 - `dns_service_ip`：为 `sdl-dns` 预留的固定虚拟 IP；可放在顶层作为默认值，也可放在 `domains.<domain>.groups.<group>` 下做 group 覆盖。普通客户端自动分配会跳过这个地址，`sdl-dns` 可在注册时显式请求它。
 - `dns_service_addr`：control 本机代理 DNS 查询时转发到的实际地址，格式为 `host:port`，默认 `127.0.0.1:53`；容器化部署时通常应配置成 `sdl-dns:53`。
 - `dns_servers`：给客户端 split DNS 下发的 DNS 服务器 IPv4 列表；可放在顶层作为默认值，也可放在 `domains.<domain>.groups.<group>` 下做覆盖。
@@ -95,6 +95,7 @@
 - `CONFIG_PATH`
 - `LISTEN_ADDR`
 - `TLS_CERT` / `TLS_KEY`
+- `DATABASE_URL`（可选；中心 PostgreSQL 连接串，`sdl-www` 与 `sdl-control` 共用同一实例，但各自维护不同表边界；`sdl-control` 只管理 `um_*` 控制面表）
 - `AUTOCERT_DOMAIN`
 - `AUTOCERT_HTTP_ADDR`
 - `AUTOCERT_EMAIL`
@@ -105,6 +106,10 @@
 - `DEBUG_COLLECT_KEEP_PER_DEVICE`（每个节点保留的历史 snapshot 数量，默认 `20`）
 - `LOG_LEVEL`
 - `ADMIN_SOCKET_PATH`（管理员命令本地 Unix Domain Socket 路径，默认 `/tmp/sdl-control-admin.sock`）
+- `ADMIN_HTTP_ADDR`（可选；给 `sdl-www` 等内网服务使用的 HTTP 管理接口监听地址，例如 `0.0.0.0:8081`，并配合防火墙限制来源）
+- `ADMIN_HTTP_TOKEN`（启用 `ADMIN_HTTP_ADDR` 时必填；内网管理接口 Bearer Token）
+- `UM_STORE_JSON_PATH`（仅在未配置 `DATABASE_URL` 时作为 JSON 存储路径）
+- `UM_STORE_MIGRATION_JSON_PATH`（可选；仅在 PostgreSQL `um_*` 表为空时，做一次性的 JSON -> DB 导入，导入后后续运行只使用数据库）
 
 ## 使用 Makefile 编译与运行
 
@@ -158,6 +163,21 @@ make proto   # 重新生成 proto Go 代码（需安装 protoc 与插件）
 
 `sdl-admin` 通过本机 Unix Domain Socket 调用控制端管理接口（默认 `/tmp/sdl-control-admin.sock`）。
 
+如果 `sdl-www` 与 `sdl-control` 分机部署，可以额外启用内网 HTTP 管理接口：
+
+- `POST /admin/v1/create_user`
+- `POST /admin/v1/issue_auth_ticket`
+- `GET /admin/v1/list_devices?user_id=<id>`
+- `POST /admin/v1/extend_device_expiry`
+
+请求头需要：
+
+```text
+Authorization: Bearer <ADMIN_HTTP_TOKEN>
+```
+
+建议只绑定局域网地址，并限制为 `sdl-www` 主机访问。
+
 示例：
 
 ```bash
@@ -188,7 +208,7 @@ make proto   # 重新生成 proto Go 代码（需安装 protoc 与插件）
 Gateway 注册/保活分为两层：
 
 - **HMAC 鉴权**：gateway 每次发送 `GatewayReportRequest` 都必须携带 `nonce + signature`。signature 覆盖 `GatewayReportProof`（`gateway_id + capabilities + report_unix_ms + nonce + gateway_channels + default_gateway_channel + gateway_udp_public_key + gateway_udp_key_id` 的 protobuf 编码），由 control 使用 `gateway_ticket_secret` 做 HMAC-SHA256 校验；control 同时对 `report_unix_ms + nonce` 执行新鲜度/重放保护。
-- **管理批准**：鉴权通过后，除配置中的 `default_gateway_id` 对应 gateway 外，其他 gateway 仍需先经 `sdl-admin gateway --enlist <id>` 批准，其 `GatewayReportRequest` 才会返回成功。默认 gateway 第一次成功上报后，control 会持久化保存该 `gateway_id` 当前的 `endpoint`，后续给客户端下发默认网关时直接读取这份映射。`sdl-admin gateway --list` 可查看默认网关、待批准上报与已批准网关状态（含 `alive` 保活状态）；`sdl-admin gateway --delist <id>` 可撤销已批准网关并触发客户端刷新。
+- **管理批准**：鉴权通过后，除配置中的 `default_gateway_id` 对应 gateway 外，其他 gateway 仍需先经 `sdl-admin gateway --enlist <id>` 批准，其 `GatewayReportRequest` 才会返回成功。默认 gateway 第一次成功上报后，control 会把该 `gateway_id` 当前的 `endpoint` 持久化到本地状态文件，后续给客户端下发默认网关时直接读取这份映射。`sdl-admin gateway --list` 可查看默认网关、待批准上报与已批准网关状态（含 `alive` 保活状态）；`sdl-admin gateway --delist <id>` 可撤销已批准网关并触发客户端刷新。
 
 control 对已批准网关采用租约保活（90 秒），并基于 `report_unix_ms + nonce` 做有限时间窗内的重放保护；超时未上报的网关不会继续被下发给客户端。
 

@@ -24,6 +24,10 @@ func TestJSONUMStorePersistsAndReloads(t *testing.T) {
 	if _, err := um.BindDeviceByEnrollment(enrollment.Code, "device-a", pub, "ed25519"); err != nil {
 		t.Fatalf("BindDeviceByEnrollment failed: %v", err)
 	}
+	tk, err := um.IssueDeviceTicket(user.UserID, "g1", time.Minute)
+	if err != nil {
+		t.Fatalf("IssueDeviceTicket failed: %v", err)
+	}
 
 	um2, err := NewUserManagerWithStore(NewJSONUMStore(path))
 	if err != nil {
@@ -45,6 +49,9 @@ func TestJSONUMStorePersistsAndReloads(t *testing.T) {
 	}
 	if policy.GroupName == "" || policy.UserGracePeriodSeconds <= 0 {
 		t.Fatalf("expected group/expiry fields after reload: %+v", policy)
+	}
+	if !um2.RequireTicketAuthForGroup(tk.GroupName) {
+		t.Fatalf("expected ticket to persist after reload")
 	}
 }
 
@@ -129,5 +136,33 @@ func TestJSONUMStorePersistsAuthedDevices(t *testing.T) {
 	}
 	if !umReloaded.IsAuthedDevice(tk.GroupName, "dev-1") {
 		t.Fatalf("expected authed device persisted")
+	}
+}
+
+func TestUserManagerRestoreNormalizesAuthedDeviceKeys(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "um-certified-normalize.json")
+	store := NewJSONUMStore(path)
+	snapshot := UMSnapshot{
+		CertifiedDevices: map[string]UMAuthDevice{
+			"dev-1": {
+				UserID:       "u-1",
+				GroupName:    "g1.ms.net",
+				DeviceID:     "dev-1",
+				PubKeyHex:    "pk",
+				AuthedAt:     time.Now(),
+				AuthExpireAt: time.Now().Add(time.Hour),
+			},
+		},
+	}
+	if err := store.Save(snapshot); err != nil {
+		t.Fatalf("Save failed: %v", err)
+	}
+
+	um, err := NewUserManagerWithStore(store)
+	if err != nil {
+		t.Fatalf("NewUserManagerWithStore failed: %v", err)
+	}
+	if !um.IsAuthedDevice("g1.ms.net", "dev-1") {
+		t.Fatalf("expected authed device lookup to use normalized group|device key")
 	}
 }

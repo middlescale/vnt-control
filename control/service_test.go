@@ -2986,6 +2986,37 @@ func TestRegistrationResponseIncludesDNSProfile(t *testing.T) {
 	}
 }
 
+func TestRegistrationResponseAddsGroupQualifiedDNSMatchDomain(t *testing.T) {
+	ctrl := newControllerWithConfig(t, &config.Config{
+		DefaultDomain:   "ms.net",
+		DNSServers:      []string{"10.26.0.53"},
+		DNSMatchDomains: []string{"ms.net"},
+		Domains: map[string]config.DomainConfig{
+			"ms.net": {
+				Groups: map[string]config.GroupConfig{
+					"default": {
+						Gateway: net.ParseIP("10.26.0.1"),
+						Netmask: "255.255.255.0",
+					},
+				},
+			},
+		},
+		DefaultGatewayID:    "gw-default",
+		GatewayTicketSecret: testGatewayTicketSecret,
+	})
+	defer ctrl.Stop()
+
+	req := newBaseRegisterReq("dev-dns-prof-default-a", "www")
+	req.Token = "default.ms.net"
+	resp := mustRegister(t, ctrl, req, &net.UDPAddr{IP: net.ParseIP("1.1.1.71"), Port: 7071})
+	if resp.GetDnsProfile() == nil {
+		t.Fatalf("expected dns profile in registration response")
+	}
+	if got, want := resp.GetDnsProfile().GetMatchDomains(), []string{"default.ms.net", "ms.net"}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("unexpected dns match domains: %v", got)
+	}
+}
+
 func TestRegistrationSkipsReservedDNSServiceIPDuringAutoAllocation(t *testing.T) {
 	ctrl := newControllerWithConfig(t, &config.Config{
 		DefaultDomain: "ms.net",
@@ -3136,7 +3167,7 @@ func newControllerWithStateDir(t *testing.T, cfg *config.Config, stateDir string
 	t.Helper()
 	t.Setenv("UM_STORE_JSON_PATH", filepath.Join(stateDir, "um.json"))
 	t.Setenv("GATEWAY_STORE_JSON_PATH", filepath.Join(stateDir, "gateways.json"))
-	ctrl, err := NewController(cfg)
+	ctrl, err := NewController(cfg, nil)
 	if err != nil {
 		t.Fatalf("NewController failed: %v", err)
 	}

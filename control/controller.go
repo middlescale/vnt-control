@@ -6,12 +6,14 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"fmt"
 	"net"
 	"net/url"
 	"os"
 	"sdl-control/config"
+	"sdl-control/control/store"
 	"sdl-control/protocol"
 	"sdl-control/protocol/pb"
 	"sdl-control/util"
@@ -26,11 +28,12 @@ import (
 )
 
 type Controller struct {
-	nc  NetworkControl
-	um  *UserManager
-	gs  *JSONGatewayStore
-	cfg *config.Config
-	mu  sync.Mutex
+	nc      NetworkControl
+	um      *UserManager
+	gs      *JSONGatewayStore
+	pgStore *store.Store
+	cfg     *config.Config
+	mu      sync.Mutex
 
 	authChallengeMu sync.Mutex
 	authChallenges  map[string]deviceAuthChallengeState
@@ -180,16 +183,24 @@ var supportedHandshakeCapabilities = map[string]struct{}{
 
 const capabilityUDPEndpointReportV1 = "udp_endpoint_report_v1"
 
-func NewController(cfg *config.Config) (*Controller, error) {
+func NewController(cfg *config.Config, db *sql.DB) (*Controller, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("config is required")
 	}
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
-	um := newUserManagerFromStore()
+	var pgStore *store.Store
+	if db != nil {
+		pgStore = store.NewWithDB(db)
+	}
+	um, err := newUserManagerFromStore(db)
+	if err != nil {
+		return nil, err
+	}
 	gatewayAllow, gatewayStore := newGatewayApprovalStateFromStore()
 	return &Controller{
+		pgStore: pgStore,
 		nc: NetworkControl{
 			VirtualNetwork:    *NewExpireMap[string, *NetworkInfo](7 * 24 * time.Hour),
 			IPSessions:        *NewExpireMap[IpSessionKey, net.Addr](24 * time.Hour),
@@ -219,7 +230,23 @@ func NewController(cfg *config.Config) (*Controller, error) {
 	}, nil
 }
 
-func newUserManagerFromStore() *UserManager {
+type umSnapshotStore interface {
+	Load() (UMSnapshot, error)
+	Save(UMSnapshot) error
+}
+
+func newUserManagerFromStore(db *sql.DB) (*UserManager, error) {
+	if db != nil {
+		pgStore := NewPostgresUMStore(db)
+		snapshot, err := loadUMSnapshotForPostgresStore(pgStore)
+		if err != nil {
+			return nil, err
+		}
+		um := NewUserManager()
+		um.store = pgStore
+		um.restore(snapshot)
+		return um, nil
+	}
 	path := os.Getenv("UM_STORE_JSON_PATH")
 	if path == "" {
 		path = "./data/um.json"
@@ -227,9 +254,46 @@ func newUserManagerFromStore() *UserManager {
 	um, err := NewUserManagerWithStore(NewJSONUMStore(path))
 	if err != nil {
 		log.Warnf("load user manager from json failed (%s): %v; fallback to memory", path, err)
-		return NewUserManager()
+		return NewUserManager(), nil
 	}
-	return um
+	return um, nil
+}
+
+func loadUMSnapshotForPostgresStore(store umSnapshotStore) (UMSnapshot, error) {
+	snapshot, err := store.Load()
+	if err != nil {
+		return UMSnapshot{}, fmt.Errorf("load user manager from postgres: %w", err)
+	}
+	if !isEmptyUMSnapshot(snapshot) {
+		return snapshot, nil
+	}
+	migrationPath := os.Getenv("UM_STORE_MIGRATION_JSON_PATH")
+	if migrationPath == "" {
+		return snapshot, nil
+	}
+	seedSnapshot, err := NewJSONUMStore(migrationPath).Load()
+	if err != nil {
+		return UMSnapshot{}, fmt.Errorf("load user manager migration snapshot (%s): %w", migrationPath, err)
+	}
+	if isEmptyUMSnapshot(seedSnapshot) {
+		return snapshot, nil
+	}
+	if err := store.Save(seedSnapshot); err != nil {
+		return UMSnapshot{}, fmt.Errorf("seed user manager from json (%s): %w", migrationPath, err)
+	}
+	log.Infof("seeded postgres user manager from %s", migrationPath)
+	return seedSnapshot, nil
+}
+
+func isEmptyUMSnapshot(snapshot UMSnapshot) bool {
+	return snapshot.UserSeq == 0 &&
+		snapshot.EnrollmentSeq == 0 &&
+		len(snapshot.Users) == 0 &&
+		len(snapshot.Policies) == 0 &&
+		len(snapshot.Enrollments) == 0 &&
+		len(snapshot.DeviceByPubKey) == 0 &&
+		len(snapshot.CertifiedDevices) == 0 &&
+		len(snapshot.DeviceTickets) == 0
 }
 
 func newGatewayApprovalStateFromStore() (map[string]string, *JSONGatewayStore) {
@@ -255,8 +319,6 @@ func newGatewayApprovalStateFromStore() (map[string]string, *JSONGatewayStore) {
 	return approved, store
 }
 
-
-
 func newDebugSnapshotStore(cfg *config.Config) *DebugSnapshotStore {
 	path := strings.TrimSpace(os.Getenv("DEBUG_COLLECT_DIR"))
 	if path == "" && cfg != nil {
@@ -278,9 +340,6 @@ func newDebugSnapshotStore(cfg *config.Config) *DebugSnapshotStore {
 }
 
 func (c *Controller) persistGatewayApprovalLocked() {
-	if c.gs == nil {
-		return
-	}
 	snapshot := GatewayStoreSnapshot{
 		Approved: make(map[string]string, len(c.gatewayAllow)),
 	}
@@ -292,9 +351,15 @@ func (c *Controller) persistGatewayApprovalLocked() {
 		}
 		snapshot.Approved[gatewayID] = endpoint
 	}
-	if err := c.gs.Save(snapshot); err != nil {
-		log.Warnf("persist gateway approval store failed: %v", err)
+	if c.gs != nil {
+		if err := c.gs.Save(snapshot); err != nil {
+			log.Warnf("persist gateway approval store (json) failed: %v", err)
+		}
 	}
+}
+
+func (c *Controller) PgStore() *store.Store {
+	return c.pgStore
 }
 
 func (c *Controller) Stop() {
@@ -1503,6 +1568,7 @@ func (c *Controller) HandleControlPacket(request *protocol.Packet, remoteAddr ne
 		}
 		epoch := c.nc.TouchClientByIP(request.SrcIP)
 		if epoch == 0 {
+			log.Warnf("received control ping from srcIP=%s but client touch failed, sending disconnect packet", request.SrcIP)
 			return c.buildDisconnectPacket(request), nil
 		}
 		payload := protocol.BuildPingPayload(pingTime, epoch)
@@ -2486,7 +2552,6 @@ func (c *Controller) syncGatewayGrantPolicyLocked(nodes []GatewayNodeInfo) (uint
 	}
 	return c.gatewayGrantPolicyRev, true
 }
-
 
 func selectPrimaryGatewayGrant(grants []*pb.GatewayAccessGrant) *pb.GatewayAccessGrant {
 	if len(grants) == 0 {

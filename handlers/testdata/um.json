@@ -1,0 +1,10 @@
+{
+  "user_seq": 0,
+  "enrollment_seq": 0,
+  "users": {},
+  "policies": {},
+  "enrollments": {},
+  "device_by_pub_key": {},
+  "certified_devices": {},
+  "device_tickets": {}
+}

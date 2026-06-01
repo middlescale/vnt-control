@@ -27,6 +27,9 @@ type Config struct {
 	GatewayTicketSecret       string                  `json:"gateway_ticket_secret"`
 	DNSServiceAddr            string                  `json:"dns_service_addr,omitempty"`
 	ListenAddr                string                  `json:"listen_addr"`
+	AdminHTTPAddr             string                  `json:"admin_http_addr,omitempty"`
+	AdminHTTPToken            string                  `json:"admin_http_token,omitempty"`
+	DatabaseURL               string                  `json:"database_url,omitempty"`
 	AutoCertDomain            string                  `json:"autocert_domain"`
 	AutoCertHTTPAddr          string                  `json:"autocert_http_addr"`
 	AutoCertEmail             string                  `json:"autocert_email"`

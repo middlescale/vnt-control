@@ -133,6 +133,21 @@ func TestIssueAndAuthDeviceTicket(t *testing.T) {
 	}
 }
 
+func TestCreateUserWithIDIsIdempotent(t *testing.T) {
+	um := NewUserManager()
+	user1, err := um.CreateUserWithID("user-1", "ms.net", "g1.ms.net")
+	if err != nil {
+		t.Fatalf("CreateUserWithID first failed: %v", err)
+	}
+	user2, err := um.CreateUserWithID("user-1", "ms.net", "g1.ms.net")
+	if err != nil {
+		t.Fatalf("CreateUserWithID second failed: %v", err)
+	}
+	if user1.UserID != user2.UserID {
+		t.Fatalf("expected same user id, got %s and %s", user1.UserID, user2.UserID)
+	}
+}
+
 func TestIssueDeviceTicketExpiry(t *testing.T) {
 	um := NewUserManager()
 	user, _ := um.CreateUser("ticket-user-expire")

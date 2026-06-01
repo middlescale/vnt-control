@@ -257,6 +257,16 @@ func handleSession(ctrl *control.Controller, conn *quic.Conn) {
 }
 
 func serveControlSession(ctrl *control.Controller, remoteAddr net.Addr, session framedSession) {
+	log.Debugf("serveControlSession started for remoteAddr=%s", remoteAddr.String())
+	var loopErr error
+	defer func() {
+		if loopErr != nil {
+			log.Warnf("serveControlSession ended for remoteAddr=%s, error=%v", remoteAddr.String(), loopErr)
+		} else {
+			log.Debugf("serveControlSession ended for remoteAddr=%s", remoteAddr.String())
+		}
+	}()
+
 	ctrl.TouchCipherSession(remoteAddr)
 	var sessionCapabilities []string
 	sessionWriter := &sessionStream{
@@ -277,6 +287,7 @@ func serveControlSession(ctrl *control.Controller, remoteAddr net.Addr, session 
 				break
 			}
 			log.Warnf("Read error: %v", err)
+			loopErr = err
 			break
 		}
 		if n > 0 {
@@ -343,6 +354,7 @@ func serveControlSession(ctrl *control.Controller, remoteAddr net.Addr, session 
 						}
 						if writeErr := sessionWriter.writeFramed(errPacket.Marshal()); writeErr != nil {
 							log.Errorf("send registration error packet failed: %v", writeErr)
+							loopErr = writeErr
 							return
 						}
 						continue
@@ -512,6 +524,7 @@ func serveControlSession(ctrl *control.Controller, remoteAddr net.Addr, session 
 				}
 				if err := sessionWriter.writeFramed(respPacket.Marshal()); err != nil {
 					log.Errorf("Write ServiceResponse error: %v", err)
+					loopErr = err
 					return
 				}
 				for _, push := range deferredPushPackets {
@@ -532,7 +545,8 @@ func serveControlSession(ctrl *control.Controller, remoteAddr net.Addr, session 
 					continue
 				}
 				if err := sessionWriter.writeFramed(respPacket.Marshal()); err != nil {
-					log.Errorf("Write ControlResponse error: %v", err)
+					log.Warnf("failed to write control response to %s: %v", remoteAddr.String(), err)
+					loopErr = err
 					return
 				}
 			} else {

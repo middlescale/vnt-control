@@ -1,0 +1,252 @@
+package handlers
+
+import (
+	"encoding/json"
+	"strings"
+	"time"
+
+	"sdl-control/control"
+	"sdl-control/util"
+
+	log "github.com/sirupsen/logrus"
+)
+
+func executeAdminRequest(ctrl *control.Controller, req adminRequest) adminResponse {
+	switch req.Action {
+	case "create_user":
+		user, err := ctrl.UMCreateUserWithID(strings.TrimSpace(req.UserID), strings.TrimSpace(req.Group), strings.TrimSpace(req.Domain))
+		if err != nil {
+			return adminResponse{OK: false, Error: err.Error()}
+		}
+		return adminResponse{OK: true, UserID: user.UserID, Name: user.Name, Domain: user.Domain}
+	case "issue_device_ticket", "issue_auth_ticket":
+		group := strings.TrimSpace(req.Group)
+		if group == "" {
+			group = "default.ms.net"
+		}
+		ttl := req.TTLSeconds
+		if ttl <= 0 {
+			ttl = 300
+		}
+		t, err := ctrl.UMIssueDeviceTicket(strings.TrimSpace(req.UserID), group, time.Duration(ttl)*time.Second)
+		if err != nil {
+			return adminResponse{OK: false, Error: err.Error()}
+		}
+		return adminResponse{OK: true, Ticket: t.Ticket, ExpireAtUnix: t.ExpireAt.Unix()}
+	case "register_gateway", "gateway_enlist":
+		gatewayID := strings.TrimSpace(req.GatewayID)
+		if gatewayID == "" {
+			return adminResponse{OK: false, Error: "gateway_id required"}
+		}
+		if err := ctrl.ApproveGatewayNodeByID(gatewayID); err != nil {
+			return adminResponse{OK: false, Error: err.Error()}
+		}
+		if pushPackets, pushErr := ctrl.BuildPushDeviceListPacketsForGatewayChangeIfNeeded(); pushErr != nil {
+			log.Errorf("BuildPushDeviceListPacketsForGatewayChangeIfNeeded error: %v", pushErr)
+		} else {
+			for _, push := range pushPackets {
+				if push == nil || push.DstIP == nil {
+					continue
+				}
+				if err := quicStreams.writeToIP(util.IpToUint32(push.DstIP), push.Marshal()); err != nil {
+					log.Warnf("PushDeviceList dispatch failed: %s err=%v", push.DstIP, err)
+				}
+			}
+		}
+		return adminResponse{OK: true}
+	case "delist_gateway", "gateway_delist":
+		gatewayID := strings.TrimSpace(req.GatewayID)
+		if gatewayID == "" {
+			return adminResponse{OK: false, Error: "gateway_id required"}
+		}
+		if err := ctrl.DelistGatewayNodeByID(gatewayID); err != nil {
+			return adminResponse{OK: false, Error: err.Error()}
+		}
+		if pushPackets, pushErr := ctrl.BuildPushDeviceListPacketsForGatewayChangeIfNeeded(); pushErr != nil {
+			log.Errorf("BuildPushDeviceListPacketsForGatewayChangeIfNeeded error: %v", pushErr)
+		} else {
+			for _, push := range pushPackets {
+				if push == nil || push.DstIP == nil {
+					continue
+				}
+				if err := quicStreams.writeToIP(util.IpToUint32(push.DstIP), push.Marshal()); err != nil {
+					log.Warnf("PushDeviceList dispatch failed: %s err=%v", push.DstIP, err)
+				}
+			}
+		}
+		return adminResponse{OK: true}
+	case "list_gateway", "gateway_list":
+		return adminResponse{OK: true, Gateways: ctrl.ListGateways()}
+	case "list_device", "list_devices":
+		userID := strings.TrimSpace(req.UserID)
+		if userID == "" {
+			return adminResponse{OK: false, Error: "user_id required"}
+		}
+		return adminResponse{OK: true, Devices: ctrl.ListDevices(userID)}
+	case "extend_device_expiry":
+		userID := strings.TrimSpace(req.UserID)
+		if userID == "" {
+			return adminResponse{OK: false, Error: "user_id required"}
+		}
+		ttl := req.TTLSeconds
+		if ttl <= 0 {
+			ttl = int64((30 * 24 * time.Hour).Seconds())
+		}
+		updated, err := ctrl.UMExtendAuthedDeviceExpiry(
+			userID,
+			strings.TrimSpace(req.Group),
+			strings.TrimSpace(req.DeviceID),
+			time.Duration(ttl)*time.Second,
+			req.All,
+		)
+		if err != nil {
+			return adminResponse{OK: false, Error: err.Error()}
+		}
+		devices := ctrl.ListDevices(userID)
+		return adminResponse{
+			OK:             true,
+			Devices:        devices,
+			UpdatedDevices: selectUpdatedDeviceViews(updated, devices),
+			UpdatedCount:   len(updated),
+		}
+	case "approve_device_rename":
+		appliedName, changedIP, err := ctrl.ApprovePendingDeviceRename(
+			strings.TrimSpace(req.DeviceID),
+			strings.TrimSpace(req.UserID),
+			strings.TrimSpace(req.Group),
+		)
+		if err != nil {
+			return adminResponse{OK: false, Error: err.Error()}
+		}
+		notifyRename(ctrl, changedIP, appliedName)
+		return adminResponse{OK: true, Name: appliedName}
+	case "rename_device":
+		appliedName, changedIP, err := ctrl.RenameDeviceByAdmin(
+			strings.TrimSpace(req.DeviceID),
+			strings.TrimSpace(req.UserID),
+			strings.TrimSpace(req.Group),
+			strings.TrimSpace(req.Name),
+		)
+		if err != nil {
+			return adminResponse{OK: false, Error: err.Error()}
+		}
+		notifyRename(ctrl, changedIP, appliedName)
+		return adminResponse{OK: true, Name: appliedName}
+	case "dns_domains":
+		return adminResponse{OK: true, Domains: ctrl.ListDNSDomains()}
+	case "dns_snapshot":
+		domain := strings.TrimSpace(req.Domain)
+		snapshot, err := ctrl.BuildDNSSnapshot(domain, strings.TrimSpace(req.Group))
+		if err != nil {
+			return adminResponse{OK: false, Error: err.Error()}
+		}
+		return adminResponse{OK: true, DNSSnapshot: snapshot}
+	case "collect_debug":
+		timeoutSec := req.TimeoutSec
+		if timeoutSec <= 0 {
+			timeoutSec = 10
+		}
+		packet, targetIP, requestID, err := ctrl.PrepareDebugCollectByName(
+			strings.TrimSpace(req.Name),
+			strings.TrimSpace(req.UserID),
+			strings.TrimSpace(req.Group),
+			req.Sections,
+		)
+		if err != nil {
+			return adminResponse{OK: false, Error: err.Error()}
+		}
+		if err := quicStreams.writeToIP(targetIP, packet.Marshal()); err != nil {
+			ctrl.CancelDebugCollect(requestID)
+			return adminResponse{OK: false, Error: err.Error()}
+		}
+		result, err := ctrl.AwaitDebugCollect(requestID, time.Duration(timeoutSec)*time.Second)
+		if err != nil {
+			return adminResponse{OK: false, Error: err.Error()}
+		}
+		raw := json.RawMessage(result.SnapshotJSON)
+		if !json.Valid(raw) {
+			raw, err = json.Marshal(map[string]string{"raw": result.SnapshotJSON})
+			if err != nil {
+				return adminResponse{OK: false, Error: err.Error()}
+			}
+		}
+		return adminResponse{OK: true, DebugResult: raw, DebugPath: result.SavedPath}
+	case "start_debug_watch":
+		timeoutSec := req.TimeoutSec
+		if timeoutSec <= 0 {
+			timeoutSec = 10
+		}
+		durationSec := req.DurationSec
+		if durationSec <= 0 {
+			durationSec = 300
+		}
+		packet, targetIP, requestID, err := ctrl.PrepareDebugWatchStartByName(
+			strings.TrimSpace(req.Name),
+			strings.TrimSpace(req.UserID),
+			strings.TrimSpace(req.Group),
+			req.Sections,
+			time.Duration(durationSec)*time.Second,
+		)
+		if err != nil {
+			return adminResponse{OK: false, Error: err.Error()}
+		}
+		if err := quicStreams.writeToIP(targetIP, packet.Marshal()); err != nil {
+			ctrl.CancelDebugWatchStart(requestID)
+			return adminResponse{OK: false, Error: err.Error()}
+		}
+		result, err := ctrl.AwaitDebugWatchStart(requestID, time.Duration(timeoutSec)*time.Second)
+		if err != nil {
+			return adminResponse{OK: false, Error: err.Error()}
+		}
+		return adminResponse{OK: true, DebugWatchID: result.WatchID, DebugPath: result.SavedPath}
+	case "stop_debug_watch":
+		timeoutSec := req.TimeoutSec
+		if timeoutSec <= 0 {
+			timeoutSec = 10
+		}
+		packet, targetIP, requestID, err := ctrl.PrepareDebugWatchStopByName(
+			strings.TrimSpace(req.Name),
+			strings.TrimSpace(req.UserID),
+			strings.TrimSpace(req.Group),
+		)
+		if err != nil {
+			return adminResponse{OK: false, Error: err.Error()}
+		}
+		if err := quicStreams.writeToIP(targetIP, packet.Marshal()); err != nil {
+			ctrl.CancelDebugWatchStop(requestID)
+			return adminResponse{OK: false, Error: err.Error()}
+		}
+		result, err := ctrl.AwaitDebugWatchStop(requestID, time.Duration(timeoutSec)*time.Second)
+		if err != nil {
+			return adminResponse{OK: false, Error: err.Error()}
+		}
+		return adminResponse{OK: true, DebugWatchID: result.WatchID, DebugPath: result.SavedPath}
+	default:
+		return adminResponse{OK: false, Error: "unsupported action"}
+	}
+}
+
+func notifyRename(ctrl *control.Controller, changedIP uint32, appliedName string) {
+	if changedIP == 0 {
+		return
+	}
+	if pushPackets, pushErr := ctrl.BuildPushDeviceListPacketsForPeerChange(changedIP); pushErr != nil {
+		log.Errorf("BuildPushDeviceListPacketsForPeerChange error: %v", pushErr)
+	} else {
+		for _, push := range pushPackets {
+			if push == nil || push.DstIP == nil {
+				continue
+			}
+			if err := quicStreams.writeToIP(util.IpToUint32(push.DstIP), push.Marshal()); err != nil {
+				log.Warnf("PushDeviceList dispatch failed: %s err=%v", push.DstIP, err)
+			}
+		}
+	}
+	if notifyPacket, notifyErr := ctrl.BuildDeviceRenameNotifyPacket(changedIP, 0, appliedName); notifyErr != nil {
+		log.Errorf("BuildDeviceRenameNotifyPacket error: %v", notifyErr)
+	} else if notifyPacket != nil {
+		if err := quicStreams.writeToIP(changedIP, notifyPacket.Marshal()); err != nil {
+			log.Warnf("DeviceRenameResponse dispatch failed: %s err=%v", util.Uint32ToIP(changedIP), err)
+		}
+	}
+}

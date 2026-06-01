@@ -56,6 +56,7 @@ type UMDeviceTicket struct {
 	GroupName string
 	ExpireAt  time.Time
 	Used      bool
+	CreatedAt time.Time
 }
 
 type UMAuthDevice struct {
@@ -114,6 +115,8 @@ func (m *UserManager) CreateUser(name string, domain ...string) (UMUser, error) 
 	if len(domain) > 0 && strings.TrimSpace(domain[0]) != "" {
 		userDomain = strings.TrimSpace(domain[0])
 	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	id := ""
 	for {
 		candidate := fmt.Sprintf("u-%d", m.userSeq.Add(1))
@@ -128,11 +131,9 @@ func (m *UserManager) CreateUser(name string, domain ...string) (UMUser, error) 
 		Domain:    userDomain,
 		CreatedAt: time.Now(),
 	}
-	m.mu.Lock()
 	m.users[id] = user
 	m.policies[id] = m.generateBasicPolicyLocked(id)
 	err := m.saveLocked()
-	m.mu.Unlock()
 	if err != nil {
 		return UMUser{}, err
 	}
@@ -163,9 +164,21 @@ func (m *UserManager) CreateUserWithID(userID string, domain string, group strin
 		CreatedAt: time.Now(),
 	}
 	m.mu.Lock()
-	if _, exists := m.users[userID]; exists {
-		m.mu.Unlock()
-		return UMUser{}, fmt.Errorf("user %s already exists", userID)
+	defer m.mu.Unlock()
+	if existing, exists := m.users[userID]; exists {
+		if existing.Domain != userDomain {
+			return UMUser{}, fmt.Errorf("user %s already exists", userID)
+		}
+		if _, ok := m.policies[userID]; !ok {
+			policy := m.generateBasicPolicyLocked(userID)
+			policy.GroupName = normalizedGroup
+			policy.UpdatedAt = time.Now()
+			m.policies[userID] = policy
+			if err := m.saveLocked(); err != nil {
+				return UMUser{}, err
+			}
+		}
+		return existing, nil
 	}
 	m.users[userID] = user
 	policy := m.generateBasicPolicyLocked(userID)
@@ -173,7 +186,6 @@ func (m *UserManager) CreateUserWithID(userID string, domain string, group strin
 	policy.UpdatedAt = time.Now()
 	m.policies[userID] = policy
 	err = m.saveLocked()
-	m.mu.Unlock()
 	if err != nil {
 		return UMUser{}, err
 	}
@@ -326,8 +338,12 @@ func (m *UserManager) IssueDeviceTicket(userID string, groupName string, ttl tim
 		UserID:    userID,
 		GroupName: fullGroupName,
 		ExpireAt:  time.Now().Add(ttl),
+		CreatedAt: time.Now(),
 	}
 	m.deviceTickets[ticket.Ticket] = ticket
+	if err := m.saveLocked(); err != nil {
+		return UMDeviceTicket{}, err
+	}
 	return ticket, nil
 }
 
@@ -602,6 +618,7 @@ func (m *UserManager) snapshotLocked() UMSnapshot {
 		Enrollments:      cloneEnrollments(m.enrollments),
 		DeviceByPubKey:   cloneDevices(m.deviceByPubKey),
 		CertifiedDevices: cloneAuthedDevices(m.authedDevices),
+		DeviceTickets:    cloneDeviceTickets(m.deviceTickets),
 	}
 }
 
@@ -620,6 +637,7 @@ func (m *UserManager) restore(snapshot UMSnapshot) {
 	m.enrollments = cloneEnrollments(snapshot.Enrollments)
 	m.deviceByPubKey = cloneDevices(snapshot.DeviceByPubKey)
 	m.authedDevices = cloneAuthedDevices(snapshot.CertifiedDevices)
+	m.deviceTickets = cloneDeviceTickets(snapshot.DeviceTickets)
 }
 
 func cloneUsers(src map[string]UMUser) map[string]UMUser {
@@ -656,6 +674,18 @@ func clonePolicies(src map[string]UMPolicy) map[string]UMPolicy {
 
 func cloneAuthedDevices(src map[string]UMAuthDevice) map[string]UMAuthDevice {
 	dst := make(map[string]UMAuthDevice, len(src))
+	for k, v := range src {
+		key := k
+		if strings.TrimSpace(v.DeviceID) != "" {
+			key = authedDeviceKey(strings.TrimSpace(v.GroupName), strings.TrimSpace(v.DeviceID))
+		}
+		dst[key] = v
+	}
+	return dst
+}
+
+func cloneDeviceTickets(src map[string]UMDeviceTicket) map[string]UMDeviceTicket {
+	dst := make(map[string]UMDeviceTicket, len(src))
 	for k, v := range src {
 		dst[k] = v
 	}

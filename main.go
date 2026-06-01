@@ -4,16 +4,19 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"database/sql"
 	"net/http"
 	"os"
 	"os/signal"
 	"runtime/debug"
 	"sdl-control/config"
 	"sdl-control/control"
+	"sdl-control/control/store"
 	"sdl-control/handlers"
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/acme/autocert"
@@ -137,7 +140,31 @@ func main() {
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 	ctx, cancel := context.WithCancel(context.Background())
 
-	ctrl, err := control.NewController(cfg)
+	databaseURL := firstNonEmpty(os.Getenv("DATABASE_URL"), cfg.DatabaseURL)
+	var db *sql.DB
+	if strings.TrimSpace(databaseURL) != "" {
+		var pgStore *store.Store
+		var err error
+		for i := 0; i < 20; i++ {
+			pgStore, err = store.Open(databaseURL)
+			if err == nil {
+				err = pgStore.EnsureSchema()
+				if err == nil {
+					break
+				}
+				_ = pgStore.Close()
+			}
+			log.Warnf("Waiting for database to be ready... (%d/20): %v", i+1, err)
+			time.Sleep(1 * time.Second)
+		}
+		if err != nil {
+			log.Fatalf("database initialization failed: %v", err)
+		}
+		defer pgStore.Close()
+		db = pgStore.DB()
+	}
+
+	ctrl, err := control.NewController(cfg, db)
 	if err != nil {
 		log.Fatalf("create controller failed: %v", err)
 	}
@@ -145,6 +172,16 @@ func main() {
 	adminSocket := firstNonEmpty(os.Getenv("ADMIN_SOCKET_PATH"), "/tmp/sdl-control-admin.sock")
 	if err := handlers.StartAdminUnixServer(ctx, ctrl, adminSocket); err != nil {
 		log.Fatalf("start admin unix socket failed: %v", err)
+	}
+	adminHTTPAddr := firstNonEmpty(os.Getenv("ADMIN_HTTP_ADDR"), cfg.AdminHTTPAddr)
+	adminHTTPToken := firstNonEmpty(os.Getenv("ADMIN_HTTP_TOKEN"), cfg.AdminHTTPToken)
+	if strings.TrimSpace(adminHTTPAddr) != "" {
+		if strings.TrimSpace(adminHTTPToken) == "" {
+			log.Fatalf("ADMIN_HTTP_TOKEN/admin_http_token is required when admin_http_addr is enabled")
+		}
+		if err := handlers.StartAdminHTTPServer(ctx, ctrl, adminHTTPAddr, adminHTTPToken); err != nil {
+			log.Fatalf("start admin http server failed: %v", err)
+		}
 	}
 	if autocertHTTPHandler != nil {
 		if err := handlers.StartHTTPServer(ctx, autocertHTTPAddr, autocertHTTPHandler); err != nil {

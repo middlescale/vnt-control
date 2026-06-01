@@ -29,6 +29,8 @@
         }
     },
     "listen_addr": ":443",
+    "admin_http_addr": "",
+    "admin_http_token": "",
     "autocert_http_addr": ":80",
     "autocert_email": "admin@middlescale.com",
     "cert_cache_dir": "./cert-cache"
